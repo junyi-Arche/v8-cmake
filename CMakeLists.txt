@@ -1,9 +1,7 @@
-cmake_minimum_required(VERSION 3.4)
+cmake_minimum_required(VERSION 3.12)
 set(CMAKE_USER_MAKE_RULES_OVERRIDE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/MSVC.cmake")
 set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
 project(V8 LANGUAGES CXX C ASM)
-
-option(V8CMAKE_FIND_PYTHON "Enable finding python" ON)
 
 if(MSVC)
   enable_language(ASM_MASM)
@@ -27,9 +25,7 @@ endif()
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 set(THREADS_PREFER_PTHREAD_FLAG ON)
 
-if (V8CMAKE_FIND_PYTHON)
-  find_package(Python 3 REQUIRED QUIET COMPONENTS Interpreter)
-endif()
+find_package(Python3 COMPONENTS Interpreter)
 find_package(Threads QUIET)
 
 include(CMakeDependentOption)
@@ -731,7 +727,7 @@ add_custom_command(
 
 add_custom_command(
   COMMAND
-    Python::Interpreter
+    Python3::Interpreter
     v8/third_party/inspector_protocol/code_generator.py
     --config v8/src/inspector/inspector_protocol_config.json
     --config_value protocol.path=v8/include/js_protocol.pdl
