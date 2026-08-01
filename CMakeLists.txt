@@ -1019,12 +1019,10 @@ add_custom_command(
 )
 
 
-add_custom_command(
-  COMMAND
-    ${CMAKE_COMMAND} -E make_directory ${torque_dirs}
-  OUTPUT
-    ${torque_dirs}
-)
+# 在 configure 阶段直接创建 torque 输出目录
+# 原 add_custom_command 以目录作为 OUTPUT 会导致 MSBuild 的 MSB8065 警告，
+# 进而破坏增量编译，每次构建都会重跑 torque 并重编译全部 V8 代码。
+file(MAKE_DIRECTORY ${torque_dirs})
 
 #
 # torque

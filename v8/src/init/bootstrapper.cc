@@ -2784,6 +2784,12 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
   InstallError(isolate_, global, factory->TypeError_string(),
                Context::TYPE_ERROR_FUNCTION_INDEX);
 
+  // -- H i e r a r c h y R e q u e s t E r r o r
+  InstallError(isolate_, global,
+             factory->InternalizeString(base::StaticCharVector("HierarchyRequestError")),
+             Context::HIERARCHY_REQUEST_ERROR_FUNCTION_INDEX);
+
+
   // -- U R I E r r o r
   InstallError(isolate_, global, factory->URIError_string(),
                Context::URI_ERROR_FUNCTION_INDEX);

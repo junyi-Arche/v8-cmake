@@ -1587,7 +1587,7 @@ void ValueMirror::getInternalProperties(
   v8::MicrotasksScope microtasksScope(context,
                                       v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::TryCatch tryCatch(isolate);
-  if (object->IsFunction()) {
+  if (object->IsFunction() && !object->IsUndetectable()) {
     v8::Local<v8::Function> function = object.As<v8::Function>();
     auto location = LocationMirror::create(function);
     if (location) {
@@ -1766,7 +1766,18 @@ std::unique_ptr<ValueMirror> ValueMirror::create(v8::Local<v8::Context> context,
         descriptionForProxy(isolate, value.As<v8::Proxy>()));
   }
   if (value->IsFunction()) {
-    return std::make_unique<FunctionMirror>(value);
+    // pyv8web: callable + undetectable objects (e.g. document.all) should be
+    // displayed as objects, not functions.  In real browsers, document.all is
+    // special-cased to show as HTMLAllCollection despite being callable.
+    // V8's IsFunction() checks IsCallable(), so any object with a call handler
+    // (SetCallAsFunctionHandler) is treated as a function.  We skip the
+    // FunctionMirror path for undetectable callable objects so DevTools shows
+    // them with their real class name instead of "ƒ () { [native code] }".
+    if (value->IsObject() && value.As<v8::Object>()->IsUndetectable()) {
+      // fall through to generic object handling below
+    } else {
+      return std::make_unique<FunctionMirror>(value);
+    }
   }
   if (value->IsDate()) {
     return std::make_unique<ObjectMirror>(

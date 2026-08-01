@@ -344,7 +344,9 @@ Response V8DeepSerializer::serializeV8Value(
         "type", protocol::Runtime::DeepSerializedValue::TypeEnum::Arraybuffer);
     return Response::Success();
   }
-  if (value->IsFunction()) {
+  if (value->IsFunction() &&
+      !(value->IsObject() &&
+        value.As<v8::Object>()->IsUndetectable())) {
     result.setString(
         "type", protocol::Runtime::DeepSerializedValue::TypeEnum::Function);
     return Response::Success();

@@ -115,7 +115,9 @@ class V8ValueStringBuilder {
       m_builder.append("[object Proxy]");
       return true;
     }
-    if (value->IsObject() && !value->IsDate() && !value->IsFunction() &&
+    if (value->IsObject() && !value->IsDate() &&
+        (!value->IsFunction() ||
+         value.As<v8::Object>()->IsUndetectable()) &&
         !value->IsNativeError() && !value->IsRegExp()) {
       v8::Local<v8::Object> object = value.As<v8::Object>();
       v8::Local<v8::String> stringValue;

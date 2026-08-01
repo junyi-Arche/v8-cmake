@@ -383,7 +383,10 @@ enum ContextLookupFlags {
   V(WRAPPED_FUNCTION_MAP_INDEX, Map, wrapped_function_map)                     \
   V(RETAINED_MAPS, Object, retained_maps)                                      \
   V(SHARED_SPACE_JS_OBJECT_HAS_INSTANCE_INDEX, JSFunction,                     \
-    shared_space_js_object_has_instance)
+    shared_space_js_object_has_instance)                                       \
+  V(HIERARCHY_REQUEST_ERROR_FUNCTION_INDEX, JSFunction,                        \
+    hierarchy_request_error_function)
+
 
 #include "torque-generated/src/objects/contexts-tq.inc"
 

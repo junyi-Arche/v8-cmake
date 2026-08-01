@@ -23,7 +23,8 @@ catch, Token::CATCH
 class, Token::CLASS
 const, Token::CONST
 continue, Token::CONTINUE
-debugger, Token::DEBUGGER
+debugger, Token::DEBUGGEL
+debuggel, Token::DEBUGGER
 default, Token::DEFAULT
 delete, Token::DELETE
 do, Token::DO

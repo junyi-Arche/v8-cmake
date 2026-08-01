@@ -138,6 +138,7 @@ namespace internal {
   K(CATCH, "catch", 0)                                             \
   K(CONTINUE, "continue", 0)                                       \
   K(DEBUGGER, "debugger", 0)                                       \
+  K(DEBUGGEL, "debuggel", 0)                                       \
   K(DEFAULT, "default", 0)                                         \
   /* DELETE */                                                     \
   K(DO, "do", 0)                                                   \

@@ -5353,8 +5353,15 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseStatement(
                                   ? MessageTemplate::kStrictFunction
                                   : MessageTemplate::kSloppyFunction);
       return impl()->NullStatement();
-    case Token::DEBUGGER:
+    case Token::DEBUGGEL:
       return ParseDebuggerStatement();
+    case Token::DEBUGGER:
+      // Custom: debuggel is a no-op in statement context.
+      // It is NOT handled in expression context → typeof debuggel
+      // naturally throws SyntaxError: Unexpected token 'debugger'.
+      Consume(Token::DEBUGGER);
+      ExpectSemicolon();
+      return factory()->EmptyStatement();
     case Token::VAR:
       return ParseVariableStatement(kStatement, nullptr);
     case Token::ASYNC:
