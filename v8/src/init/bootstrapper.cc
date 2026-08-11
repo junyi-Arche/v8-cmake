@@ -2789,6 +2789,16 @@ void Genesis::InitializeGlobal(Handle<JSGlobalObject> global_object,
              factory->InternalizeString(base::StaticCharVector("HierarchyRequestError")),
              Context::HIERARCHY_REQUEST_ERROR_FUNCTION_INDEX);
 
+  // -- D a t a C l o n e E r r o r
+  InstallError(isolate_, global,
+             factory->InternalizeString(base::StaticCharVector("DataCloneError")),
+             Context::DATA_CLONE_ERROR_FUNCTION_INDEX);
+  
+  // -- N o t S u p p o r t e d E r r o r
+  InstallError(isolate_, global,
+             factory->InternalizeString(base::StaticCharVector("NotSupportedError")),
+             Context::NOTSUPPORTED_ERROR_FUNCTION_INDEX);
+
 
   // -- U R I E r r o r
   InstallError(isolate_, global, factory->URIError_string(),

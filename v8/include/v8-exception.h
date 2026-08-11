@@ -39,6 +39,8 @@ class V8_EXPORT Exception {
   static Local<Value> WasmRuntimeError(Local<String> message);
   static Local<Value> Error(Local<String> message);
   static Local<Value> HierarchyRequestError(Local<String> message);
+  static Local<Value> DataCloneError(Local<String> message);
+  static Local<Value> NotSupportedError(Local<String> message);
 
   /**
    * Creates an error message for the given exception.
