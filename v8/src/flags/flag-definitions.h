@@ -224,7 +224,7 @@ DEFINE_BOOL(allow_overwriting_for_next_flag, false,
             "the next flag")
 
 // Flags for language modes and experimental language features.
-DEFINE_BOOL(use_strict, true, "enforce strict mode")
+DEFINE_BOOL(use_strict, false, "enforce strict mode")
 
 DEFINE_BOOL(trace_temporal, false, "trace temporal code")
 
