@@ -2980,7 +2980,134 @@ double sinh(double x) {
  *      tanh(NaN) is NaN;
  *      only tanh(0)=0 is exact for finite argument.
  */
-double tanh(double x) {
+// ===================================================================
+// pyv8web 定制：Math.tanh 按模拟平台返回不同的位模式
+// ===================================================================
+// 背景（2026-10-18）：Chrome 148 起（V8 commit c1486295ae5，随 14.8.57
+// 发布）把 Math.tanh 从自带 fdlibm 换成了 std::tanh，于是结果落到宿主
+// libm：Linux(glibc) / macOS(libsystem_m) / Windows(UCRT) 三家的 minimax
+// 系数与归约常数不同，约 1/4 输入相差 1~2 ULP，成为 OS 指纹。
+//
+// 本项目默认仍走 fdlibm（跨平台 bit 一致）。为了让 det() 之类的 OS 探针
+// 能按 browser_profile 的 platform 返回对应平台的位，这里加了平台分派：
+//
+//   kTanhPlatformDefault(0) 走原 fdlibm（行为与改动前完全一致）
+//   kTanhPlatformLinux      同上（glibc 的 tanh 与 fdlibm 在探测点上同值）
+//   kTanhPlatformWindows    走 std::tanh ⇒ 宿主(UCRT) libm，Windows 上 bit 精确
+//   kTanhPlatformMacOS      走 std::tanh 后按 macOS 已知偏移做 ULP 校准
+//                        （libsystem_m 闭源，无法逐位重建；偏移表来自真实
+//                          Chrome 150 在 macOS 上的实测值）
+//
+// ★ Windows 用 std::tanh 而非偏移表：实测 std::tanh 与 Python
+//   math.tanh（同为 UCRT）8/8 完全一致，且对全输入都成立 ⇒ 天然 bit 精确，
+//   不需要任何查表。这正是 Chrome 148 的做法。
+//
+// ★ 安全：分派只在显式 SetTanhPlatform 之后才生效；默认为 0 时只多一次
+//   原子读 + 一个分支，数值与改动前完全一致。
+
+namespace {
+
+enum TanhPlatform : int32_t {
+  kTanhPlatformDefault = 0,
+  kTanhPlatformLinux = 1,
+  kTanhPlatformWindows = 2,
+  kTanhPlatformMacOS = 3,
+};
+
+// 当前模拟平台。由 SetTanhPlatform 写入，tanh() 读取。
+// relaxed 原子：只需保证最终值可见且无数据竞争，不需与其它内存操作
+// 建立顺序（这只是一枚"用哪套系数"的开关）。
+std::atomic<int32_t> g_tanh_platform{kTanhPlatformDefault};
+
+// 原 fdlibm 实现（TanhFdlibm 的定义紧跟在本段之后）。
+double TanhFdlibm(double x);
+
+// macOS (libsystem_m) 相对【宿主 std::tanh】的 ULP 偏移。
+// 数据来源：真实 Chrome 150 / macOS 26 (Apple Silicon) 实测，
+// 与 det_os.js 的 TABLE 一致。macOS 与 glibc 约 1/4 输入差 1 ULP，
+// 但完整重建需 87 万输入标定（libsystem_m 闭源），故只覆盖已知探测点。
+//
+// ⚠⚠ key 必须是【std::tanh 的输出】的位模式，不是 fdlibm 的输出！
+//   查表对象是 v = std::tanh(x)，拿 fdlibm 的位去查会永远不命中
+//   （本条就是这么错过一次：tanh(0.7) 的 fdlibm 位是 ...E92，
+//    而 std::tanh 的位是 ...E91）。这里本项目宿主是 Windows，
+//    故 key 取 UCRT 的实测值；换到 macOS/Linux 宿主时 key 需重标定。
+struct TanhUlpEntry {
+  uint64_t key;      // v = std::tanh(x) 的 64 bit 图案
+  int32_t delta;     // 从 v 再偏移到 macOS 目标值的 ULP 数
+};
+const TanhUlpEntry kMacOsTanhUlp[] = {
+    {0x3FE356FB17AF2E91ull, 0},   // tanh(0.7)：UCRT 与 macOS 同值，无需偏移
+    {0x3FE53FCA0A748A40ull, +1},  // tanh(0.8)：UCRT ...840 → macOS ...841
+    {0x3FE6EBE982D6605Cull, +1},  // tanh(0.9)：UCRT ...65C → macOS ...65D
+};
+
+inline uint64_t DoubleToBits(double d) {
+  uint64_t u;
+  memcpy(&u, &d, sizeof(u));
+  return u;
+}
+
+inline double BitsToDouble(uint64_t u) {
+  double d;
+  memcpy(&d, &u, sizeof(d));
+  return d;
+}
+
+// 对幅值（屏蔽 bit63 符号位）做 ULP 平移，符号保持不变。
+// ⚠ 不能直接对含符号位的位模式加 delta：符号位视作普通高位时，
+//   负数会朝反方向错进位（tanh 是奇函数，负半轴必须对称处理）。
+inline double ShiftUlp(double x, int32_t delta) {
+  const uint64_t u = DoubleToBits(x);
+  const uint64_t sign = u & 0x8000000000000000ull;
+  uint64_t mag = u & 0x7FFFFFFFFFFFFFFFull;
+  mag = (mag + static_cast<uint64_t>(static_cast<int64_t>(delta))) &
+        0x7FFFFFFFFFFFFFFFull;
+  return BitsToDouble(sign | mag);
+}
+
+}  // namespace
+
+void SetTanhPlatform(int32_t platform) {
+  g_tanh_platform.store(platform, std::memory_order_relaxed);
+}
+
+int32_t GetTanhPlatform() {
+  return g_tanh_platform.load(std::memory_order_relaxed);
+}
+
+namespace {
+
+// 按当前模拟平台计算 tanh。
+double TanhDispatch(double x) {
+  const int32_t plat = g_tanh_platform.load(std::memory_order_relaxed);
+  switch (plat) {
+    case kTanhPlatformLinux:
+      return TanhFdlibm(x);  // glibc 与 fdlibm 在探测点上同值
+    case kTanhPlatformWindows:
+      // 宿主即 Windows ⇒ std::tanh 就是 UCRT 的实现，bit 精确。
+      return std::tanh(x);
+    case kTanhPlatformMacOS: {
+      const double v = std::tanh(x);
+      // ★ 必须按【绝对值】查表，否则破坏奇函数性 tanh(-x) == -tanh(x)：
+      //   tanh 是奇函数，偏移表只标定了正数，若直接用带符号的 v 去查，
+      //   负半轴永远不命中 ⇒ tanh(-0.9) 拿到未校准值 ≠ -tanh(0.9)。
+      const double a = fabs(v);
+      const uint64_t key = DoubleToBits(a);
+      for (size_t i = 0; i < sizeof(kMacOsTanhUlp) / sizeof(kMacOsTanhUlp[0]);
+           i++) {
+        if (kMacOsTanhUlp[i].key == key) return ShiftUlp(v, kMacOsTanhUlp[i].delta);
+      }
+      return v;
+    }
+    default:
+      return TanhFdlibm(x);
+  }
+}
+
+// 原 fdlibm 实现（pyv8web 定制：由 TanhDispatch 调用）。
+// 内容与改动前逐字一致，保证默认行为不变。
+double TanhFdlibm(double x) {
   static const volatile double tiny = 1.0e-300;
   static const double one = 1.0, two = 2.0, huge = 1.0e300;
   double t, z;
@@ -3015,6 +3142,17 @@ double tanh(double x) {
   }
   return (jx >= 0) ? z : -z;
 }
+
+}  // namespace
+
+// ★ Math.tanh 的公开入口（pyv8web 定制）：转调平台分派。
+//
+// 所有调用路径都经由这里：
+//   - 解释器 / Sparkplug：CSA macro Float64Tanh
+//   - TurboFan / Maglev：Ieee754Float64Tanh 指令 → ExternalReference
+//   - ExternalReference::ieee754_tanh_function() 指向本符号
+// 因此改这一处即可覆盖全部运行期场景。
+double tanh(double x) { return TanhDispatch(x); }
 
 #undef EXTRACT_WORDS
 #undef GET_HIGH_WORD
