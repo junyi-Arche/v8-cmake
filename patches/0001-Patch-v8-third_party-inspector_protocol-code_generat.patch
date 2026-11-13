@@ -1,0 +1,13 @@
+diff --git a/v8/third_party/inspector_protocol/code_generator.py b/v8/third_party/inspector_protocol/code_generator.py
+index 2ad9465a..68c1718b 100644
+--- a/v8/third_party/inspector_protocol/code_generator.py
++++ b/v8/third_party/inspector_protocol/code_generator.py
+@@ -87,7 +87,7 @@ def read_config():
+       raise Exception("--depfile requires --stamp and vice versa")
+     depfile = arg_options.depfile
+     stamp = arg_options.stamp
+-    inspector_protocol_dir = arg_options.inspector_protocol_dir.lstrip('/')
++    inspector_protocol_dir = arg_options.inspector_protocol_dir
+   except Exception:
+     # Work with python 2 and 3 http://docs.python.org/py3k/howto/pyporting.html
+     exc = sys.exc_info()[1]

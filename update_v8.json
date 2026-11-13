@@ -35,5 +35,89 @@
     "commit": "a3911fff01a775023a06af8754f9ec1e5977dd97",
     "branch": "master",
     "path": "third_party/ittapi"
+  },
+  {
+    "url": "https://chromium.googlesource.com/chromium/src/third_party/abseil-cpp.git",
+    "commit": "cc7c44411318a2e499e69ebd778cd22d82bd2860",
+    "branch": "master",
+    "path": "third_party/abseil-cpp"
+  },
+  {
+    "url": "https://chromium.googlesource.com/external/github.com/jk-jeon/dragonbox.git",
+    "commit": "beeeef91cf6fef89a4d4ba5e95d47ca64ccb3a44",
+    "branch": "master",
+    "path": "third_party/dragonbox/src"
+  },
+  {
+    "url": "https://chromium.googlesource.com/external/github.com/Maratyszcza/FP16.git",
+    "commit": "782eea126dc5c755827be751a099eb01826175cf",
+    "branch": "master",
+    "path": "third_party/fp16/src"
+  },
+  {
+    "url": "https://chromium.googlesource.com/external/github.com/fastfloat/fast_float.git",
+    "commit": "dbeabeeb3e6791cb96994c2a7a084c36e62ccfb2",
+    "branch": "master",
+    "path": "third_party/fast_float/src"
+  },
+  {
+    "url": "https://chromium.googlesource.com/external/github.com/google/highway.git",
+    "commit": "2607d3b5b0113992fe84d3848859eae13b3b52c1",
+    "branch": "master",
+    "path": "third_party/highway/src"
+  },
+  {
+    "url": "https://chromium.googlesource.com/external/github.com/llvm/llvm-project/libc.git",
+    "commit": "8002d0374e1bbee4a64bd7cc54d65b4557eb6064",
+    "branch": "master",
+    "path": "third_party/llvm-libc/src"
+  },
+  {
+    "url": "https://chromium.googlesource.com/external/github.com/google/re2.git",
+    "commit": "2da0056814cf180480a19f5cf811e7e1c054bf6d",
+    "branch": "master",
+    "path": "third_party/re2/src"
+  },
+  {
+    "url": "https://boringssl.googlesource.com/boringssl.git",
+    "commit": "583980e24fddd61ebf6c82a7ce33caceb4e353ea",
+    "branch": "master",
+    "path": "third_party/boringssl/src"
+  },
+  {
+    "url": "https://chromium.googlesource.com/external/github.com/aengelke/fadec.git",
+    "commit": "c9f78f532b9004de278489019ab2c6c28ae9746e",
+    "branch": "master",
+    "path": "third_party/fadec/src"
+  },
+  {
+    "url": "https://chromium.googlesource.com/external/github.com/aengelke/disarm.git",
+    "commit": "8770f6d6f0c62e7e008f4bf0e04d22197ecb98e3",
+    "branch": "master",
+    "path": "third_party/disarm/src"
+  },
+  {
+    "url": "https://chromium.googlesource.com/chromium/src/base/allocator/partition_allocator.git",
+    "commit": "178ddb451035dd672f148c7c9704bd41c6bdb3cd",
+    "branch": "master",
+    "path": "third_party/partition_alloc"
+  },
+  {
+    "url": "https://chromium.googlesource.com/external/colorama.git",
+    "commit": "3de9f013df4b470069d03d250224062e8cf15c49",
+    "branch": "master",
+    "path": "third_party/colorama/src"
+  },
+  {
+    "url": "https://chromium.googlesource.com/external/github.com/open-source-parsers/jsoncpp.git",
+    "commit": "93acc7b155048f1a66c43235cc205519f1e7a6ea",
+    "branch": "master",
+    "path": "third_party/jsoncpp/source"
+  },
+  {
+    "url": "https://chromium.googlesource.com/chromium/src/third_party/simdutf",
+    "commit": "f7356eed293f8208c40b3c1b344a50bd70971983",
+    "branch": "master",
+    "path": "third_party/simdutf"
   }
 ]

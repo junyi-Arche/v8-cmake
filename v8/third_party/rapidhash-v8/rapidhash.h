@@ -153,8 +153,16 @@ struct PlainHashReader {
 /*
  *  Likely and unlikely macros.
  */
-#define _likely_(x) __builtin_expect(x, 1)
-#define _unlikely_(x) __builtin_expect(x, 0)
+/* pyv8web/MSVC port: upstream V8 builds Windows with clang, where the
+ * GNU builtin exists. MSVC has no __builtin_expect; degrade to plain
+ * conditions (branch hints only, no semantic change). */
+#if defined(__GNUC__) || defined(__clang__)
+#define _likely_(x) __builtin_expect(!!(x), 1)
+#define _unlikely_(x) __builtin_expect(!!(x), 0)
+#else
+#define _likely_(x) (x)
+#define _unlikely_(x) (x)
+#endif
 
 /*
  *  64*64 -> 128bit multiply function.

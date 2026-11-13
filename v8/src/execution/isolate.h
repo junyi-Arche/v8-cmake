@@ -560,8 +560,16 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
 
 // Do not use this variable directly, use Isolate::Current() instead.
 // Defined outside of Isolate because Isolate uses V8_EXPORT_PRIVATE.
-__attribute__((tls_model(V8_TLS_MODEL))) extern thread_local Isolate*
-    g_current_isolate_ V8_CONSTINIT;
+// pyv8web/MSVC port: tls_model is a GNU/clang attribute (V8 16.0 builds
+// Windows with clang-cl); plain thread_local has the same semantics on MSVC.
+#if defined(__clang__) || defined(__GNUC__)
+#define V8_TLS_MODEL_ATTRIBUTE __attribute__((tls_model(V8_TLS_MODEL)))
+#else
+#define V8_TLS_MODEL_ATTRIBUTE
+#endif
+V8_TLS_MODEL_ATTRIBUTE extern thread_local Isolate* g_current_isolate_
+    V8_CONSTINIT;
+#undef V8_TLS_MODEL_ATTRIBUTE
 
 // HiddenFactory exists so Isolate can privately inherit from it without making
 // Factory's members available to Isolate directly.

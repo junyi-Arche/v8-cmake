@@ -66,11 +66,20 @@ class ExternalPointerMember {
   inline ExternalPointer_t load_encoded() const;
   inline void store_encoded(ExternalPointer_t value);
 
+#if defined(V8_CC_MSVC)
+  // pyv8web/MSVC port: with the constrained redirection specialisation
+  // disabled, these hooks are no-ops (they only matter on simulator builds).
+  inline void RemoveCallbackRedirectionForSerialization(IsolateForSandbox) {}
+  inline void RestoreCallbackRedirectionAfterDeserialization(
+      IsolateForSandbox) {}
+#endif
+
   Address storage_address() const {
     return reinterpret_cast<Address>(storage_);
   }
 
  private:
+#if !defined(V8_CC_MSVC)
   static_assert(
       ([]() {
         for (int tag = kTagRange.first; tag <= kTagRange.last; ++tag) {
@@ -85,14 +94,24 @@ class ExternalPointerMember {
       "redirection. You may need to use a single tag instead of a tag range, "
       "or update the NeedsCallbackRedirection specialization to support tag "
       "ranges.");
+#endif  // !V8_CC_MSVC
 
   alignas(alignof(Tagged_t)) char storage_[sizeof(ExternalPointer_t)];
 };
 
+// pyv8web/MSVC port: cl.exe cannot match out-of-line member definitions
+// of a constrained class-template partial specialization (C2244/C3864).
+// The redirection path is only active on simulator builds
+// (USE_SIMULATOR_BOOL == true), so on MSVC we use the generic member.
+#if defined(V8_CC_MSVC)
+template <ExternalPointerTagRange kTagRange>
+concept TagWithRedirection = false;
+#else
 template <ExternalPointerTagRange kTagRange>
 concept TagWithRedirection =
     (kTagRange.Size() == 1 &&
      TryGetCallbackRedirectionType(kTagRange.first).has_value());
+#endif
 
 // Specialization of ExternalPointerMember for tags that need callback
 // redirection on the simulator.

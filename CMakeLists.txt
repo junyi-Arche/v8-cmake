@@ -5,22 +5,110 @@ project(V8 LANGUAGES CXX C ASM)
 
 if(MSVC)
   enable_language(ASM_MASM)
+  # 16.0 only ships an x64 MASM push_registers implementation.
   set_property(
     SOURCE ${PROJECT_BINARY_DIR}/embedded.S
-           v8/src/heap/base/asm/arm64/push_registers_masm.asm
-           v8/src/heap/base/asm/ia32/push_registers_masm.asm
            v8/src/heap/base/asm/x64/push_registers_masm.asm
     PROPERTY LANGUAGE ASM_MASM)
 
 endif()
 
-add_definitions("-DV8_ENABLE_WEBASSEMBLY -DV8_ADVANCED_BIGINT_ALGORITHMS -DV8_ENABLE_WASM_SIMD256_REVEC")
+# V8 16.0 defaults (GN gni/v8.gni + BUILD.gn) that this CMake port has to spell
+# out because it compiles the corresponding sources unconditionally:
+#   V8_ENABLE_TURBOFAN / V8_ENABLE_SPARKPLUG / V8_ENABLE_MAGLEV - JIT tiers;
+#   V8_USE_ZLIB                                                - snapshot utils;
+#   V8_USE_METAGEN=0  - metagen (libclang object-layout harvest) is NOT wired
+#                       into this port; 0 keeps Torque as the owner of
+#                       instance-types.h (see src/objects/instance-types-gen.h).
+# V8_ENABLE_MAGLEV must stay on: turboshaft/turbolev-frontend-pipeline.cc is
+# compiled from the compiler GLOB and includes maglev headers unconditionally.
+add_definitions(
+  "-DV8_ENABLE_WEBASSEMBLY"
+  "-DV8_ADVANCED_BIGINT_ALGORITHMS"
+  "-DV8_ENABLE_WASM_SIMD256_REVEC"
+  "-DV8_ENABLE_TURBOFAN"
+  "-DV8_ENABLE_SPARKPLUG"
+  "-DV8_ENABLE_MAGLEV"
+  "-DV8_USE_ZLIB"
+  "-DV8_USE_METAGEN=0"
+)
 if(WIN32)
   add_definitions("-DNOMINMAX -DV8_ENABLE_SYSTEM_INSTRUMENTATION")
   # todo: for zlib, need to extract zlib when refactor
   add_definitions("-DX86_WINDOWS")
-  add_definitions("-D_WIN32_WINNT=0x0602")
+  # V8 16.0 src/base/platform/platform-win32.cc calls
+  # IsUserCetAvailableInEnvironment(), which the SDK only declares for
+  # NTDDI_VERSION >= NTDDI_WIN10_VB (0x0A000008).
+  add_definitions(-D_WIN32_WINNT=0x0A00)
+  add_definitions(-DNTDDI_VERSION=0x0A000008)
 endif()
+
+# ---------------------------------------------------------------------------
+# V8 16.0 third-party dependencies that 11.6 did not have.
+# Abseil is consumed through its own CMake project (correct per-platform
+# source filtering, 491 .cc files would be error prone to curate by hand).
+# Highway/fp16/fast_float/dragonbox are header-only and only need include
+# paths; everything else is addressed by its full path from the v8 root.
+# ---------------------------------------------------------------------------
+set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
+set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(ABSL_BUILD_TEST_HELPERS OFF CACHE BOOL "" FORCE)
+set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
+set(ABSL_USE_SYSTEM_INCLUDES ON CACHE BOOL "" FORCE)
+add_subdirectory(v8/third_party/abseil-cpp EXCLUDE_FROM_ALL)
+
+include_directories(
+  # GN exposes //include as a global include_dir; V8 public headers such as
+  # cppgc/macros.h are reached as cppgc/internal/compiler-specific.h.
+  ${PROJECT_SOURCE_DIR}/v8/include
+  ${PROJECT_SOURCE_DIR}/v8
+  ${PROJECT_SOURCE_DIR}/v8/third_party/abseil-cpp
+  ${PROJECT_SOURCE_DIR}/v8/third_party/highway/src
+  ${PROJECT_SOURCE_DIR}/v8/third_party/fp16/src/include
+  ${PROJECT_SOURCE_DIR}/v8/third_party/fast_float/src/include
+  ${PROJECT_SOURCE_DIR}/v8/third_party/dragonbox/src/include
+  # GN target //third_party/llvm-libc:headers exposes include_dirs=["src"]
+  # and LIBC_NAMESPACE=__llvm_libc_cr (see third_party/llvm-libc/BUILD.gn).
+  # src/base/ieee754.cc includes "third_party/llvm-libc/src/shared/math.h".
+  ${PROJECT_SOURCE_DIR}/v8/third_party/llvm-libc/src
+  # GN config simdutf_include_config: include_dirs = [ "//third_party/simdutf" ]
+  ${PROJECT_SOURCE_DIR}/v8/third_party/simdutf
+)
+add_definitions("-DLIBC_NAMESPACE=__llvm_libc_cr")
+
+# GN //third_party/simdutf compiles the amalgamated simdutf.cpp. Windows
+# needs the dllexport macro emptied; disabling the Icelake kernel avoids
+# AVX-512 intrinsics that MSVC cannot compile in this configuration.
+if(WIN32)
+  add_definitions("-DSIMDUTF_DLLIMPORTEXPORT=")
+  add_definitions("-DSIMDUTF_IMPLEMENTATION_ICELAKE=0")
+endif()
+add_library(v8_simdutf STATIC v8/third_party/simdutf/simdutf.cpp)
+target_include_directories(v8_simdutf PUBLIC ${PROJECT_SOURCE_DIR}/v8/third_party/simdutf)
+# link_libraries() is directory scoped: every V8 target created below gets
+# the Abseil usage requirements (include dirs + the static libraries).
+link_libraries(
+  v8_simdutf
+  absl::base
+  absl::core_headers
+  absl::hash
+  absl::flat_hash_map
+  absl::flat_hash_set
+  absl::node_hash_map
+  absl::node_hash_set
+  absl::btree
+  # GN has an "absl::functional" group; the Abseil CMake build exports the
+  # individual libraries instead. Link the three that the group contains.
+  absl::function_ref
+  absl::any_invocable
+  absl::bind_front
+  absl::int128
+  absl::strings
+  absl::str_format
+  absl::synchronization
+  absl::time
+  absl::debugging
+)
 
 list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 set(THREADS_PREFER_PTHREAD_FLAG ON)
@@ -36,12 +124,20 @@ include(GenerateBuiltinsList)
 
 check_python_module_exists(PYTHON_HAVE_MARKUPSAFE markupsafe)
 
-if (NOT CMAKE_CXX_STANDARD)
-  set(CMAKE_CXX_STANDARD 20)
+if(MSVC)
+  # V8 16.0 macros use __VA_OPT__, which MSVC only supports with the
+  # conforming preprocessor (src/codegen/interface-descriptors.h).
+  add_compile_options(/Zc:preprocessor)
 endif()
 
+# V8 16.0 headers (#include/v8config.h) #error when __cplusplus <= 201703L.
+# The embedding project may set CMAKE_CXX_STANDARD=17; force 20 for every
+# target created in this directory regardless of the parent value.
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 if (NOT CMAKE_C_STANDARD)
-  set(CMAKE_C_STANDARD 90)
+  set(CMAKE_C_STANDARD 11)
 endif()
 
 set(is-freebsd $<PLATFORM_ID:FreeBSD>)
@@ -138,6 +234,8 @@ add_executable(
   v8/src/d8/d8-test.cc
   v8/src/d8/d8-platforms.cc
   v8/src/d8/d8.cc
+  v8/src/d8/hardware-watchpoints.cc
+  v8/src/d8/memory-access-information.cc
 )
 
 target_compile_definitions(d8 PRIVATE $<${is-msvc}:_HAS_EXCEPTIONS=0>)
@@ -270,25 +368,30 @@ file(GLOB wasm-baseline-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS
 file(GLOB zone-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/zone/*.cc)
 file(GLOB zlib-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/third_party/zlib/*.c v8/third_party/zlib/google/compression_utils_portable.cc)
 
+# V8 16.0: cppgc moved from src/heap/cppgc to src/heap/cppgc-internal and is
+# built as its own GN source_set (cppgc_base). Maglev and the sandbox are new
+# directories that GN adds to v8_base_without_compiler.
+file(GLOB cppgc-internal-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/heap/cppgc-internal/*.cc)
+file(GLOB sandbox-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/sandbox/*.cc)
+file(GLOB maglev-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS v8/src/maglev/*.cc)
+
 file(GLOB heap-sources RELATIVE ${PROJECT_SOURCE_DIR} CONFIGURE_DEPENDS
   v8/src/heap/*.cc
   v8/src/heap/base/*.cc
   v8/src/heap/cppgc-js/*.cc
-  v8/src/heap/cppgc/*.cc
   v8/src/heap/third-party/*.cc
 )
 
-# Caged heap feature is x64/arm64-only at the moment.
-list(REMOVE_ITEM heap-sources
-  v8/src/heap/conservative-stack-visitor.cc
-  v8/src/heap/cppgc/caged-heap-local-data.cc
-  v8/src/heap/cppgc/caged-heap.cc
+# Caged heap sources #error unless CPPGC_CAGED_HEAP is defined; the validator
+# sources are only built when V8_ENABLE_GENERATED_CODE_VALIDATOR is on.
+list(REMOVE_ITEM cppgc-internal-sources
+  v8/src/heap/cppgc-internal/caged-heap-local-data.cc
+  v8/src/heap/cppgc-internal/caged-heap.cc
 )
+list(FILTER sandbox-sources EXCLUDE REGEX "generated-code-validator.*[.]cc$")
 
 if(WIN32)
   list(APPEND heap-sources
-    $<${is-arm64}:v8/src/heap/base/asm/arm64/push_registers_masm.asm>
-    $<${is-ia32}:v8/src/heap/base/asm/ia32/push_registers_masm.asm>
     $<${is-x64}:v8/src/heap/base/asm/x64/push_registers_masm.asm>
   )
 else()
@@ -297,7 +400,6 @@ else()
     $<${is-arm}:v8/src/heap/base/asm/arm/push_registers_asm.cc>
     $<${is-ia32}:v8/src/heap/base/asm/ia32/push_registers_asm.cc>
     $<${is-mips64}:v8/src/heap/base/asm/mips64/push_registers_asm.cc>
-    $<${is-mips}:v8/src/heap/base/asm/mips/push_registers_asm.cc>
     $<${is-ppc}:v8/src/heap/base/asm/ppc/push_registers_asm.cc>
     $<${is-s390}:v8/src/heap/base/asm/s390/push_registers_asm.cc>
     $<${is-x64}:v8/src/heap/base/asm/x64/push_registers_asm.cc>
@@ -315,6 +417,11 @@ endif()
 list(REMOVE_ITEM diagnostic-sources v8/src/diagnostics/etw-jit-win.cc)
 
 list(REMOVE_ITEM object-sources ${i18n-sources})
+# 16.0: Temporal sources need the Rust temporal_capi headers.
+list(REMOVE_ITEM object-sources
+  v8/src/objects/js-temporal-objects.cc
+  v8/src/objects/js-temporal-zoneinfo64.cc)
+list(REMOVE_ITEM builtin-sources v8/src/builtins/builtins-temporal.cc)
 list(REMOVE_ITEM regexp-sources v8/src/regexp/gen-regexp-special-case.cc)
 list(REMOVE_ITEM runtime-sources v8/src/runtime/runtime-intl.cc)
 list(REMOVE_ITEM snapshot-sources
@@ -388,6 +495,7 @@ add_library(v8_base_without_compiler STATIC
   ${codegen-sources}
   v8/src/common/assert-scope.cc
   v8/src/common/code-memory-access.cc
+  v8/src/common/ptr-compr.cc
   v8/src/compiler-dispatcher/lazy-compile-dispatcher.cc
   v8/src/compiler-dispatcher/optimizing-compile-dispatcher.cc
   v8/src/date/date.cc
@@ -398,9 +506,15 @@ add_library(v8_base_without_compiler STATIC
   ${execution-sources}
   ${extensions-sources}
   v8/src/flags/flags.cc
+  v8/src/flags/save-flags.cc
   v8/src/handles/global-handles.cc
   v8/src/handles/handles.cc
   ${heap-sources}
+  ${cppgc-internal-sources}
+  ${sandbox-sources}
+  ${maglev-sources}
+  $<${is-x64}:v8/src/maglev/x64/maglev-assembler-x64.cc>
+  $<${is-x64}:v8/src/maglev/x64/maglev-ir-x64.cc>
   v8/src/ic/call-optimization.cc
   v8/src/ic/handler-configuration.cc
   v8/src/ic/ic-stats.cc
@@ -408,7 +522,8 @@ add_library(v8_base_without_compiler STATIC
   v8/src/ic/stub-cache.cc
   v8/src/init/bootstrapper.cc
   v8/src/init/icu_util.cc
-  v8/src/init/isolate-allocator.cc
+  # 16.0: isolate-allocator.cc was replaced by isolate-group.cc.
+  v8/src/init/isolate-group.cc
   v8/src/init/startup-data-util.cc
   v8/src/init/v8.cc
   ${handles-sources}
@@ -428,14 +543,16 @@ add_library(v8_base_without_compiler STATIC
   v8/src/tasks/cancelable-task.cc
   v8/src/tasks/operations-barrier.cc
   v8/src/tasks/task-utils.cc
-  v8/src/third_party/siphash/halfsiphash.cc
+  # 16.0: siphash lives under v8/third_party (not v8/src/third_party).
+  v8/third_party/siphash/halfsiphash.cc
   v8/src/tracing/trace-event.cc
   v8/src/tracing/traced-value.cc
   v8/src/tracing/tracing-category-observer.cc
   v8/src/trap-handler/handler-inside.cc
   v8/src/trap-handler/handler-outside.cc
   v8/src/trap-handler/handler-shared.cc
-  v8/src/temporal/temporal-parser.cc
+  # 16.0: temporal-parser.cc was folded into src/objects/js-temporal-*.cc
+  # (picked up by the objects GLOB); the src/temporal directory no longer exists.
   ${utils-sources}
   ${wasm-sources}
   ${zone-sources}
@@ -497,6 +614,7 @@ file(GLOB_RECURSE compiler-sources
   CONFIGURE_DEPENDS v8/src/compiler/*.cc
 )
 list(FILTER compiler-sources EXCLUDE REGEX ".*backend/.*/.*[.]cc$")
+list(FILTER compiler-sources EXCLUDE REGEX ".*turboshaft/builtin-compiler[.]cc$")
 
 add_library(v8_compiler STATIC)
 target_sources(v8_compiler PRIVATE ${compiler-sources})
@@ -534,7 +652,6 @@ add_library(
   $<${is-arm}:v8/src/builtins/arm/builtins-arm.cc>
   $<${is-ia32}:v8/src/builtins/ia32/builtins-ia32.cc>
   $<${is-mips64}:v8/src/builtins/mips64/builtins-mips64.cc>
-  $<${is-mips}:v8/src/builtins/mips/builtins-mips.cc>
   $<${is-ppc}:v8/src/builtins/ppc/builtins-ppc.cc>
   $<${is-s390}:v8/src/builtins/s390/builtins-s390.cc>
   $<${is-x64}:v8/src/builtins/x64/builtins-x64.cc>
@@ -557,7 +674,13 @@ add_library(
   v8/src/builtins/builtins-internal-gen.cc
   v8/src/builtins/builtins-interpreter-gen.cc
   v8/src/builtins/builtins-iterator-gen.cc
-  v8/src/builtins/builtins-lazy-gen.cc
+  # 16.0 dropped builtins-lazy-gen.cc; added the TSA/Trampoline generators.
+  v8/src/builtins/builtins-number-tsa.cc
+  v8/src/builtins/builtins-shadow-realm-gen.cc
+  v8/src/builtins/builtins-string-tsa.cc
+  v8/src/builtins/js-trampoline-assembler.cc
+  v8/src/builtins/profile-data-reader.cc
+  v8/src/compiler/turboshaft/builtin-compiler.cc
   v8/src/builtins/builtins-microtask-queue-gen.cc
   v8/src/builtins/builtins-number-gen.cc
   v8/src/builtins/builtins-object-gen.cc
@@ -578,6 +701,7 @@ add_library(
   v8/src/ic/unary-op-assembler.cc
   v8/src/interpreter/interpreter-assembler.cc
   v8/src/interpreter/interpreter-generator.cc
+  v8/src/interpreter/interpreter-generator-tsa.cc
   v8/src/interpreter/interpreter-intrinsics-generator.cc
 )
 
@@ -808,11 +932,16 @@ target_link_libraries(v8_libsampler PRIVATE v8_libbase)
 #
 
 add_library(v8_libbase STATIC
+  v8/src/base/abort-mode.cc
   v8/src/base/bits.cc
   v8/src/base/bounded-page-allocator.cc
-  v8/src/base/cpu.cc
+  # 16.0: cpu.cc moved into src/base/cpu/ and the x86 implementation is a
+  # separate translation unit.
+  v8/src/base/cpu/cpu.cc
+  $<${is-x64}:v8/src/base/cpu/cpu-x86.cc>
   v8/src/base/debug/stack_trace.cc
   v8/src/base/division-by-constant.cc
+  v8/src/base/emulated-virtual-address-subspace.cc
   v8/src/base/file-utils.cc
   v8/src/base/ieee754.cc
   v8/src/base/logging.cc
@@ -825,10 +954,15 @@ add_library(v8_libbase STATIC
   v8/src/base/platform/semaphore.cc
   v8/src/base/platform/time.cc
   v8/src/base/region-allocator.cc
+  v8/src/base/sanitizer/lsan-virtual-address-space.cc
+  v8/src/base/synchronization-point-support.cc
   v8/src/base/sys-info.cc
   v8/src/base/strings.cc
+  v8/src/base/thread-id.cc
+  # ubsan.cc is 32-bit-UBSan-only (BUILD.gn: is_ubsan && x86/arm).
   v8/src/base/utils/random-number-generator.cc
   v8/src/base/vlq-base64.cc
+  v8/src/base/virtual-address-space-page-allocator.cc
   v8/src/base/virtual-address-space.cc
   $<$<NOT:$<OR:${is-win},${is-aix}>>:v8/src/base/platform/platform-posix-time.cc>
   $<${is-win}:v8/src/base/platform/platform-win32.cc>
@@ -903,6 +1037,18 @@ file(GLOB_RECURSE torque-objects
 list(APPEND torque_files ${torque-builtins})
 list(APPEND torque_files ${torque-objects})
 
+# 16.0: GN only adds js-temporal-objects.tq when v8_enable_temporal_support
+# is on. It pulls in the Rust temporal_capi headers (temporal_rs/*.d.hpp),
+# which are not vendored here. Keep Temporal disabled.
+list(REMOVE_ITEM torque_files src/objects/js-temporal-objects.tq)
+
+# 16.0: BUILD.gn adds wasm-interpreter-wrappers.tq only under
+# v8_enable_drumbrake. The generated CSA references
+# WasmInterpreterWrapperConstants and Builtin::kJSToWasmInterpreterWrapperAsm,
+# both of which only exist when V8_ENABLE_DRUMBRAKE is defined. A recursive
+# GLOB otherwise picks the .tq up unconditionally. Keep DrumBrake disabled.
+list(REMOVE_ITEM torque_files src/builtins/wasm-interpreter-wrappers.tq)
+
 list(APPEND torque_files
   src/debug/debug-wasm-objects.tq
   src/ic/handler-configuration.tq
@@ -932,40 +1078,46 @@ endif()
 
 list(TRANSFORM torque_files PREPEND v8/ OUTPUT_VARIABLE torque_files_abs)
 
-# Note: target v8_compiler depends on ${torque_outputs}. Maybe this should be
-# a source-only dependency.
-set(torque_outputs
-  ${PROJECT_BINARY_DIR}/torque-generated/class-debug-readers-tq.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/class-debug-readers.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/class-definitions-tq.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/class-definitions.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/class-verifiers-tq.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/class-verifiers.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/exported-macros-assembler-tq.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/exported-macros-assembler.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/factory-tq.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/factory-tq.inc
-  ${PROJECT_BINARY_DIR}/torque-generated/factory.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/factory.inc
-  ${PROJECT_BINARY_DIR}/torque-generated/interface-descriptors-tq.inc
-  ${PROJECT_BINARY_DIR}/torque-generated/interface-descriptors.inc
-  ${PROJECT_BINARY_DIR}/torque-generated/objects-body-descriptors-inl.inc
-  ${PROJECT_BINARY_DIR}/torque-generated/objects-body-descriptors-tq-inl.inc
-  ${PROJECT_BINARY_DIR}/torque-generated/objects-printer-tq.cc
-  ${PROJECT_BINARY_DIR}/torque-generated/objects-printer.cc
+# V8 16.0 torque emits, for each <name>.tq input (BUILD.gn run_torque):
+#   <name>-tq-csa.cc / .h   - CSA builtin implementations (compiled)
+#   <name>-tq.cc            - object class definitions/verifiers (compiled)
+# 11.6 emitted the aggregate class-definitions-tq.cc / objects-printer-tq.cc
+# files; those no longer exist. The fixed files below come from the GN
+# run_torque outputs list and src/torque/implementation-visitor.cc.
+set(torque_fixed_outputs
+  bit-field-asserts.cc
+  builtin-definitions.h
+  class-debug-readers.cc
+  class-debug-readers.h
+  class-forward-declarations.h
+  csa-types.h
+  debug-macros.cc
+  debug-macros.h
+  debug-reader-classes-list.h
+  enum-verifiers.cc
+  exported-macros-assembler.cc
+  exported-macros-assembler.h
+  instance-type-checker-lists.h
+  instance-types.h
+  interface-descriptors.inc
 )
+list(TRANSFORM torque_fixed_outputs PREPEND "${PROJECT_BINARY_DIR}/torque-generated/"
+     OUTPUT_VARIABLE torque_outputs)
 
 list(TRANSFORM torque_files
   REPLACE "[.]tq$" "-tq-csa.cc"
   OUTPUT_VARIABLE torque-outputs
 )
-
-list(TRANSFORM torque-outputs
-  REPLACE "[.]cc$" ".h"
+list(TRANSFORM torque_files
+  REPLACE "[.]tq$" "-tq.cc"
+  OUTPUT_VARIABLE torque-definitions
+)
+list(TRANSFORM torque_files
+  REPLACE "[.]tq$" "-tq-csa.h"
   OUTPUT_VARIABLE torque-headers
 )
 
-list(APPEND torque-outputs ${torque-headers})
+list(APPEND torque-outputs ${torque-headers} ${torque-definitions})
 list(TRANSFORM torque-outputs PREPEND "${PROJECT_BINARY_DIR}/torque-generated/")
 
 foreach(filename IN LISTS torque_files)
@@ -1019,7 +1171,8 @@ add_custom_command(
 )
 
 
-# 在 configure 阶段直接创建 torque 输出目录
+# 在 configure 阶段直接创建 torque 输出目录（含 16.0 固定输出所在的根目录）
+file(MAKE_DIRECTORY ${PROJECT_BINARY_DIR}/torque-generated)
 # 原 add_custom_command 以目录作为 OUTPUT 会导致 MSBuild 的 MSB8065 警告，
 # 进而破坏增量编译，每次构建都会重跑 torque 并重编译全部 V8 代码。
 file(MAKE_DIRECTORY ${torque_dirs})
@@ -1029,8 +1182,12 @@ file(MAKE_DIRECTORY ${torque_dirs})
 #
 file(GLOB torque-program-sources
   RELATIVE ${PROJECT_SOURCE_DIR}
-  CONFIGURE_DEPENDS v8/src/torque/*.cc
+  CONFIGURE_DEPENDS v8/src/torque/*.cc v8/src/torque/ls/*.cc
 )
+# torque-language-server.cc has its own main(); GN builds it as a separate
+# executable (v8_executable("torque-language-server")).
+list(REMOVE_ITEM torque-program-sources
+  v8/src/torque/ls/torque-language-server.cc)
 
 add_executable(torque)
 target_sources(torque PRIVATE ${torque-program-sources})
@@ -1044,6 +1201,8 @@ target_link_libraries(torque PRIVATE v8_libbase)
 
 add_executable(mksnapshot
   v8/src/init/setup-isolate-full.cc
+  v8/src/snapshot/builtins-effects-dummy.cc
+  v8/src/snapshot/static-roots-gen.cc
   v8/src/snapshot/embedded/embedded-empty.cc
   v8/src/snapshot/embedded/embedded-file-writer.cc
   v8/src/snapshot/embedded/platform-embedded-file-writer-aix.cc

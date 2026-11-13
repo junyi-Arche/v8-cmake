@@ -5917,8 +5917,13 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseStatement(
                                   ? MessageTemplate::kStrictFunction
                                   : MessageTemplate::kSloppyFunction);
       return impl()->NullStatement();
-    case Token::kDebugger:
+    case Token::kDebuggel:
       return ParseDebuggerStatement();
+    case Token::kDebugger:
+      // pyv8web: debuggel is a no-op in statement context.
+      Consume(Token::kDebugger);
+      ExpectSemicolon();
+      return factory()->EmptyStatement();
     case Token::kVar:
       return ParseVariableStatement(kStatement, nullptr);
     case Token::kAsync:

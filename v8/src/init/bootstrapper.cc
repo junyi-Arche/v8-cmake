@@ -3346,6 +3346,17 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
   InstallError(isolate_, global, factory->TypeError_string(),
                Context::TYPE_ERROR_FUNCTION_INDEX);
 
+  // pyv8web: DOM error constructors.
+  InstallError(isolate_, global,
+               factory->InternalizeUtf8String("HierarchyRequestError"),
+               Context::HIERARCHY_REQUEST_ERROR_FUNCTION_INDEX);
+  InstallError(isolate_, global,
+               factory->InternalizeUtf8String("DataCloneError"),
+               Context::DATA_CLONE_ERROR_FUNCTION_INDEX);
+  InstallError(isolate_, global,
+               factory->InternalizeUtf8String("NotSupportedError"),
+               Context::NOTSUPPORTED_ERROR_FUNCTION_INDEX);
+
   // -- U R I E r r o r
   InstallError(isolate_, global, factory->URIError_string(),
                Context::URI_ERROR_FUNCTION_INDEX);

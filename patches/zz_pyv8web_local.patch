@@ -1,0 +1,1075 @@
+diff --git a/v8/include/v8-exception.h b/v8/include/v8-exception.h
+index 74f57311..86f04648 100644
+--- a/v8/include/v8-exception.h
++++ b/v8/include/v8-exception.h
+@@ -48,6 +48,9 @@ class V8_EXPORT Exception {
+   static Local<Value> WasmSuspendError(Local<String> message,
+                                        Local<Value> options = {});
+   static Local<Value> Error(Local<String> message, Local<Value> options = {});
++  static Local<Value> HierarchyRequestError(Local<String> message);
++  static Local<Value> DataCloneError(Local<String> message);
++  static Local<Value> NotSupportedError(Local<String> message);
+ 
+   /**
+    * Creates an error message for the given exception.
+diff --git a/v8/include/v8config.h b/v8/include/v8config.h
+index 49993653..2b316273 100644
+--- a/v8/include/v8config.h
++++ b/v8/include/v8config.h
+@@ -747,16 +747,26 @@ path. Add it with -I<path> to the command line
+ //
+ // [[no_unique_address]] comes in C++20 but supported in clang with
+ // -std >= c++11.
+-#if V8_HAS_CPP_ATTRIBUTE_NO_UNIQUE_ADDRESS
+-#if defined(V8_CC_MSVC) && V8_HAS_CPP_ATTRIBUTE(msvc::no_unique_address)
+-// Unfortunately MSVC ignores [[no_unique_address]] (see
+-// https://devblogs.microsoft.com/cppblog/msvc-cpp20-and-the-std-cpp20-switch/#msvc-extensions-and-abi),
+-// and clang-cl matches it for ABI compatibility reasons. We need to prefer
+-// [[msvc::no_unique_address]] when available if we actually want any effect.
+-#define V8_NO_UNIQUE_ADDRESS [[msvc::no_unique_address]]
++// pyv8web/MSVC port: cl.exe has no __attribute__((packed)). A push/pop pair
++// around the struct is the MSVC equivalent (pack(push) does work inside a
++// class body as long as it is not preceded by a pack(pop)).
++#if defined(V8_CC_MSVC)
++#define V8_STRUCT_PACKED_BEGIN __pragma(pack(push, 1))
++#define V8_STRUCT_PACKED_END __pragma(pack(pop))
+ #else
+-#define V8_NO_UNIQUE_ADDRESS [[no_unique_address]]
++#define V8_STRUCT_PACKED_BEGIN
++#define V8_STRUCT_PACKED_END
+ #endif
++
++// pyv8web/MSVC port: MSVC implements [[msvc::no_unique_address]] but does not
++// advertise it via __has_cpp_attribute, so V8_HAS_CPP_ATTRIBUTE_NO_UNIQUE_ADDRESS
++// evaluates to 0 and V8 silently falls back to a no-op. Without the attribute
++// the zero-sized IsolateData padding members each occupy one byte and every
++// generated-code offset is wrong. Force the MSVC attribute directly.
++#if defined(V8_CC_MSVC)
++#define V8_NO_UNIQUE_ADDRESS [[msvc::no_unique_address]]
++#elif V8_HAS_CPP_ATTRIBUTE_NO_UNIQUE_ADDRESS
++#define V8_NO_UNIQUE_ADDRESS [[no_unique_address]]
+ #else
+ #define V8_NO_UNIQUE_ADDRESS /* NOT SUPPORTED */
+ #endif
+diff --git a/v8/src/api/api-natives.cc b/v8/src/api/api-natives.cc
+index f3a01025..76025837 100644
+--- a/v8/src/api/api-natives.cc
++++ b/v8/src/api/api-natives.cc
+@@ -631,6 +631,8 @@ Handle<JSFunction> ApiNatives::CreateApiFunction(
+     DCHECK(result->shared()->IsApiFunction());
+     DCHECK(!IsConstructor(*result));
+     DCHECK(!result->has_prototype_slot());
++    // pyv8web: use strict-without-prototype map for non-constructor API methods
++    result->set_map(*isolate->strict_function_without_prototype_map());
+     return result;
+   }
+ 
+@@ -638,8 +640,12 @@ Handle<JSFunction> ApiNatives::CreateApiFunction(
+   // constructor (don't set the "remove prototype" flag).
+   DCHECK(result->has_prototype_slot());
+ 
++  // pyv8web: use strict function maps to suppress caller/arguments on API
++  // constructors. Sloppy map injects poison pill accessors via
++  // AddRestrictedFunctionProperties that appear in getOwnPropertyDescriptors.
+   if (obj->read_only_prototype()) {
+-    result->set_map(isolate, *isolate->function_with_readonly_prototype_map());
++    // pyv8web: strict map suppresses caller/arguments poison pills.
++    result->set_map(isolate, *isolate->strict_function_with_readonly_prototype_map());
+   }
+ 
+   if (IsTheHole(*prototype)) {
+diff --git a/v8/src/api/api.cc b/v8/src/api/api.cc
+index 18ee9809..02016f43 100644
+--- a/v8/src/api/api.cc
++++ b/v8/src/api/api.cc
+@@ -11469,6 +11469,9 @@ DEFINE_ERROR(RangeError, range_error)
+ DEFINE_ERROR(ReferenceError, reference_error)
+ DEFINE_ERROR(SyntaxError, syntax_error)
+ DEFINE_ERROR(TypeError, type_error)
++DEFINE_ERROR(HierarchyRequestError, hierarchy_request_error)
++DEFINE_ERROR(DataCloneError, data_clone_error)
++DEFINE_ERROR(NotSupportedError, notsupported_error)
+ DEFINE_ERROR(WasmCompileError, wasm_compile_error)
+ DEFINE_ERROR(WasmLinkError, wasm_link_error)
+ DEFINE_ERROR(WasmRuntimeError, wasm_runtime_error)
+diff --git a/v8/src/base/ieee754.cc b/v8/src/base/ieee754.cc
+index 38e29011..c4c21f96 100644
+--- a/v8/src/base/ieee754.cc
++++ b/v8/src/base/ieee754.cc
+@@ -234,11 +234,92 @@ double pow(double x, double y) { return LIBC_NAMESPACE::shared::pow(x, y); }
+ 
+ double sinh(double x) { return LIBC_NAMESPACE::shared::sinh(x); }
+ 
++// ★ Math.tanh 的公开入口（pyv8web 定制）：转调平台分派。
++//
++// 所有调用路径都经由这里：
++//   - 解释器 / Sparkplug：CSA macro Float64Tanh
++//   - TurboFan / Maglev：Ieee754Float64Tanh 指令 → ExternalReference
++//   - ExternalReference::ieee754_tanh_function() 指向本符号
++// 因此改这一处即可覆盖全部运行期场景。
++
++// ===================================================================
++// pyv8web: Math.tanh OS fingerprint dispatch, reworked for V8 16.0.
++// 16.0 routes tanh to LLVM libc's shared implementation; default keeps
++// that bit pattern, Windows uses the host UCRT std::tanh, macOS applies
++// the calibrated ULP offsets (libsystem_m is closed source).
++// ===================================================================
++#include <atomic>
++#include <cmath>
++#include <cstdint>
++#include <cstring>
++
++namespace {
++enum TanhPlatform : int32_t {
++  kTanhPlatformDefault = 0,
++  kTanhPlatformLinux = 1,
++  kTanhPlatformWindows = 2,
++  kTanhPlatformMacOS = 3,
++};
++std::atomic<int32_t> g_tanh_platform{kTanhPlatformDefault};
++
++struct TanhUlpEntry { uint64_t key; int32_t delta; };
++const TanhUlpEntry kMacOsTanhUlp[] = {
++    {0x3FE356FB17AF2E91ull, 0},
++    {0x3FE53FCA0A748A40ull, +1},
++    {0x3FE6EBE982D6605Cull, +1},
++};
++inline uint64_t DoubleToBits(double d) {
++  uint64_t u; std::memcpy(&u, &d, sizeof(u)); return u;
++}
++inline double BitsToDouble(uint64_t u) {
++  double d; std::memcpy(&d, &u, sizeof(d)); return d;
++}
++inline double ShiftUlp(double x, int32_t delta) {
++  const uint64_t u = DoubleToBits(x);
++  const uint64_t sign = u & 0x8000000000000000ull;
++  uint64_t mag = u & 0x7FFFFFFFFFFFFFFFull;
++  mag = (mag + static_cast<uint64_t>(static_cast<int64_t>(delta))) &
++        0x7FFFFFFFFFFFFFFFull;
++  return BitsToDouble(sign | mag);
++}
++}  // namespace
++
++void SetTanhPlatform(int32_t platform) {
++  g_tanh_platform.store(platform, std::memory_order_relaxed);
++}
++int32_t GetTanhPlatform() {
++  return g_tanh_platform.load(std::memory_order_relaxed);
++}
++
++namespace {
++double TanhDispatch(double x) {
++  const int32_t plat = g_tanh_platform.load(std::memory_order_relaxed);
++  switch (plat) {
++    case kTanhPlatformWindows:
++      return std::tanh(x);
++    case kTanhPlatformMacOS: {
++      const double v = std::tanh(x);
++      const uint64_t key = DoubleToBits(std::fabs(v));
++      for (size_t i = 0; i < sizeof(kMacOsTanhUlp) / sizeof(kMacOsTanhUlp[0]);
++           ++i) {
++        if (kMacOsTanhUlp[i].key == key)
++          return ShiftUlp(v, kMacOsTanhUlp[i].delta);
++      }
++      return v;
++    }
++    case kTanhPlatformLinux:
++    default:
++      return LIBC_NAMESPACE::shared::tanh(x);
++  }
++}
++}  // namespace
++
++double tanh(double x) { return TanhDispatch(x); }
++
+ #undef EXTRACT_WORDS
+ #undef GET_HIGH_WORD
+ #undef SET_HIGH_WORD
+ 
+-double tanh(double x) { return LIBC_NAMESPACE::shared::tanh(x); }
+ 
+ }  // namespace ieee754
+ }  // namespace base
+diff --git a/v8/src/base/ieee754.h b/v8/src/base/ieee754.h
+index bcc1992a..832db1ca 100644
+--- a/v8/src/base/ieee754.h
++++ b/v8/src/base/ieee754.h
+@@ -9,6 +9,8 @@
+ 
+ #include "src/base/base-export.h"
+ 
++#include <cstdint>
++
+ namespace v8 {
+ namespace base {
+ namespace ieee754 {
+@@ -89,6 +91,23 @@ V8_BASE_EXPORT double sinh(double x);
+ // Returns the hyperbolic tangent of |x|, where |x| is given radians.
+ V8_BASE_EXPORT double tanh(double x);
+ 
++// ===================================================================
++// pyv8web 定制（2026-10-18）：Math.tanh 按模拟平台返回不同位模式
++// ===================================================================
++// Chrome 148 起 V8 把 Math.tanh 从自带 fdlibm 换成 std::tanh，结果落到
++// 宿主 libm（glibc / libsystem_m / UCRT），约 1/4 输入相差 1~2 ULP，
++// 成为 OS 指纹。本项目默认仍走 fdlibm，可通过下面的接口按
++// browser_profile 的 platform 切换到对应平台的位模式。
++//
++// 取值：
++//   0 = 默认（fdlibm，跨平台 bit 一致，行为与定制前完全相同）
++//   1 = Linux  （glibc，与 fdlibm 在探测点上同值）
++//   2 = Windows（std::tanh ⇒ 宿主 UCRT libm，bit 精确）
++//   3 = macOS  （std::tanh + 已知 ULP 校准；libsystem_m 闭源，
++//                仅覆盖已标定的探测点）
++V8_BASE_EXPORT void SetTanhPlatform(int32_t platform);
++V8_BASE_EXPORT int32_t GetTanhPlatform();
++
+ }  // namespace ieee754
+ }  // namespace base
+ }  // namespace v8
+diff --git a/v8/src/base/immediate-crash.h b/v8/src/base/immediate-crash.h
+index 9c25a7dc..4722046c 100644
+--- a/v8/src/base/immediate-crash.h
++++ b/v8/src/base/immediate-crash.h
+@@ -178,7 +178,9 @@
+ #else
+ 
+ // This is supporting build with MSVC where there is no __builtin_unreachable().
+-#define IMMEDIATE_CRASH() WRAPPED_TRAP_SEQUENCE_()
++// pyv8web/MSVC port: without an unreachable hint, functions whose only exit
++// is UNREACHABLE() trigger MSVC error C4716 ("must return a value").
++#define IMMEDIATE_CRASH()        do {                             WRAPPED_TRAP_SEQUENCE_();      __assume(false);             } while (false)
+ 
+ #endif  // defined(__clang__) || defined(COMPILER_GCC)
+ 
+diff --git a/v8/src/compiler/turboshaft/operations.h b/v8/src/compiler/turboshaft/operations.h
+index 568199cc..1e367147 100644
+--- a/v8/src/compiler/turboshaft/operations.h
++++ b/v8/src/compiler/turboshaft/operations.h
+@@ -545,7 +545,8 @@ class InputsRepFactory {
+   };
+ };
+ 
+-struct __attribute__((packed)) EffectDimensions {
++V8_STRUCT_PACKED_BEGIN
++struct EffectDimensions {
+   // Produced by loads, consumed by operations that should not move before loads
+   // because they change memory.
+   bool load_heap_memory : 1;
+@@ -597,6 +598,7 @@ struct __attribute__((packed)) EffectDimensions {
+     return bits() != other.bits();
+   }
+ };
++V8_STRUCT_PACKED_END
+ static_assert(sizeof(EffectDimensions) == sizeof(EffectDimensions::Bits));
+ 
+ // Possible reorderings are restricted using two bit vectors: `produces` and
+@@ -640,7 +642,8 @@ static_assert(sizeof(EffectDimensions) == sizeof(EffectDimensions::Bits));
+ // they become more restricted in their movement. Note that calls are not the
+ // most side-effectful operations, as they do not leave the heap in an
+ // inconsistent state, so they do not need to be marked as raw heap access.
+-struct __attribute__((packed)) OpEffects {
++V8_STRUCT_PACKED_BEGIN
++struct OpEffects {
+   EffectDimensions produces;
+   EffectDimensions consumes;
+ 
+@@ -866,6 +869,7 @@ struct __attribute__((packed)) OpEffects {
+     return IsSubsetOf(OpEffects().CanDependOnChecks());
+   }
+ };
++V8_STRUCT_PACKED_END
+ static_assert(sizeof(OpEffects) == sizeof(OpEffects::Bits));
+ 
+ V8_INLINE size_t hash_value(OpEffects effects) {
+@@ -3112,7 +3116,8 @@ struct ConstantOp : FixedArityOperationT<0, ConstantOp> {
+ // When result_rep is RegisterRepresentation::Compressed(), then the load does
+ // not decompress the value.
+ struct LoadOp : OperationT<LoadOp> {
+-  struct __attribute__((packed)) Kind {
++  V8_STRUCT_PACKED_BEGIN
++  struct Kind {
+     // The `base` input is a tagged pointer to a HeapObject.
+     bool tagged_base : 1;
+     // The effective address might be unaligned. This is only set to true if
+@@ -3245,6 +3250,7 @@ struct LoadOp : OperationT<LoadOp> {
+ 
+     auto operator<=>(const Kind& other) const = default;
+   };
++  V8_STRUCT_PACKED_END
+   Kind kind;
+   MemoryRepresentation loaded_rep;
+   RegisterRepresentation result_rep;
+diff --git a/v8/src/debug/debug-scope-info.cc b/v8/src/debug/debug-scope-info.cc
+index e6658688..341f09ae 100644
+--- a/v8/src/debug/debug-scope-info.cc
++++ b/v8/src/debug/debug-scope-info.cc
+@@ -82,7 +82,8 @@ static_assert(sizeof(ScopeRecord) == 20);
+ // struct is only ever read and written as a whole via
+ // base::ReadUnalignedValue/base::WriteUnalignedValue, so the reduced alignment
+ // is unobservable and no member address is ever taken.
+-struct __attribute__((packed)) DebugVariableEntry {
++V8_STRUCT_PACKED_BEGIN
++struct DebugVariableEntry {
+   // Variable::index(): a context slot, a stack slot or a parameter index.
+   // Context and stack slots grow with the scope's variable count and do
+   // exceed 2^16. Negative values are meaningful: -1 for unallocated variables
+@@ -92,6 +93,7 @@ struct __attribute__((packed)) DebugVariableEntry {
+   int32_t initializer_position;
+   int32_t name_index;
+ };
++V8_STRUCT_PACKED_END
+ 
+ static_assert(std::is_trivial_v<DebugVariableEntry>);
+ static_assert(std::is_standard_layout_v<DebugVariableEntry>);
+diff --git a/v8/src/execution/isolate-data.h b/v8/src/execution/isolate-data.h
+index 525ded2c..f38805b7 100644
+--- a/v8/src/execution/isolate-data.h
++++ b/v8/src/execution/isolate-data.h
+@@ -89,6 +89,14 @@ struct JSBuiltinDispatchHandleRoot {
+ // and compiled code (including builtins, interpreter bytecode handlers and
+ // optimized code). The compiled code accesses the isolate data fields
+ // indirectly via the root register.
++// pyv8web/MSVC port: MSVC error C2229 forbids zero-sized arrays in the
++// middle of a class. An empty [[msvc::no_unique_address]] struct takes
++// zero bytes and keeps all following offsets unchanged.
++template <int N>
++struct V8PaddingStorage { uint8_t bytes[N]; };
++template <>
++struct V8PaddingStorage<0> {};
++
+ class IsolateData final {
+  public:
+   IsolateData(Isolate* isolate, IsolateGroup* group)
+@@ -375,8 +383,8 @@ class IsolateData final {
+   uint8_t has_lazy_closures_ = 0;
+ 
+   // Ensure the following tables are kSystemPointerSize-byte aligned.
+-  V8_NO_UNIQUE_ADDRESS uint8_t
+-      tables_alignment_padding_[kTablesAlignmentPaddingSize];
++  V8_NO_UNIQUE_ADDRESS
++  V8PaddingStorage<kTablesAlignmentPaddingSize> tables_alignment_padding_;
+ 
+   // A pointer to the static offsets vector (used to pass results from the
+   // irregexp engine to the rest of V8), or nullptr if the static offsets
+@@ -493,7 +501,8 @@ class IsolateData final {
+ #endif
+ 
+   // Padding for aligning raw_arguments_.
+-  V8_NO_UNIQUE_ADDRESS uint8_t raw_arguments_padding_[kRawArgumentsPaddingSize];
++  V8_NO_UNIQUE_ADDRESS
++  V8PaddingStorage<kRawArgumentsPaddingSize> raw_arguments_padding_;
+ 
+   // Storage for raw values passed from CSA/Torque to runtime functions.
+   struct RawArgument {
+@@ -518,7 +527,8 @@ class IsolateData final {
+   // following the IsolateData field predictable. This solves the issue with
+   // C++ compilers for 32-bit platforms which are not consistent at aligning
+   // int64_t fields.
+-  V8_NO_UNIQUE_ADDRESS uint8_t trailing_padding_[kTrailingPaddingSize];
++  V8_NO_UNIQUE_ADDRESS
++  V8PaddingStorage<kTrailingPaddingSize> trailing_padding_;
+ 
+   V8_INLINE static void AssertPredictableLayout();
+ 
+@@ -542,7 +552,9 @@ void IsolateData::AssertPredictableLayout() {
+   static_assert(std::is_standard_layout_v<LinearAllocationArea>);
+ #define V(PureName, Size, Name)                                             \
+   static_assert(std::is_standard_layout_v<decltype(IsolateData::Name##_)>); \
+-  static_assert(offsetof(IsolateData, Name##_) == k##PureName##Offset);
++  static_assert(Size == 0 ||                                             \
++                offsetof(IsolateData, Name##_) == k##PureName##Offset,  \
++                #PureName);
+   ISOLATE_DATA_FIELDS(V)
+ #undef V
+   static_assert(sizeof(IsolateData) == IsolateData::kSizeOffset);
+diff --git a/v8/src/execution/isolate.h b/v8/src/execution/isolate.h
+index bc024d14..bd7488cc 100644
+--- a/v8/src/execution/isolate.h
++++ b/v8/src/execution/isolate.h
+@@ -560,8 +560,16 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
+ 
+ // Do not use this variable directly, use Isolate::Current() instead.
+ // Defined outside of Isolate because Isolate uses V8_EXPORT_PRIVATE.
+-__attribute__((tls_model(V8_TLS_MODEL))) extern thread_local Isolate*
+-    g_current_isolate_ V8_CONSTINIT;
++// pyv8web/MSVC port: tls_model is a GNU/clang attribute (V8 16.0 builds
++// Windows with clang-cl); plain thread_local has the same semantics on MSVC.
++#if defined(__clang__) || defined(__GNUC__)
++#define V8_TLS_MODEL_ATTRIBUTE __attribute__((tls_model(V8_TLS_MODEL)))
++#else
++#define V8_TLS_MODEL_ATTRIBUTE
++#endif
++V8_TLS_MODEL_ATTRIBUTE extern thread_local Isolate* g_current_isolate_
++    V8_CONSTINIT;
++#undef V8_TLS_MODEL_ATTRIBUTE
+ 
+ // HiddenFactory exists so Isolate can privately inherit from it without making
+ // Factory's members available to Isolate directly.
+diff --git a/v8/src/flags/flag-definitions.h b/v8/src/flags/flag-definitions.h
+index 185599e5..3b9fec1f 100644
+--- a/v8/src/flags/flag-definitions.h
++++ b/v8/src/flags/flag-definitions.h
+@@ -2228,15 +2228,19 @@ DEFINE_NEG_NEG_IMPLICATION(wasm_bounds_checks, wasm_enforce_bounds_checks)
+ // systems with Apple silicon currently do provide trapping behaviour for
+ // partially-out-of-bound writes, so we assume we can rely on that on MacOS,
+ // since doing so provides better performance for writes.
+-DEFINE_BOOL(
++// pyv8web/MSVC port: MSVC does not accept preprocessor directives inside a
++// macro argument list (error C2121). Hoist the default into a macro instead.
+ #if V8_TARGET_ARCH_RISCV64 || (V8_TARGET_ARCH_ARM64 && !V8_OS_MACOS)
+-    wasm_partial_oob_writes_are_noops, false,
++#define V8_DEFAULT_WASM_PARTIAL_OOB_WRITES_ARE_NOOPS false
+ #else
+-    wasm_partial_oob_writes_are_noops, true,
++#define V8_DEFAULT_WASM_PARTIAL_OOB_WRITES_ARE_NOOPS true
+ #endif
+-    "assume partially out-of-bounds writes are no-ops and can use the trap "
+-    "handler. Note that explicitly enabling this flag (if not enabled by "
+-    "default) can affect the spec-compliance of V8.")
++DEFINE_BOOL(wasm_partial_oob_writes_are_noops,
++            V8_DEFAULT_WASM_PARTIAL_OOB_WRITES_ARE_NOOPS,
++            "assume partially out-of-bounds writes are no-ops and can use the "
++            "trap handler. Note that explicitly enabling this flag (if not "
++            "enabled by default) can affect the spec-compliance of V8.")
++#undef V8_DEFAULT_WASM_PARTIAL_OOB_WRITES_ARE_NOOPS
+ 
+ DEFINE_BOOL(wasm_math_intrinsics, true,
+             "intrinsify some Math imports into wasm")
+diff --git a/v8/src/heap/factory.cc b/v8/src/heap/factory.cc
+index a5c56990..58393ab5 100644
+--- a/v8/src/heap/factory.cc
++++ b/v8/src/heap/factory.cc
+@@ -3242,6 +3242,9 @@ DEFINE_ERROR(ReferenceError, reference_error)
+ DEFINE_ERROR(SyntaxError, syntax_error)
+ DEFINE_ERROR(SuppressedError, suppressed_error)
+ DEFINE_ERROR(TypeError, type_error)
++DEFINE_ERROR(HierarchyRequestError, hierarchy_request_error)
++DEFINE_ERROR(DataCloneError, data_clone_error)
++DEFINE_ERROR(NotSupportedError, notsupported_error)
+ DEFINE_ERROR(WasmCompileError, wasm_compile_error)
+ DEFINE_ERROR(WasmLinkError, wasm_link_error)
+ DEFINE_ERROR(WasmSuspendError, wasm_suspend_error)
+diff --git a/v8/src/heap/factory.h b/v8/src/heap/factory.h
+index a71811e6..451ca3ef 100644
+--- a/v8/src/heap/factory.h
++++ b/v8/src/heap/factory.h
+@@ -1106,6 +1106,9 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
+   DECLARE_ERROR(SuppressedError)
+   DECLARE_ERROR(SyntaxError)
+   DECLARE_ERROR(TypeError)
++  DECLARE_ERROR(HierarchyRequestError)
++  DECLARE_ERROR(DataCloneError)
++  DECLARE_ERROR(NotSupportedError)
+   DECLARE_ERROR(WasmCompileError)
+   DECLARE_ERROR(WasmLinkError)
+   DECLARE_ERROR(WasmSuspendError)
+diff --git a/v8/src/heap/local-heap.h b/v8/src/heap/local-heap.h
+index 97f91b14..43b07887 100644
+--- a/v8/src/heap/local-heap.h
++++ b/v8/src/heap/local-heap.h
+@@ -40,8 +40,15 @@ class Safepoint;
+ 
+ // Do not use this variable directly, use LocalHeap::Current() instead.
+ // Defined outside of LocalHeap because LocalHeap uses V8_EXPORT_PRIVATE.
+-__attribute__((tls_model(V8_TLS_MODEL))) extern thread_local LocalHeap*
+-    g_current_local_heap_ V8_CONSTINIT;
++// pyv8web/MSVC port: tls_model is a GNU/clang attribute.
++#if defined(__clang__) || defined(__GNUC__)
++#define V8_TLS_MODEL_ATTRIBUTE __attribute__((tls_model(V8_TLS_MODEL)))
++#else
++#define V8_TLS_MODEL_ATTRIBUTE
++#endif
++V8_TLS_MODEL_ATTRIBUTE extern thread_local LocalHeap* g_current_local_heap_
++    V8_CONSTINIT;
++#undef V8_TLS_MODEL_ATTRIBUTE
+ 
+ // LocalHeap is used by the GC to track all threads with heap access in order to
+ // stop them before performing a collection. LocalHeaps can be either Parked or
+diff --git a/v8/src/init/bootstrapper.cc b/v8/src/init/bootstrapper.cc
+index 471156fa..f94b9221 100644
+--- a/v8/src/init/bootstrapper.cc
++++ b/v8/src/init/bootstrapper.cc
+@@ -3346,6 +3346,17 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
+   InstallError(isolate_, global, factory->TypeError_string(),
+                Context::TYPE_ERROR_FUNCTION_INDEX);
+ 
++  // pyv8web: DOM error constructors.
++  InstallError(isolate_, global,
++               factory->InternalizeUtf8String("HierarchyRequestError"),
++               Context::HIERARCHY_REQUEST_ERROR_FUNCTION_INDEX);
++  InstallError(isolate_, global,
++               factory->InternalizeUtf8String("DataCloneError"),
++               Context::DATA_CLONE_ERROR_FUNCTION_INDEX);
++  InstallError(isolate_, global,
++               factory->InternalizeUtf8String("NotSupportedError"),
++               Context::NOTSUPPORTED_ERROR_FUNCTION_INDEX);
++
+   // -- U R I E r r o r
+   InstallError(isolate_, global, factory->URIError_string(),
+                Context::URI_ERROR_FUNCTION_INDEX);
+diff --git a/v8/src/inspector/v8-console-message.cc b/v8/src/inspector/v8-console-message.cc
+index f65c04dd..7361a000 100644
+--- a/v8/src/inspector/v8-console-message.cc
++++ b/v8/src/inspector/v8-console-message.cc
+@@ -118,7 +118,9 @@ class V8ValueStringBuilder {
+       m_builder.append("[object Proxy]");
+       return true;
+     }
+-    if (value->IsObject() && !value->IsDate() && !value->IsFunction() &&
++    if (value->IsObject() && !value->IsDate() &&
++        (!value->IsFunction() ||
++         value.As<v8::Object>()->IsUndetectable()) &&
+         !value->IsNativeError() && !value->IsRegExp()) {
+       v8::Local<v8::Object> object = value.As<v8::Object>();
+       v8::Local<v8::String> stringValue;
+diff --git a/v8/src/inspector/v8-deep-serializer.cc b/v8/src/inspector/v8-deep-serializer.cc
+index b1ea86bd..b1abd6ea 100644
+--- a/v8/src/inspector/v8-deep-serializer.cc
++++ b/v8/src/inspector/v8-deep-serializer.cc
+@@ -396,7 +396,9 @@ Response V8DeepSerializer::serializeV8Value(
+         "type", protocol::Runtime::DeepSerializedValue::TypeEnum::Arraybuffer);
+     return Response::Success();
+   }
+-  if (value->IsFunction()) {
++  if (value->IsFunction() &&
++      !(value->IsObject() &&
++        value.As<v8::Object>()->IsUndetectable())) {
+     result.setString(
+         "type", protocol::Runtime::DeepSerializedValue::TypeEnum::Function);
+     return Response::Success();
+diff --git a/v8/src/inspector/value-mirror.cc b/v8/src/inspector/value-mirror.cc
+index b9fcf2bc..2dde3bbb 100644
+--- a/v8/src/inspector/value-mirror.cc
++++ b/v8/src/inspector/value-mirror.cc
+@@ -1705,7 +1705,7 @@ void ValueMirror::getInternalProperties(
+   v8::MicrotasksScope microtasksScope(context,
+                                       v8::MicrotasksScope::kDoNotRunMicrotasks);
+   v8::TryCatch tryCatch(isolate);
+-  if (object->IsFunction()) {
++  if (object->IsFunction() && !object->IsUndetectable()) {
+     v8::Local<v8::Function> function = object.As<v8::Function>();
+     auto location = LocationMirror::create(function);
+     if (location) {
+@@ -1917,7 +1917,8 @@ std::unique_ptr<ValueMirror> ValueMirror::create(v8::Local<v8::Context> context,
+                                           RemoteObject::SubtypeEnum::Proxy,
+                                           descriptionForProxy(isolate, proxy));
+   }
+-  if (object->IsFunction()) {
++  // pyv8web: document.all is callable but must display as an object.
++  if (object->IsFunction() && !object->IsUndetectable()) {
+     v8::Local<v8::Function> function = object.As<v8::Function>();
+     return std::make_unique<FunctionMirror>(function);
+   }
+diff --git a/v8/src/objects/contexts.h b/v8/src/objects/contexts.h
+index 9a787529..4e7f1687 100644
+--- a/v8/src/objects/contexts.h
++++ b/v8/src/objects/contexts.h
+@@ -437,6 +437,12 @@ enum ContextLookupFlags {
+   V(WEAKSET_ADD_INDEX, JSFunction, weakset_add)                                \
+   V(WRAPPED_FUNCTION_MAP_INDEX, Map, wrapped_function_map)                     \
+   V(RETAINED_MAPS, Object, retained_maps)                                      \
++  V(HIERARCHY_REQUEST_ERROR_FUNCTION_INDEX, JSFunction,             \
++    hierarchy_request_error_function)                              \
++  V(DATA_CLONE_ERROR_FUNCTION_INDEX, JSFunction,                    \
++    data_clone_error_function)                                      \
++  V(NOTSUPPORTED_ERROR_FUNCTION_INDEX, JSFunction,                  \
++    notsupported_error_function)                                    \
+   NATIVE_CONTEXT_FIELDS_TEMPORAL(V)
+ 
+ // JSFunctions are pairs (context, function code), sometimes also called
+diff --git a/v8/src/objects/instance-type-inl.h b/v8/src/objects/instance-type-inl.h
+index e36166c7..fae06146 100644
+--- a/v8/src/objects/instance-type-inl.h
++++ b/v8/src/objects/instance-type-inl.h
+@@ -66,7 +66,8 @@ constexpr std::optional<RootIndex> Map::TryGetMapRootIdxFor(InstanceType type) {
+     default:
+       break;
+   }
+-  return {};
++  // pyv8web/MSVC port: braced return of std::optional in constexpr.
++  return std::nullopt;
+ }
+ 
+ namespace InstanceTypeChecker {
+@@ -90,15 +91,19 @@ HEAP_OBJECT_TYPE_LIST(DECL_TYPE)
+ // Instance types which are associated with one unique map.
+ 
+ template <class type>
+-V8_INLINE consteval std::optional<RootIndex> UniqueMapOfInstanceTypeCheck() {
+-  return {};
++// pyv8web/MSVC port: cl.exe cannot constant-evaluate an explicitly
++// specialised consteval function template returning std::optional (C2440).
++// Every caller is a constexpr context, so constexpr is equivalent here.
++V8_INLINE constexpr std::optional<RootIndex> UniqueMapOfInstanceTypeCheck() {
++  // pyv8web/MSVC port: braced return is parsed as aggregate init (C2440).
++  return std::nullopt;
+ }
+ 
+ #define INSTANCE_TYPE_MAP(V, rootIndexName, rootAccessorName, class_name) \
+   template <>                                                             \
+-  V8_INLINE consteval std::optional<RootIndex>                            \
++  V8_INLINE constexpr std::optional<RootIndex>                            \
+   UniqueMapOfInstanceTypeCheck<InstanceTypeTraits::class_name>() {        \
+-    return {RootIndex::k##rootIndexName};                                 \
++    return RootIndex::k##rootIndexName;                                  \
+   }
+ UNIQUE_INSTANCE_TYPE_MAP_LIST_GENERATOR(INSTANCE_TYPE_MAP, _)
+ #undef INSTANCE_TYPE_MAP
+@@ -204,10 +209,10 @@ UniqueMapRangeOfInstanceTypeRange(InstanceType first, InstanceType last) {
+   for (size_t i = 0; i < kUniqueMapRangeOfInstanceTypeRangeList.size(); ++i) {
+     if (kUniqueMapRangeOfInstanceTypeRangeList[i].first.first == first &&
+         kUniqueMapRangeOfInstanceTypeRangeList[i].first.second == last) {
+-      return {kUniqueMapRangeOfInstanceTypeRangeList[i].second};
++      return kUniqueMapRangeOfInstanceTypeRangeList[i].second;
+     }
+   }
+-  return {};
++  return std::nullopt;
+ }
+ 
+ inline constexpr std::optional<TaggedAddressRange> UniqueMapRangeOfInstanceType(
+diff --git a/v8/src/objects/object-macros.h b/v8/src/objects/object-macros.h
+index 8d9e4cc1..5246aeeb 100644
+--- a/v8/src/objects/object-macros.h
++++ b/v8/src/objects/object-macros.h
+@@ -70,10 +70,13 @@
+   ;                   \
+   V8_OBJECT_POP static_assert(true)
+ 
+-#define V8_OBJECT_INNER_CLASS V8_OBJECT_POP
++// pyv8web/MSVC port: MSVC honours pack(pop) but ignores pack(push) inside
++// a class body, so the inner pair unbalances the stack and leaks pack(4)
++// into every following header (breaking all layout static_asserts).
++#define V8_OBJECT_INNER_CLASS
+ #define V8_OBJECT_INNER_CLASS_END \
+   ;                               \
+-  V8_OBJECT_PUSH static_assert(true)
++  static_assert(true)  // pyv8web/MSVC port: inner pack stack balanced
+ 
+ // Instance-type markers for V8_OBJECT classes. They exist solely for the
+ // libclang-driven instance-type generator, which harvests them to drive
+diff --git a/v8/src/objects/tagged-field.h b/v8/src/objects/tagged-field.h
+index 4e6e9c3e..5e91be9e 100644
+--- a/v8/src/objects/tagged-field.h
++++ b/v8/src/objects/tagged-field.h
+@@ -203,6 +203,34 @@ static_assert(sizeof(JSDispatchHandleMember) == sizeof(uint32_t));
+ // which can lose aliasing information.
+ // Place V8_TQ_* annotations before the member. After the [0] declarator, an
+ // attribute would apply to the type instead.
++#if defined(_MSC_VER) && !defined(__clang__)
++// pyv8web/MSVC port: MSVC error C2503 forbids a class with a zero-sized
++// array from being a base class. The FAM contributes zero bytes, so
++// sizeof(*this) (the enclosing class is complete inside an inline member
++// function body) is exactly the data start offset. Verified by the existing
++// static_assert(sizeof(FixedArray) == Internals::kFixedArrayHeaderSize).
++#define FLEXIBLE_ARRAY_MEMBER(Type, name, ...)                              \
++  using FlexibleDataReturnType = Type[0];                                   \
++  FlexibleDataReturnType& name() {                                          \
++    return *reinterpret_cast<FlexibleDataReturnType*>(                      \
++        reinterpret_cast<char*>(this) + sizeof(*this));                     \
++  }                                                                         \
++  const FlexibleDataReturnType& name() const {                              \
++    return *reinterpret_cast<const FlexibleDataReturnType*>(                \
++        reinterpret_cast<const char*>(this) + sizeof(*this));               \
++  }                                                                         \
++  V8_TQ_FIELD_MARK("V8_TQ_NAME(" #name ")")                                 \
++  static_assert(true);                                                      \
++                                                                            \
++ public:                                                                    \
++  template <typename Class>                                                 \
++  static constexpr int OffsetOfDataStart() {                                \
++    return static_cast<int>(sizeof(Class));                                 \
++  }                                                                         \
++                                                                            \
++ private:                                                                   \
++  using FlexibleDataType = Type
++#else
+ #define FLEXIBLE_ARRAY_MEMBER(Type, name, ...)                             \
+   using FlexibleDataReturnType = Type[0];                                  \
+   FlexibleDataReturnType& name() { return flexible_array_member_data_; }   \
+@@ -225,6 +253,8 @@ static_assert(sizeof(JSDispatchHandleMember) == sizeof(uint32_t));
+  private:                                                                  \
+   using FlexibleDataType = Type
+ 
++#endif  // _MSC_VER && !__clang__
++
+ // OFFSET_OF_DATA_START(T) returns the offset of the FLEXIBLE_ARRAY_MEMBER of
+ // the class T.
+ #define OFFSET_OF_DATA_START(Type) Type::template OffsetOfDataStart<Type>()
+diff --git a/v8/src/parsing/keywords-gen.h b/v8/src/parsing/keywords-gen.h
+index aea1747b..214767da 100644
+--- a/v8/src/parsing/keywords-gen.h
++++ b/v8/src/parsing/keywords-gen.h
+@@ -221,6 +221,14 @@ static const struct PerfectKeywordHashTableEntry kPerfectKeywordHashTable[128] =
+      {"", Token::kIdentifier}};
+ 
+ inline Token::Value PerfectKeywordHash::GetToken(const char* str, int len) {
++  // Custom: "debugger" → DEBUGGEL (no-op), "debuggel" → DEBUGGER (breakpoint).
++  // Both collide with "continue" in the gperf hash (key=17), must intercept here.
++  if (len == 8 && str[0] == 'd' && str[1] == 'e' &&
++      str[2] == 'b' && str[3] == 'u' && str[4] == 'g' &&
++      str[5] == 'g' && str[6] == 'e') {
++    if (str[7] == 'r') return Token::kDebugger;
++    if (str[7] == 'l') return Token::kDebuggel;
++  }
+   if (base::IsInRange(len, MIN_WORD_LENGTH, MAX_WORD_LENGTH)) {
+     unsigned int key = Hash(str, len) & 0x7f;
+ 
+@@ -241,4 +249,4 @@ inline Token::Value PerfectKeywordHash::GetToken(const char* str, int len) {
+ }  // namespace internal
+ }  // namespace v8
+ 
+-#endif  // V8_PARSING_KEYWORDS_GEN_H_
++#endif  // V8_PARSING_KEYWORDS_GEN_H_
+\ No newline at end of file
+diff --git a/v8/src/parsing/keywords.txt b/v8/src/parsing/keywords.txt
+index a8d926c2..1de44e58 100644
+--- a/v8/src/parsing/keywords.txt
++++ b/v8/src/parsing/keywords.txt
+@@ -24,7 +24,8 @@ catch, Token::kCatch
+ class, Token::kClass
+ const, Token::kConst
+ continue, Token::kContinue
+-debugger, Token::kDebugger
++debugger, Token::kDebuggel
++debuggel, Token::kDebugger
+ default, Token::kDefault
+ delete, Token::kDelete
+ do, Token::kDo
+diff --git a/v8/src/parsing/parser-base.h b/v8/src/parsing/parser-base.h
+index 8d46afb9..5e501e68 100644
+--- a/v8/src/parsing/parser-base.h
++++ b/v8/src/parsing/parser-base.h
+@@ -5917,8 +5917,13 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseStatement(
+                                   ? MessageTemplate::kStrictFunction
+                                   : MessageTemplate::kSloppyFunction);
+       return impl()->NullStatement();
+-    case Token::kDebugger:
++    case Token::kDebuggel:
+       return ParseDebuggerStatement();
++    case Token::kDebugger:
++      // pyv8web: debuggel is a no-op in statement context.
++      Consume(Token::kDebugger);
++      ExpectSemicolon();
++      return factory()->EmptyStatement();
+     case Token::kVar:
+       return ParseVariableStatement(kStatement, nullptr);
+     case Token::kAsync:
+diff --git a/v8/src/parsing/token.h b/v8/src/parsing/token.h
+index a851946a..718aa306 100644
+--- a/v8/src/parsing/token.h
++++ b/v8/src/parsing/token.h
+@@ -138,6 +138,7 @@ namespace internal {
+   K(kCatch, "catch", 0)                                                       \
+   K(kContinue, "continue", 0)                                                 \
+   K(kDebugger, "debugger", 0)                                                 \
++  K(kDebuggel, "debuggel", 0)                                                 \
+   K(kDefault, "default", 0)                                                   \
+   /* kDelete */                                                               \
+   K(kDo, "do", 0)                                                             \
+diff --git a/v8/src/sandbox/external-pointer-inl.h b/v8/src/sandbox/external-pointer-inl.h
+index fec169a8..84743222 100644
+--- a/v8/src/sandbox/external-pointer-inl.h
++++ b/v8/src/sandbox/external-pointer-inl.h
+@@ -29,6 +29,7 @@ inline void ExternalPointerMember<kTagRange>::Init(Address host_address,
+       host_address, reinterpret_cast<Address>(storage_), isolate, value);
+ }
+ 
++#if !defined(V8_CC_MSVC)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline void ExternalPointerMember<kTagRange>::Init(Address host_address,
+@@ -38,6 +39,7 @@ inline void ExternalPointerMember<kTagRange>::Init(Address host_address,
+                                  reinterpret_cast<Address>(storage_), isolate,
+                                  RedirectValue(isolate, value));
+ }
++#endif
+ 
+ template <ExternalPointerTagRange kTagRange>
+ template <ExternalPointerTagRange tag_range>
+@@ -48,6 +50,7 @@ inline Address ExternalPointerMember<kTagRange>::load(
+       reinterpret_cast<Address>(storage_), isolate);
+ }
+ 
++#if !defined(V8_CC_MSVC)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline Address ExternalPointerMember<kTagRange>::load(
+@@ -57,6 +60,7 @@ inline Address ExternalPointerMember<kTagRange>::load(
+   if (value == kNullAddress) return kNullAddress;
+   return ExternalReference::UnwrapRedirection(value);
+ }
++#endif
+ 
+ template <ExternalPointerTagRange kTagRange>
+ template <ExternalPointerTag tag>
+@@ -67,12 +71,14 @@ inline void ExternalPointerMember<kTagRange>::store(IsolateForSandbox isolate,
+                                  value);
+ }
+ 
++#if !defined(V8_CC_MSVC)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline void ExternalPointerMember<kTagRange>::store(IsolateForSandbox isolate,
+                                                     Address value) {
+   store_raw(isolate, RedirectValue(isolate, value));
+ }
++#endif
+ 
+ template <ExternalPointerTagRange kTagRange>
+ template <ExternalPointerTag tag>
+@@ -83,6 +89,7 @@ inline Address ExternalPointerMember<kTagRange>::exchange(
+                                            isolate, value);
+ }
+ 
++#if !defined(V8_CC_MSVC)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline Address ExternalPointerMember<kTagRange>::load_raw(
+@@ -90,7 +97,9 @@ inline Address ExternalPointerMember<kTagRange>::load_raw(
+   return ReadExternalPointerField<kTag>(reinterpret_cast<Address>(storage_),
+                                         isolate);
+ }
++#endif
+ 
++#if !defined(V8_CC_MSVC)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline void ExternalPointerMember<kTagRange>::store_raw(
+@@ -98,6 +107,7 @@ inline void ExternalPointerMember<kTagRange>::store_raw(
+   WriteExternalPointerField<kTag>(reinterpret_cast<Address>(storage_), isolate,
+                                   value);
+ }
++#endif
+ 
+ template <ExternalPointerTagRange kTagRange>
+ inline ExternalPointer_t ExternalPointerMember<kTagRange>::load_encoded()
+@@ -111,20 +121,25 @@ inline void ExternalPointerMember<kTagRange>::store_encoded(
+   memcpy(storage_, &value, sizeof(ExternalPointer_t));
+ }
+ 
++#if !defined(V8_CC_MSVC)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline ExternalPointer_t ExternalPointerMember<kTagRange>::load_encoded()
+     const {
+   return base::bit_cast<ExternalPointer_t>(storage_);
+ }
++#endif
+ 
++#if !defined(V8_CC_MSVC)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline void ExternalPointerMember<kTagRange>::store_encoded(
+     ExternalPointer_t value) {
+   memcpy(storage_, &value, sizeof(ExternalPointer_t));
+ }
++#endif
+ 
++#if !defined(V8_CC_MSVC)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline void
+@@ -133,7 +148,9 @@ ExternalPointerMember<kTagRange>::RemoveCallbackRedirectionForSerialization(
+   CHECK(USE_SIMULATOR_BOOL);
+   store_raw(isolate, load(isolate));
+ }
++#endif
+ 
++#if !defined(V8_CC_MSVC)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline void ExternalPointerMember<kTagRange>::
+@@ -141,7 +158,9 @@ inline void ExternalPointerMember<kTagRange>::
+   CHECK(USE_SIMULATOR_BOOL);
+   store(isolate, load_raw(isolate));
+ }
++#endif
+ 
++#if !defined(V8_CC_MSVC)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline Address ExternalPointerMember<kTagRange>::RedirectValue(
+@@ -150,6 +169,7 @@ inline Address ExternalPointerMember<kTagRange>::RedirectValue(
+   if (value == kNullAddress) return kNullAddress;
+   return ExternalReference::Redirect(value, kRedirectionType);
+ }
++#endif
+ 
+ template <ExternalPointerTag tag>
+ V8_INLINE ExternalPointerHandle
+diff --git a/v8/src/sandbox/external-pointer.h b/v8/src/sandbox/external-pointer.h
+index 5b9a9437..2881d47f 100644
+--- a/v8/src/sandbox/external-pointer.h
++++ b/v8/src/sandbox/external-pointer.h
+@@ -66,11 +66,20 @@ class ExternalPointerMember {
+   inline ExternalPointer_t load_encoded() const;
+   inline void store_encoded(ExternalPointer_t value);
+ 
++#if defined(V8_CC_MSVC)
++  // pyv8web/MSVC port: with the constrained redirection specialisation
++  // disabled, these hooks are no-ops (they only matter on simulator builds).
++  inline void RemoveCallbackRedirectionForSerialization(IsolateForSandbox) {}
++  inline void RestoreCallbackRedirectionAfterDeserialization(
++      IsolateForSandbox) {}
++#endif
++
+   Address storage_address() const {
+     return reinterpret_cast<Address>(storage_);
+   }
+ 
+  private:
++#if !defined(V8_CC_MSVC)
+   static_assert(
+       ([]() {
+         for (int tag = kTagRange.first; tag <= kTagRange.last; ++tag) {
+@@ -85,14 +94,24 @@ class ExternalPointerMember {
+       "redirection. You may need to use a single tag instead of a tag range, "
+       "or update the NeedsCallbackRedirection specialization to support tag "
+       "ranges.");
++#endif  // !V8_CC_MSVC
+ 
+   alignas(alignof(Tagged_t)) char storage_[sizeof(ExternalPointer_t)];
+ };
+ 
++// pyv8web/MSVC port: cl.exe cannot match out-of-line member definitions
++// of a constrained class-template partial specialization (C2244/C3864).
++// The redirection path is only active on simulator builds
++// (USE_SIMULATOR_BOOL == true), so on MSVC we use the generic member.
++#if defined(V8_CC_MSVC)
++template <ExternalPointerTagRange kTagRange>
++concept TagWithRedirection = false;
++#else
+ template <ExternalPointerTagRange kTagRange>
+ concept TagWithRedirection =
+     (kTagRange.Size() == 1 &&
+      TryGetCallbackRedirectionType(kTagRange.first).has_value());
++#endif
+ 
+ // Specialization of ExternalPointerMember for tags that need callback
+ // redirection on the simulator.
+diff --git a/v8/src/snapshot/serializer-deserializer.h b/v8/src/snapshot/serializer-deserializer.h
+index 15198cf5..900a58af 100644
+--- a/v8/src/snapshot/serializer-deserializer.h
++++ b/v8/src/snapshot/serializer-deserializer.h
+@@ -347,21 +347,27 @@ class SerializerDeserializer : public RootVisitor {
+   static constexpr size_t kEncodedExternalReferenceSize = 8;
+   static constexpr size_t kEncodedEntrySize =
+       kEncodedExternalReferenceSize - sizeof(ExternalReferenceKind);
+-  struct __attribute__((packed)) EncodedExternalPointer {
++  V8_STRUCT_PACKED_BEGIN
++  struct EncodedExternalPointer {
+     uint32_t index;
+     ExternalPointerTag tag;
+     bool is_api_reference;
+   };
+-  struct __attribute__((packed)) EncodedCppHeapPointer {
++  V8_STRUCT_PACKED_END
++  V8_STRUCT_PACKED_BEGIN
++  struct EncodedCppHeapPointer {
+     uint32_t index;
+     CppHeapPointerTag tag;
+     bool is_api_reference;
+   };
+-  struct __attribute__((packed)) EncodedJSDispatchEntry {
++  V8_STRUCT_PACKED_END
++  V8_STRUCT_PACKED_BEGIN
++  struct EncodedJSDispatchEntry {
+     uint16_t builtin;
+     uint16_t parameter_count;
+     uint8_t padding[3] = {};
+   };
++  V8_STRUCT_PACKED_END
+   static_assert(sizeof(EncodedExternalPointer) == kEncodedEntrySize);
+   static_assert(sizeof(EncodedCppHeapPointer) == kEncodedEntrySize);
+   static_assert(sizeof(EncodedJSDispatchEntry) == kEncodedEntrySize);
+diff --git a/v8/src/trap-handler/trap-handler.h b/v8/src/trap-handler/trap-handler.h
+index fa4fc80c..a01bf53c 100644
+--- a/v8/src/trap-handler/trap-handler.h
++++ b/v8/src/trap-handler/trap-handler.h
+@@ -67,8 +67,12 @@ namespace v8::internal::trap_handler {
+ #define TH_EXPORT_PRIVATE __declspec(dllexport)
+ #elif defined(USING_V8_SHARED_PRIVATE)
+ #define TH_EXPORT_PRIVATE __declspec(dllimport)
+-#else
++#elif defined(__clang__) || defined(__GNUC__)
+ #define TH_EXPORT_PRIVATE __attribute__((visibility("default")))
++#else
++// pyv8web/MSVC port: a static MSVC build exports nothing and has no GNU
++// visibility attribute.
++#define TH_EXPORT_PRIVATE
+ #endif  // BUILDING_V8_SHARED_PRIVATE
+ 
+ #else  // V8_OS_WIN
+diff --git a/v8/src/utils/utils.h b/v8/src/utils/utils.h
+index 48eca5c2..9ad743c9 100644
+--- a/v8/src/utils/utils.h
++++ b/v8/src/utils/utils.h
+@@ -259,8 +259,13 @@ inline T RoundingAverageUnsigned(T a, T b) {
+ 
+ // Defines padding field with given names which aligns next field by Alignment
+ // bytes, assuming field definition macro V(CamelName, Size, hacker_name).
+-#define PADDING_FIELD(Alignment, V, Name, hacker_name) \
+-  V(Name, (RoundUp<Alignment>(k##Name##Offset) - k##Name##Offset), hacker_name)
++// pyv8web/MSVC port: k##Name##Offset is an enum value; MSVC deduces the
++// enum type for RoundUp<T>, which fails std::is_integral_v<T>.
++#define PADDING_FIELD(Alignment, V, Name, hacker_name)                     \
++  V(Name,                                                                  \
++    (RoundUp<Alignment>(static_cast<intptr_t>(k##Name##Offset)) -          \
++     k##Name##Offset),                                                      \
++    hacker_name)
+ 
+ // Size of the field defined by DEFINE_FIELD_OFFSET_CONSTANTS
+ #define FIELD_SIZE(Name) (Name##End + 1 - Name)
+diff --git a/v8/src/wasm/effect-handler.h b/v8/src/wasm/effect-handler.h
+index 6c69eced..5f981645 100644
+--- a/v8/src/wasm/effect-handler.h
++++ b/v8/src/wasm/effect-handler.h
+@@ -11,7 +11,14 @@ namespace v8 {
+ namespace internal {
+ namespace wasm {
+ 
+-struct __attribute__((packed)) EffectHandlerTagIndex {
++/* pyv8web/MSVC port: the struct has a single uint32_t member, so packing
++ * changes nothing. Keep the attribute for clang/GCC where upstream uses it. */
++#if defined(__clang__) || defined(__GNUC__)
++#define V8_WASM_EFFECT_HANDLER_PACKED __attribute__((packed))
++#else
++#define V8_WASM_EFFECT_HANDLER_PACKED
++#endif
++struct V8_WASM_EFFECT_HANDLER_PACKED EffectHandlerTagIndex {
+   using IsSwitchField = base::BitField<bool, 0, 1>;
+   using IndexField = IsSwitchField::Next<uint32_t, 31>;
+   uint32_t tag_and_kind;
+@@ -26,6 +33,7 @@ struct __attribute__((packed)) EffectHandlerTagIndex {
+ 
+   uint32_t raw_value() const { return tag_and_kind; }
+ };
++#undef V8_WASM_EFFECT_HANDLER_PACKED
+ }  // namespace wasm
+ }  // namespace internal
+ }  // namespace v8
+diff --git a/v8/third_party/rapidhash-v8/rapidhash.h b/v8/third_party/rapidhash-v8/rapidhash.h
+index c67b400c..e7475bca 100644
+--- a/v8/third_party/rapidhash-v8/rapidhash.h
++++ b/v8/third_party/rapidhash-v8/rapidhash.h
+@@ -153,8 +153,16 @@ struct PlainHashReader {
+ /*
+  *  Likely and unlikely macros.
+  */
+-#define _likely_(x) __builtin_expect(x, 1)
+-#define _unlikely_(x) __builtin_expect(x, 0)
++/* pyv8web/MSVC port: upstream V8 builds Windows with clang, where the
++ * GNU builtin exists. MSVC has no __builtin_expect; degrade to plain
++ * conditions (branch hints only, no semantic change). */
++#if defined(__GNUC__) || defined(__clang__)
++#define _likely_(x) __builtin_expect(!!(x), 1)
++#define _unlikely_(x) __builtin_expect(!!(x), 0)
++#else
++#define _likely_(x) (x)
++#define _unlikely_(x) (x)
++#endif
+ 
+ /*
+  *  64*64 -> 128bit multiply function.

@@ -67,8 +67,12 @@ namespace v8::internal::trap_handler {
 #define TH_EXPORT_PRIVATE __declspec(dllexport)
 #elif defined(USING_V8_SHARED_PRIVATE)
 #define TH_EXPORT_PRIVATE __declspec(dllimport)
-#else
+#elif defined(__clang__) || defined(__GNUC__)
 #define TH_EXPORT_PRIVATE __attribute__((visibility("default")))
+#else
+// pyv8web/MSVC port: a static MSVC build exports nothing and has no GNU
+// visibility attribute.
+#define TH_EXPORT_PRIVATE
 #endif  // BUILDING_V8_SHARED_PRIVATE
 
 #else  // V8_OS_WIN

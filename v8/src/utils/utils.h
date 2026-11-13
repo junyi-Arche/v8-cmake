@@ -259,8 +259,13 @@ inline T RoundingAverageUnsigned(T a, T b) {
 
 // Defines padding field with given names which aligns next field by Alignment
 // bytes, assuming field definition macro V(CamelName, Size, hacker_name).
-#define PADDING_FIELD(Alignment, V, Name, hacker_name) \
-  V(Name, (RoundUp<Alignment>(k##Name##Offset) - k##Name##Offset), hacker_name)
+// pyv8web/MSVC port: k##Name##Offset is an enum value; MSVC deduces the
+// enum type for RoundUp<T>, which fails std::is_integral_v<T>.
+#define PADDING_FIELD(Alignment, V, Name, hacker_name)                     \
+  V(Name,                                                                  \
+    (RoundUp<Alignment>(static_cast<intptr_t>(k##Name##Offset)) -          \
+     k##Name##Offset),                                                      \
+    hacker_name)
 
 // Size of the field defined by DEFINE_FIELD_OFFSET_CONSTANTS
 #define FIELD_SIZE(Name) (Name##End + 1 - Name)

@@ -437,6 +437,12 @@ enum ContextLookupFlags {
   V(WEAKSET_ADD_INDEX, JSFunction, weakset_add)                                \
   V(WRAPPED_FUNCTION_MAP_INDEX, Map, wrapped_function_map)                     \
   V(RETAINED_MAPS, Object, retained_maps)                                      \
+  V(HIERARCHY_REQUEST_ERROR_FUNCTION_INDEX, JSFunction,             \
+    hierarchy_request_error_function)                              \
+  V(DATA_CLONE_ERROR_FUNCTION_INDEX, JSFunction,                    \
+    data_clone_error_function)                                      \
+  V(NOTSUPPORTED_ERROR_FUNCTION_INDEX, JSFunction,                  \
+    notsupported_error_function)                                    \
   NATIVE_CONTEXT_FIELDS_TEMPORAL(V)
 
 // JSFunctions are pairs (context, function code), sometimes also called

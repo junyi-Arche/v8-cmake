@@ -203,6 +203,34 @@ static_assert(sizeof(JSDispatchHandleMember) == sizeof(uint32_t));
 // which can lose aliasing information.
 // Place V8_TQ_* annotations before the member. After the [0] declarator, an
 // attribute would apply to the type instead.
+#if defined(_MSC_VER) && !defined(__clang__)
+// pyv8web/MSVC port: MSVC error C2503 forbids a class with a zero-sized
+// array from being a base class. The FAM contributes zero bytes, so
+// sizeof(*this) (the enclosing class is complete inside an inline member
+// function body) is exactly the data start offset. Verified by the existing
+// static_assert(sizeof(FixedArray) == Internals::kFixedArrayHeaderSize).
+#define FLEXIBLE_ARRAY_MEMBER(Type, name, ...)                              \
+  using FlexibleDataReturnType = Type[0];                                   \
+  FlexibleDataReturnType& name() {                                          \
+    return *reinterpret_cast<FlexibleDataReturnType*>(                      \
+        reinterpret_cast<char*>(this) + sizeof(*this));                     \
+  }                                                                         \
+  const FlexibleDataReturnType& name() const {                              \
+    return *reinterpret_cast<const FlexibleDataReturnType*>(                \
+        reinterpret_cast<const char*>(this) + sizeof(*this));               \
+  }                                                                         \
+  V8_TQ_FIELD_MARK("V8_TQ_NAME(" #name ")")                                 \
+  static_assert(true);                                                      \
+                                                                            \
+ public:                                                                    \
+  template <typename Class>                                                 \
+  static constexpr int OffsetOfDataStart() {                                \
+    return static_cast<int>(sizeof(Class));                                 \
+  }                                                                         \
+                                                                            \
+ private:                                                                   \
+  using FlexibleDataType = Type
+#else
 #define FLEXIBLE_ARRAY_MEMBER(Type, name, ...)                             \
   using FlexibleDataReturnType = Type[0];                                  \
   FlexibleDataReturnType& name() { return flexible_array_member_data_; }   \
@@ -224,6 +252,8 @@ static_assert(sizeof(JSDispatchHandleMember) == sizeof(uint32_t));
                                                                            \
  private:                                                                  \
   using FlexibleDataType = Type
+
+#endif  // _MSC_VER && !__clang__
 
 // OFFSET_OF_DATA_START(T) returns the offset of the FLEXIBLE_ARRAY_MEMBER of
 // the class T.

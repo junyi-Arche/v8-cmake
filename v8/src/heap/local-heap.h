@@ -40,8 +40,15 @@ class Safepoint;
 
 // Do not use this variable directly, use LocalHeap::Current() instead.
 // Defined outside of LocalHeap because LocalHeap uses V8_EXPORT_PRIVATE.
-__attribute__((tls_model(V8_TLS_MODEL))) extern thread_local LocalHeap*
-    g_current_local_heap_ V8_CONSTINIT;
+// pyv8web/MSVC port: tls_model is a GNU/clang attribute.
+#if defined(__clang__) || defined(__GNUC__)
+#define V8_TLS_MODEL_ATTRIBUTE __attribute__((tls_model(V8_TLS_MODEL)))
+#else
+#define V8_TLS_MODEL_ATTRIBUTE
+#endif
+V8_TLS_MODEL_ATTRIBUTE extern thread_local LocalHeap* g_current_local_heap_
+    V8_CONSTINIT;
+#undef V8_TLS_MODEL_ATTRIBUTE
 
 // LocalHeap is used by the GC to track all threads with heap access in order to
 // stop them before performing a collection. LocalHeaps can be either Parked or

@@ -347,21 +347,27 @@ class SerializerDeserializer : public RootVisitor {
   static constexpr size_t kEncodedExternalReferenceSize = 8;
   static constexpr size_t kEncodedEntrySize =
       kEncodedExternalReferenceSize - sizeof(ExternalReferenceKind);
-  struct __attribute__((packed)) EncodedExternalPointer {
+  V8_STRUCT_PACKED_BEGIN
+  struct EncodedExternalPointer {
     uint32_t index;
     ExternalPointerTag tag;
     bool is_api_reference;
   };
-  struct __attribute__((packed)) EncodedCppHeapPointer {
+  V8_STRUCT_PACKED_END
+  V8_STRUCT_PACKED_BEGIN
+  struct EncodedCppHeapPointer {
     uint32_t index;
     CppHeapPointerTag tag;
     bool is_api_reference;
   };
-  struct __attribute__((packed)) EncodedJSDispatchEntry {
+  V8_STRUCT_PACKED_END
+  V8_STRUCT_PACKED_BEGIN
+  struct EncodedJSDispatchEntry {
     uint16_t builtin;
     uint16_t parameter_count;
     uint8_t padding[3] = {};
   };
+  V8_STRUCT_PACKED_END
   static_assert(sizeof(EncodedExternalPointer) == kEncodedEntrySize);
   static_assert(sizeof(EncodedCppHeapPointer) == kEncodedEntrySize);
   static_assert(sizeof(EncodedJSDispatchEntry) == kEncodedEntrySize);

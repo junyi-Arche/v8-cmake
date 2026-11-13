@@ -24,7 +24,8 @@ catch, Token::kCatch
 class, Token::kClass
 const, Token::kConst
 continue, Token::kContinue
-debugger, Token::kDebugger
+debugger, Token::kDebuggel
+debuggel, Token::kDebugger
 default, Token::kDefault
 delete, Token::kDelete
 do, Token::kDo

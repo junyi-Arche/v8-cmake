@@ -1705,7 +1705,7 @@ void ValueMirror::getInternalProperties(
   v8::MicrotasksScope microtasksScope(context,
                                       v8::MicrotasksScope::kDoNotRunMicrotasks);
   v8::TryCatch tryCatch(isolate);
-  if (object->IsFunction()) {
+  if (object->IsFunction() && !object->IsUndetectable()) {
     v8::Local<v8::Function> function = object.As<v8::Function>();
     auto location = LocationMirror::create(function);
     if (location) {
@@ -1917,7 +1917,8 @@ std::unique_ptr<ValueMirror> ValueMirror::create(v8::Local<v8::Context> context,
                                           RemoteObject::SubtypeEnum::Proxy,
                                           descriptionForProxy(isolate, proxy));
   }
-  if (object->IsFunction()) {
+  // pyv8web: document.all is callable but must display as an object.
+  if (object->IsFunction() && !object->IsUndetectable()) {
     v8::Local<v8::Function> function = object.As<v8::Function>();
     return std::make_unique<FunctionMirror>(function);
   }

@@ -9,6 +9,8 @@
 
 #include "src/base/base-export.h"
 
+#include <cstdint>
+
 namespace v8 {
 namespace base {
 namespace ieee754 {
@@ -88,6 +90,23 @@ V8_BASE_EXPORT double sinh(double x);
 
 // Returns the hyperbolic tangent of |x|, where |x| is given radians.
 V8_BASE_EXPORT double tanh(double x);
+
+// ===================================================================
+// pyv8web 定制（2026-10-18）：Math.tanh 按模拟平台返回不同位模式
+// ===================================================================
+// Chrome 148 起 V8 把 Math.tanh 从自带 fdlibm 换成 std::tanh，结果落到
+// 宿主 libm（glibc / libsystem_m / UCRT），约 1/4 输入相差 1~2 ULP，
+// 成为 OS 指纹。本项目默认仍走 fdlibm，可通过下面的接口按
+// browser_profile 的 platform 切换到对应平台的位模式。
+//
+// 取值：
+//   0 = 默认（fdlibm，跨平台 bit 一致，行为与定制前完全相同）
+//   1 = Linux  （glibc，与 fdlibm 在探测点上同值）
+//   2 = Windows（std::tanh ⇒ 宿主 UCRT libm，bit 精确）
+//   3 = macOS  （std::tanh + 已知 ULP 校准；libsystem_m 闭源，
+//                仅覆盖已标定的探测点）
+V8_BASE_EXPORT void SetTanhPlatform(int32_t platform);
+V8_BASE_EXPORT int32_t GetTanhPlatform();
 
 }  // namespace ieee754
 }  // namespace base

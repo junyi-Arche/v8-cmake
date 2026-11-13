@@ -234,11 +234,92 @@ double pow(double x, double y) { return LIBC_NAMESPACE::shared::pow(x, y); }
 
 double sinh(double x) { return LIBC_NAMESPACE::shared::sinh(x); }
 
+// ★ Math.tanh 的公开入口（pyv8web 定制）：转调平台分派。
+//
+// 所有调用路径都经由这里：
+//   - 解释器 / Sparkplug：CSA macro Float64Tanh
+//   - TurboFan / Maglev：Ieee754Float64Tanh 指令 → ExternalReference
+//   - ExternalReference::ieee754_tanh_function() 指向本符号
+// 因此改这一处即可覆盖全部运行期场景。
+
+// ===================================================================
+// pyv8web: Math.tanh OS fingerprint dispatch, reworked for V8 16.0.
+// 16.0 routes tanh to LLVM libc's shared implementation; default keeps
+// that bit pattern, Windows uses the host UCRT std::tanh, macOS applies
+// the calibrated ULP offsets (libsystem_m is closed source).
+// ===================================================================
+#include <atomic>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+
+namespace {
+enum TanhPlatform : int32_t {
+  kTanhPlatformDefault = 0,
+  kTanhPlatformLinux = 1,
+  kTanhPlatformWindows = 2,
+  kTanhPlatformMacOS = 3,
+};
+std::atomic<int32_t> g_tanh_platform{kTanhPlatformDefault};
+
+struct TanhUlpEntry { uint64_t key; int32_t delta; };
+const TanhUlpEntry kMacOsTanhUlp[] = {
+    {0x3FE356FB17AF2E91ull, 0},
+    {0x3FE53FCA0A748A40ull, +1},
+    {0x3FE6EBE982D6605Cull, +1},
+};
+inline uint64_t DoubleToBits(double d) {
+  uint64_t u; std::memcpy(&u, &d, sizeof(u)); return u;
+}
+inline double BitsToDouble(uint64_t u) {
+  double d; std::memcpy(&d, &u, sizeof(d)); return d;
+}
+inline double ShiftUlp(double x, int32_t delta) {
+  const uint64_t u = DoubleToBits(x);
+  const uint64_t sign = u & 0x8000000000000000ull;
+  uint64_t mag = u & 0x7FFFFFFFFFFFFFFFull;
+  mag = (mag + static_cast<uint64_t>(static_cast<int64_t>(delta))) &
+        0x7FFFFFFFFFFFFFFFull;
+  return BitsToDouble(sign | mag);
+}
+}  // namespace
+
+void SetTanhPlatform(int32_t platform) {
+  g_tanh_platform.store(platform, std::memory_order_relaxed);
+}
+int32_t GetTanhPlatform() {
+  return g_tanh_platform.load(std::memory_order_relaxed);
+}
+
+namespace {
+double TanhDispatch(double x) {
+  const int32_t plat = g_tanh_platform.load(std::memory_order_relaxed);
+  switch (plat) {
+    case kTanhPlatformWindows:
+      return std::tanh(x);
+    case kTanhPlatformMacOS: {
+      const double v = std::tanh(x);
+      const uint64_t key = DoubleToBits(std::fabs(v));
+      for (size_t i = 0; i < sizeof(kMacOsTanhUlp) / sizeof(kMacOsTanhUlp[0]);
+           ++i) {
+        if (kMacOsTanhUlp[i].key == key)
+          return ShiftUlp(v, kMacOsTanhUlp[i].delta);
+      }
+      return v;
+    }
+    case kTanhPlatformLinux:
+    default:
+      return LIBC_NAMESPACE::shared::tanh(x);
+  }
+}
+}  // namespace
+
+double tanh(double x) { return TanhDispatch(x); }
+
 #undef EXTRACT_WORDS
 #undef GET_HIGH_WORD
 #undef SET_HIGH_WORD
 
-double tanh(double x) { return LIBC_NAMESPACE::shared::tanh(x); }
 
 }  // namespace ieee754
 }  // namespace base

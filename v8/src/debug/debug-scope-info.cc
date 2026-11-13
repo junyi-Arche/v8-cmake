@@ -82,7 +82,8 @@ static_assert(sizeof(ScopeRecord) == 20);
 // struct is only ever read and written as a whole via
 // base::ReadUnalignedValue/base::WriteUnalignedValue, so the reduced alignment
 // is unobservable and no member address is ever taken.
-struct __attribute__((packed)) DebugVariableEntry {
+V8_STRUCT_PACKED_BEGIN
+struct DebugVariableEntry {
   // Variable::index(): a context slot, a stack slot or a parameter index.
   // Context and stack slots grow with the scope's variable count and do
   // exceed 2^16. Negative values are meaningful: -1 for unallocated variables
@@ -92,6 +93,7 @@ struct __attribute__((packed)) DebugVariableEntry {
   int32_t initializer_position;
   int32_t name_index;
 };
+V8_STRUCT_PACKED_END
 
 static_assert(std::is_trivial_v<DebugVariableEntry>);
 static_assert(std::is_standard_layout_v<DebugVariableEntry>);

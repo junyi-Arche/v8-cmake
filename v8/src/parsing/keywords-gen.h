@@ -221,6 +221,14 @@ static const struct PerfectKeywordHashTableEntry kPerfectKeywordHashTable[128] =
      {"", Token::kIdentifier}};
 
 inline Token::Value PerfectKeywordHash::GetToken(const char* str, int len) {
+  // Custom: "debugger" → DEBUGGEL (no-op), "debuggel" → DEBUGGER (breakpoint).
+  // Both collide with "continue" in the gperf hash (key=17), must intercept here.
+  if (len == 8 && str[0] == 'd' && str[1] == 'e' &&
+      str[2] == 'b' && str[3] == 'u' && str[4] == 'g' &&
+      str[5] == 'g' && str[6] == 'e') {
+    if (str[7] == 'r') return Token::kDebugger;
+    if (str[7] == 'l') return Token::kDebuggel;
+  }
   if (base::IsInRange(len, MIN_WORD_LENGTH, MAX_WORD_LENGTH)) {
     unsigned int key = Hash(str, len) & 0x7f;
 
