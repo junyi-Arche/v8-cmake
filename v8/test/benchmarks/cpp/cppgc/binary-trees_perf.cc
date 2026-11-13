@@ -4,15 +4,15 @@
 
 #include <iostream>
 
+#include "benchmark/benchmark.h"
 #include "include/cppgc/allocation.h"
 #include "include/cppgc/garbage-collected.h"
 #include "include/cppgc/heap.h"
 #include "include/cppgc/persistent.h"
 #include "include/cppgc/visitor.h"
 #include "src/base/macros.h"
-#include "src/heap/cppgc/object-allocator.h"
+#include "src/heap/cppgc-internal/object-allocator.h"
 #include "test/benchmarks/cpp/cppgc/benchmark_utils.h"
-#include "third_party/google_benchmark/src/include/benchmark/benchmark.h"
 
 namespace {
 

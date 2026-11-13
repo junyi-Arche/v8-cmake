@@ -43,14 +43,10 @@
 #ifndef GOOGLETEST_INCLUDE_GTEST_INTERNAL_GTEST_STRING_H_
 #define GOOGLETEST_INCLUDE_GTEST_INTERNAL_GTEST_STRING_H_
 
-#ifdef __BORLANDC__
-// string.h is not guaranteed to provide strcpy on C++ Builder.
-#include <mem.h>
-#endif
-
 #include <string.h>
 
 #include <cstdint>
+#include <sstream>
 #include <string>
 
 #include "gtest/internal/gtest-port.h"
@@ -59,7 +55,7 @@ namespace testing {
 namespace internal {
 
 // String - an abstract class holding static string utilities.
-class GTEST_API_ String {
+class GTEST_API_ [[nodiscard]] String {
  public:
   // Static utility methods
 
@@ -72,7 +68,7 @@ class GTEST_API_ String {
   // memory using malloc().
   static const char* CloneCString(const char* c_str);
 
-#if GTEST_OS_WINDOWS_MOBILE
+#ifdef GTEST_OS_WINDOWS_MOBILE
   // Windows CE does not have the 'ANSI' versions of Win32 APIs. To be
   // able to pass strings to Win32 APIs on CE we need to convert them
   // to 'Unicode', UTF-16.
@@ -165,7 +161,7 @@ class GTEST_API_ String {
 
  private:
   String();  // Not meant to be instantiated.
-};           // class String
+};  // class String
 
 // Gets the content of the stringstream's buffer as an std::string.  Each '\0'
 // character in the buffer is replaced with "\\0".

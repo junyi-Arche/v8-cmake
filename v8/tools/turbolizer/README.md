@@ -17,11 +17,14 @@ Turbolizer is build using npm:
 Afterwards, turbolizer can be hosted locally by starting a web server that serve
 the contents of the turbolizer directory, e.g.:
 
-    python2 -m SimpleHTTPServer 8000
+    npm run dev-server
 
-If the version of python is above 3.x, please use this command:
+For convenience, files can be loaded via the command line:
 
-    python3 -m  http.server 8000
+    ./cli.js path/to/turbo-foo-1.json
+    # or...
+    npm install -g  # install globally
+    turbolizer path/to/turbo-foo-1.json
 
 To deploy to a directory that can be hosted the script `deploy` can be used. The
 following command will deploy to the directory /www/turbolizer:

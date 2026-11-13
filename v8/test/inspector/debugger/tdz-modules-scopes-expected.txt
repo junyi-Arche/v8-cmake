@@ -1,15 +1,17 @@
 Test module scope with variables in TDZ.
 Debug break
   Scope type: module
-    moduleLet : undefined
-    moduleConst : undefined
-    exportedModuleLet : undefined
-    exportedModuleConst : undefined
+    moduleLet : <value_unavailable>
+    moduleConst : <value_unavailable>
+    exportedModuleLet : <value_unavailable>
+    exportedModuleConst : <value_unavailable>
 Debug break
   Scope type: local
   Scope type: module
-    exportedModuleLet : undefined
-    exportedModuleConst : undefined
+    moduleLet : <value_unavailable>
+    moduleConst : <value_unavailable>
+    exportedModuleLet : <value_unavailable>
+    exportedModuleConst : <value_unavailable>
 Debug break
   Scope type: module
     moduleLet : 3
@@ -19,19 +21,23 @@ Debug break
 Debug break
   Scope type: local
   Scope type: module
+    moduleLet : <value_unavailable>
+    moduleConst : <value_unavailable>
     exportedModuleLet : 1
     exportedModuleConst : 2
 Debug break
   Scope type: module
     exportedModuleLet : 1
     exportedModuleConst : 2
-    moduleLet : undefined
-    moduleConst : undefined
+    moduleLet : <value_unavailable>
+    moduleConst : <value_unavailable>
 Debug break
   Scope type: local
   Scope type: module
     exportedModuleLet : 1
     exportedModuleConst : 2
+    moduleLet : <value_unavailable>
+    moduleConst : <value_unavailable>
 Debug break
   Scope type: module
     exportedModuleLet : 1
@@ -43,3 +49,5 @@ Debug break
   Scope type: module
     exportedModuleLet : 1
     exportedModuleConst : 2
+    moduleLet : <value_unavailable>
+    moduleConst : <value_unavailable>

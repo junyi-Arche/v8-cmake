@@ -5,6 +5,10 @@
 
 #include "src/libsampler/sampler.h"
 
+#ifdef USE_SIGNALS
+#include <signal.h>
+#endif
+
 #include "include/v8-external.h"
 #include "include/v8-function.h"
 #include "src/base/platform/platform.h"
@@ -51,7 +55,7 @@ class TestSampler : public Sampler {
     isolate()->GetStackSample(regs, frames, kMaxFramesCount, &sample_info);
     if (is_counting_samples_) {
       if (sample_info.vm_state == JS) ++js_sample_count_;
-      if (sample_info.vm_state == EXTERNAL) ++external_sample_count_;
+      if (IsExternal(sample_info.vm_state)) ++external_sample_count_;
     }
   }
 };
@@ -60,11 +64,11 @@ class TestApiCallbacks {
  public:
   TestApiCallbacks() = default;
 
-  static void Getter(v8::Local<v8::String> name,
+  static void Getter(v8::Local<v8::Name> name,
                      const v8::PropertyCallbackInfo<v8::Value>& info) {}
 
-  static void Setter(v8::Local<v8::String> name, v8::Local<v8::Value> value,
-                     const v8::PropertyCallbackInfo<void>& info) {}
+  static void Setter(v8::Local<v8::Name> name, v8::Local<v8::Value> value,
+                     const v8::PropertyCallbackInfo<v8::Boolean>& info) {}
 };
 
 static void RunSampler(v8::Local<v8::Context> env,
@@ -72,16 +76,20 @@ static void RunSampler(v8::Local<v8::Context> env,
                        v8::Local<v8::Value> argv[], int argc,
                        unsigned min_js_samples = 0,
                        unsigned min_external_samples = 0) {
-  TestSampler sampler(env->GetIsolate());
-  TestSamplingThread thread(&sampler);
-  sampler.Start();
-  sampler.StartCountingSamples();
+  // Allocate the sampler on the heap rather than on the stack: when hardware
+  // sandboxing is enabled, the main thread's stack is tagged with
+  // extension_pkey_, which is made read-only inside the SIGPROF signal
+  // handler.
+  auto sampler = std::make_unique<TestSampler>(v8::Isolate::GetCurrent());
+  TestSamplingThread thread(sampler.get());
+  sampler->Start();
+  sampler->StartCountingSamples();
   thread.StartSynchronously();
   do {
     function->Call(env, env->Global(), argc, argv).ToLocalChecked();
-  } while (sampler.js_sample_count() < min_js_samples ||
-           sampler.external_sample_count() < min_external_samples);
-  sampler.Stop();
+  } while (sampler->js_sample_count() < min_js_samples ||
+           sampler->external_sample_count() < min_external_samples);
+  sampler->Stop();
   thread.Join();
 }
 
@@ -98,10 +106,16 @@ static const char* sampler_test_source =
 static v8::Local<v8::Function> GetFunction(v8::Local<v8::Context> env,
                                            const char* name) {
   return env->Global()
-      ->Get(env, String::NewFromUtf8(env->GetIsolate(), name).ToLocalChecked())
+      ->Get(
+          env,
+          String::NewFromUtf8(v8::Isolate::GetCurrent(), name).ToLocalChecked())
       .ToLocalChecked()
       .As<v8::Function>();
 }
+
+// This tag value has been picked arbitrarily between 0 and
+// V8_EXTERNAL_POINTER_TAG_COUNT.
+constexpr v8::ExternalPointerTypeTag kTestApiCallbacksTag = 26;
 
 TEST_F(SamplerTest, LibSamplerCollectSample) {
   v8::HandleScope scope(isolate());
@@ -112,9 +126,11 @@ TEST_F(SamplerTest, LibSamplerCollectSample) {
       func_template->InstanceTemplate();
 
   TestApiCallbacks accessors;
-  v8::Local<v8::External> data = v8::External::New(isolate(), &accessors);
-  instance_template->SetAccessor(NewString("foo"), &TestApiCallbacks::Getter,
-                                 &TestApiCallbacks::Setter, data);
+  v8::Local<v8::External> data =
+      v8::External::New(isolate(), &accessors, kTestApiCallbacksTag);
+  instance_template->SetNativeDataProperty(NewString("foo"),
+                                           &TestApiCallbacks::Getter,
+                                           &TestApiCallbacks::Setter, data);
   v8::Local<v8::Function> func =
       func_template->GetFunction(context()).ToLocalChecked();
   v8::Local<v8::Object> instance =
@@ -182,6 +198,7 @@ TEST_F(SamplerTest, SamplerManager_DoesNotReAdd) {
   RegisterState state;
   manager->DoSample(state);
   CHECK_EQ(1, sampler1.sample_count());
+  manager->RemoveSampler(&sampler1);
   sampler1.set_active(false);
 }
 
@@ -209,6 +226,103 @@ TEST_F(SamplerTest, AtomicGuard_GetBlockingSuccess) {
   }
   AtomicGuard guard(&atomic);
   CHECK(guard.is_success());
+}
+
+TEST_F(SamplerTest, StopSamplerWhileSignalPendingDoesNotCrash) {
+  class SampleAndStopThread : public base::Thread {
+   public:
+    explicit SampleAndStopThread(Sampler* sampler)
+        : Thread(base::Thread::Options("SampleAndStopThread")),
+          sampler_(sampler) {}
+
+    void Run() override {
+      sampler_->DoSample();
+      sampler_->DoSample();
+      sampler_->Stop();
+    }
+
+   private:
+    Sampler* sampler_;
+  };
+
+  struct sigaction old_sa;
+  CHECK_EQ(0, sigaction(SIGPROF, nullptr, &old_sa));
+
+  for (int i = 0; i < 100; ++i) {
+    // Allocate the sampler on the heap rather than on the stack: when hardware
+    // sandboxing is enabled, the main thread's stack is tagged with
+    // extension_pkey_, which is made read-only inside the SIGPROF signal
+    // handler.
+    auto sampler = std::make_unique<CountingSampler>(isolate());
+    sampler->Start();
+    SampleAndStopThread thread(sampler.get());
+    CHECK(thread.Start());
+    thread.Join();
+
+    struct sigaction current_sa;
+    CHECK_EQ(0, sigaction(SIGPROF, nullptr, &current_sa));
+    CHECK_EQ(old_sa.sa_flags & SA_SIGINFO, current_sa.sa_flags & SA_SIGINFO);
+    if (old_sa.sa_flags & SA_SIGINFO) {
+      CHECK_EQ(old_sa.sa_sigaction, current_sa.sa_sigaction);
+    } else {
+      CHECK_EQ(old_sa.sa_handler, current_sa.sa_handler);
+    }
+  }
+}
+
+namespace {
+void CustomSigprofHandler(int signal, siginfo_t* info, void* context) {}
+}  // namespace
+
+TEST_F(SamplerTest, RestorePreviousSignalHandlerOnStop) {
+  struct sigaction original_sa;
+  struct sigaction custom_sa;
+  custom_sa.sa_sigaction = &CustomSigprofHandler;
+  sigemptyset(&custom_sa.sa_mask);
+  custom_sa.sa_flags = SA_SIGINFO;
+  CHECK_EQ(0, sigaction(SIGPROF, &custom_sa, &original_sa));
+
+  // Allocate the samplers on the heap rather than on the stack: when hardware
+  // sandboxing is enabled, the main thread's stack is tagged with
+  // extension_pkey_, which is made read-only inside the SIGPROF signal
+  // handler.
+  auto sampler1 = std::make_unique<CountingSampler>(isolate());
+  auto sampler2 = std::make_unique<CountingSampler>(isolate());
+  sampler1->Start();
+
+  struct sigaction active_sa;
+  CHECK_EQ(0, sigaction(SIGPROF, nullptr, &active_sa));
+  CHECK_NE(active_sa.sa_sigaction, &CustomSigprofHandler);
+
+  sampler2->Start();
+
+  // Block SIGPROF while calling DoSample() on both samplers so the second call
+  // deterministically coalesces with the first in-flight signal, then unblock
+  // SIGPROF and verify that the single signal samples both samplers.
+  sigset_t sigprof_set;
+  sigset_t old_sigset;
+  sigemptyset(&sigprof_set);
+  sigaddset(&sigprof_set, SIGPROF);
+  CHECK_EQ(0, pthread_sigmask(SIG_BLOCK, &sigprof_set, &old_sigset));
+  sampler1->DoSample();
+  sampler2->DoSample();
+  CHECK_EQ(0, sampler1->sample_count());
+  CHECK_EQ(0, sampler2->sample_count());
+  CHECK_EQ(0, pthread_sigmask(SIG_SETMASK, &old_sigset, nullptr));
+  CHECK_EQ(1, sampler1->sample_count());
+  CHECK_EQ(1, sampler2->sample_count());
+
+  sampler1->Stop();
+  CHECK_EQ(0, sigaction(SIGPROF, nullptr, &active_sa));
+  CHECK_NE(active_sa.sa_sigaction, &CustomSigprofHandler);
+
+  sampler2->Stop();
+  struct sigaction restored_sa;
+  CHECK_EQ(0, sigaction(SIGPROF, nullptr, &restored_sa));
+  CHECK_EQ(SA_SIGINFO, restored_sa.sa_flags & SA_SIGINFO);
+  CHECK_EQ(restored_sa.sa_sigaction, &CustomSigprofHandler);
+
+  CHECK_EQ(0, sigaction(SIGPROF, &original_sa, nullptr));
 }
 
 #endif  // USE_SIGNALS

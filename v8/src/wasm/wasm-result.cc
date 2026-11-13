@@ -4,6 +4,8 @@
 
 #include "src/wasm/wasm-result.h"
 
+#include <bit>
+
 #include "src/base/strings.h"
 #include "src/execution/isolate-inl.h"
 #include "src/heap/factory.h"
@@ -21,7 +23,7 @@ void VPrintFToString(std::string* str, size_t str_offset, const char* format,
   DCHECK_LE(str_offset, str->size());
   size_t len = str_offset + strlen(format);
   // Allocate increasingly large buffers until the message fits.
-  for (;; len = base::bits::RoundUpToPowerOfTwo64(len + 1)) {
+  for (;; len = std::bit_ceil(len + 1)) {
     DCHECK_GE(kMaxInt, len);
     str->resize(len);
     va_list args_copy;
@@ -104,8 +106,8 @@ void ErrorThrower::RuntimeError(const char* format, ...) {
   va_end(arguments);
 }
 
-Handle<Object> ErrorThrower::Reify() {
-  Handle<JSFunction> constructor;
+DirectHandle<JSObject> ErrorThrower::Reify() {
+  DirectHandle<JSFunction> constructor;
   switch (error_type_) {
     case kNone:
       UNREACHABLE();
@@ -125,9 +127,8 @@ Handle<Object> ErrorThrower::Reify() {
       constructor = isolate_->wasm_runtime_error_function();
       break;
   }
-  Handle<String> message = isolate_->factory()
-                               ->NewStringFromUtf8(base::VectorOf(error_msg_))
-                               .ToHandleChecked();
+  DirectHandle<String> message =
+      isolate_->factory()->NewStringFromUtf8(error_msg_).ToHandleChecked();
   Reset();
   return isolate_->factory()->NewError(constructor, message);
 }
@@ -137,36 +138,10 @@ void ErrorThrower::Reset() {
   error_msg_.clear();
 }
 
-ErrorThrower::ErrorThrower(ErrorThrower&& other) V8_NOEXCEPT
-    : isolate_(other.isolate_),
-      context_(other.context_),
-      error_type_(other.error_type_),
-      error_msg_(std::move(other.error_msg_)) {
-  other.error_type_ = kNone;
-}
-
 ErrorThrower::~ErrorThrower() {
-  if (error() && !isolate_->has_pending_exception()) {
-    // We don't want to mix pending exceptions and scheduled exceptions, hence
-    // an existing exception should be pending, never scheduled.
-    DCHECK(!isolate_->has_scheduled_exception());
-    isolate_->Throw(*Reify());
-  }
-}
+  if (!error() || isolate_->has_exception()) return;
 
-ScheduledErrorThrower::~ScheduledErrorThrower() {
-  // There should never be both a pending and a scheduled exception.
-  DCHECK(!isolate()->has_scheduled_exception() ||
-         !isolate()->has_pending_exception());
-  // Don't throw another error if there is already a scheduled error.
-  if (isolate()->has_scheduled_exception()) {
-    Reset();
-  } else if (isolate()->has_pending_exception()) {
-    Reset();
-    isolate()->OptionalRescheduleException(false);
-  } else if (error()) {
-    isolate()->ScheduleThrow(*Reify());
-  }
+  isolate_->Throw(*Reify());
 }
 
 }  // namespace wasm

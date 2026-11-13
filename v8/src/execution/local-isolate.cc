@@ -4,9 +4,9 @@
 
 #include "src/execution/local-isolate.h"
 
+#include "src/base/thread-id.h"
 #include "src/bigint/bigint.h"
 #include "src/execution/isolate.h"
-#include "src/execution/thread-id.h"
 #include "src/handles/handles-inl.h"
 #include "src/logging/local-logger.h"
 #include "src/logging/runtime-call-stats-scope.h"
@@ -14,12 +14,13 @@
 namespace v8 {
 namespace internal {
 
-LocalIsolate::LocalIsolate(Isolate* isolate, ThreadKind kind)
+LocalIsolate::LocalIsolate(Isolate* isolate, ThreadKind kind,
+                           v8::base::Stack::StackSlot stack_start)
     : HiddenLocalFactory(isolate),
-      heap_(isolate->heap(), kind),
+      heap_(isolate->heap(), kind, nullptr, stack_start),
       isolate_(isolate),
       logger_(new LocalLogger(isolate)),
-      thread_id_(ThreadId::Current()),
+      thread_id_(base::ThreadId::Current()),
       stack_limit_(kind == ThreadKind::kMain
                        ? isolate->stack_guard()->real_climit()
                        : GetCurrentStackPosition() - v8_flags.stack_size * KB)
@@ -54,14 +55,37 @@ bool LocalIsolate::has_active_deserializer() const {
 
 int LocalIsolate::GetNextScriptId() { return isolate_->GetNextScriptId(); }
 
-uint32_t LocalIsolate::GetNextUniqueSharedFunctionInfoId() {
-  return isolate_->GetNextUniqueSharedFunctionInfoId();
-}
+class LocalBigIntPlatform final : public bigint::Platform {
+ public:
+  using digit_t = bigint::digit_t;
+
+  bool InterruptRequested() final { return false; }
+
+  ~LocalBigIntPlatform() final = default;
+
+#if V8_ENABLE_SANDBOX
+  LocalBigIntPlatform()
+      : allocator_(IsolateGroup::current()->GetInSandboxAllocator()) {}
+
+  digit_t* Allocate(size_t count) final {
+    return static_cast<digit_t*>(
+        allocator_->AllocateUninitializedOrCrash(count * sizeof(digit_t)));
+  }
+  void Free(digit_t* ptr) final { allocator_->Free(ptr); }
+
+ private:
+  v8::Allocator* allocator_;
+#else
+  LocalBigIntPlatform() {}
+  digit_t* Allocate(size_t count) final { return new digit_t[count]; }
+  void Free(digit_t* ptr) final { delete[] ptr; }
+#endif  // V8_ENABLE_SANDBOX
+};
 
 // Used for lazy initialization, based on an assumption that most
 // LocalIsolates won't be used to parse any BigInt literals.
 void LocalIsolate::InitializeBigIntProcessor() {
-  bigint_processor_ = bigint::Processor::New(new bigint::Platform());
+  bigint_processor_ = bigint::Processor::New(new LocalBigIntPlatform());
 }
 
 // static

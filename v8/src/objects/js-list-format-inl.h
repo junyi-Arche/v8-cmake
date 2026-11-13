@@ -2,14 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_OBJECTS_JS_LIST_FORMAT_INL_H_
+#define V8_OBJECTS_JS_LIST_FORMAT_INL_H_
+
 #ifndef V8_INTL_SUPPORT
 #error Internationalization is expected to be enabled.
 #endif  // V8_INTL_SUPPORT
 
-#ifndef V8_OBJECTS_JS_LIST_FORMAT_INL_H_
-#define V8_OBJECTS_JS_LIST_FORMAT_INL_H_
-
 #include "src/objects/js-list-format.h"
+// Include the non-inl header before the rest of the headers.
+
 #include "src/objects/objects-inl.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -18,35 +20,37 @@
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/js-list-format-tq-inl.inc"
+Tagged<String> JSListFormat::locale() const { return locale_.load(); }
+void JSListFormat::set_locale(Tagged<String> value, WriteBarrierMode mode) {
+  locale_.store(this, value, mode);
+}
 
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSListFormat)
+Tagged<Managed<icu::ListFormatter>> JSListFormat::icu_formatter() const {
+  return Cast<Managed<icu::ListFormatter>>(icu_formatter_.load());
+}
+void JSListFormat::set_icu_formatter(Tagged<Managed<icu::ListFormatter>> value,
+                                     WriteBarrierMode mode) {
+  icu_formatter_.store(this, value, mode);
+}
 
-// Base list format accessors.
-ACCESSORS(JSListFormat, icu_formatter, Managed<icu::ListFormatter>,
-          kIcuFormatterOffset)
+JSListFormat::Flags JSListFormat::flags() const { return flags_.load(); }
+void JSListFormat::set_flags(Flags value) { flags_.store(value); }
 
 inline void JSListFormat::set_style(Style style) {
-  DCHECK_GE(StyleBits::kMax, style);
-  int hints = flags();
-  hints = StyleBits::update(hints, style);
-  set_flags(hints);
+  DCHECK(Flags::StyleBits::is_valid(style));
+  set_flags(flags().with_style(style));
 }
 
 inline JSListFormat::Style JSListFormat::style() const {
-  return StyleBits::decode(flags());
+  return flags().style();
 }
 
 inline void JSListFormat::set_type(Type type) {
-  DCHECK_GE(TypeBits::kMax, type);
-  int hints = flags();
-  hints = TypeBits::update(hints, type);
-  set_flags(hints);
+  DCHECK(Flags::TypeBits::is_valid(type));
+  set_flags(flags().with_type(type));
 }
 
-inline JSListFormat::Type JSListFormat::type() const {
-  return TypeBits::decode(flags());
-}
+inline JSListFormat::Type JSListFormat::type() const { return flags().type(); }
 
 }  // namespace internal
 }  // namespace v8

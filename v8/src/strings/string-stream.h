@@ -6,12 +6,15 @@
 #define V8_STRINGS_STRING_STREAM_H_
 
 #include <memory>
+#include <span>
+#include <string_view>
 
 #include "src/base/small-vector.h"
 #include "src/base/strings.h"
 #include "src/base/vector.h"
 #include "src/handles/handles.h"
-#include "src/objects/heap-object.h"
+#include "src/objects/objects.h"
+#include "src/objects/tagged.h"
 #include "src/utils/allocation.h"
 
 namespace v8 {
@@ -68,7 +71,7 @@ class SmallStringOptimizedAllocator final : public StringAllocator {
       : vector_(vector) {}
 
   char* allocate(unsigned bytes) override {
-    vector_->resize_no_init(bytes);
+    vector_->resize(bytes);
     return vector_->data();
   }
 
@@ -78,7 +81,7 @@ class SmallStringOptimizedAllocator final : public StringAllocator {
     if (new_bytes <= *bytes) {
       return vector_->data();
     }
-    vector_->resize_no_init(new_bytes);
+    vector_->resize(new_bytes);
     *bytes = new_bytes;
     return vector_->data();
   }
@@ -103,10 +106,12 @@ class StringStream final {
         : FmtElm(LC_STR) {
       data_.u_lc_str_ = &value;
     }
-    FmtElm(Object value) : FmtElm(OBJ) {  // NOLINT
+    template <typename T>
+    FmtElm(Tagged<T> value) : FmtElm(OBJ) {  // NOLINT
       data_.u_obj_ = value.ptr();
     }
-    FmtElm(Handle<Object> value) : FmtElm(HANDLE) {  // NOLINT
+    template <typename T>
+    FmtElm(Handle<T> value) : FmtElm(HANDLE) {  // NOLINT
       data_.u_handle_ = value.location();
     }
     FmtElm(void* value) : FmtElm(POINTER) {  // NOLINT
@@ -148,40 +153,35 @@ class StringStream final {
   }
 
   bool Put(char c);
-  bool Put(String str);
-  bool Put(String str, int start, int end);
-  void Add(const char* format) { Add(base::CStrVector(format)); }
-  void Add(base::Vector<const char> format) {
-    Add(format, base::Vector<FmtElm>());
-  }
+  bool Put(Tagged<String> str);
+  bool Put(Tagged<String> str, int start, int end);
+  void Add(std::string_view format) { Add(format, std::span<const FmtElm>{}); }
 
   template <typename... Args>
-  void Add(const char* format, Args... args) {
-    Add(base::CStrVector(format), args...);
-  }
-
-  template <typename... Args>
-  void Add(base::Vector<const char> format, Args... args) {
+  void Add(std::string_view format, Args... args) {
     FmtElm elems[]{args...};
-    Add(format, base::ArrayVector(elems));
+    Add(format, std::span<const FmtElm>(elems));
   }
 
   // Getting the message out.
   void OutputToFile(FILE* out);
   void OutputToStdOut() { OutputToFile(stdout); }
   void Log(Isolate* isolate);
-  Handle<String> ToString(Isolate* isolate);
+  DirectHandle<String> ToString(Isolate* isolate);
   std::unique_ptr<char[]> ToCString() const;
   int length() const { return length_; }
 
   // Object printing support.
-  void PrintName(Object o);
-  void PrintFixedArray(FixedArray array, unsigned int limit);
-  void PrintByteArray(ByteArray ba);
-  void PrintUsingMap(JSObject js_object);
-  void PrintPrototype(JSFunction fun, Object receiver);
-  void PrintSecurityTokenIfChanged(JSFunction function);
-  void PrintFunction(JSFunction function, Object receiver);
+  void PrintName(Tagged<Object> o);
+  void PrintFixedArray(Tagged<FixedArray> array, unsigned int limit);
+  void PrintByteArray(Tagged<ByteArray> ba);
+  void PrintUsingMap(Isolate* isolate, Tagged<JSObject> js_object);
+  void PrintPrototype(Isolate* isolate, Tagged<JSFunction> fun,
+                      Tagged<Object> receiver);
+  void PrintSecurityTokenIfChanged(Isolate* isolate,
+                                   Tagged<JSFunction> function);
+  void PrintFunction(Isolate* isolate, Tagged<JSFunction> function,
+                     Tagged<Object> receiver);
 
   // Reset the stream.
   void Reset() {
@@ -199,8 +199,8 @@ class StringStream final {
   static const int kInitialCapacity = 16;
 
  private:
-  void Add(base::Vector<const char> format, base::Vector<FmtElm> elms);
-  void PrintObject(Object obj);
+  void Add(std::string_view format, std::span<const FmtElm> elms);
+  void PrintObject(Tagged<Object> obj);
 
   StringAllocator* allocator_;
   ObjectPrintMode object_print_mode_;

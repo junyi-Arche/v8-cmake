@@ -2,12 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_OBJECTS_JS_PLURAL_RULES_H_
+#define V8_OBJECTS_JS_PLURAL_RULES_H_
+
 #ifndef V8_INTL_SUPPORT
 #error Internationalization is expected to be enabled.
 #endif  // V8_INTL_SUPPORT
-
-#ifndef V8_OBJECTS_JS_PLURAL_RULES_H_
-#define V8_OBJECTS_JS_PLURAL_RULES_H_
 
 #include <set>
 #include <string>
@@ -15,6 +15,7 @@
 #include "src/base/bit-field.h"
 #include "src/execution/isolate.h"
 #include "src/heap/factory.h"
+#include "src/objects/bit-field-group.h"
 #include "src/objects/intl-objects.h"
 #include "src/objects/managed.h"
 #include "src/objects/objects.h"
@@ -22,34 +23,27 @@
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
 
-namespace U_ICU_NAMESPACE {
-class PluralRules;
-namespace number {
-class LocalizedNumberFormatter;
-class LocalizedNumberRangeFormatter;
-}  // namespace number
-}  // namespace U_ICU_NAMESPACE
-
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/js-plural-rules-tq.inc"
+class PluralRulesInternal;
 
-class JSPluralRules
-    : public TorqueGeneratedJSPluralRules<JSPluralRules, JSObject> {
+V8_OBJECT class JSPluralRules : public JSObject {
  public:
-  V8_WARN_UNUSED_RESULT static MaybeHandle<JSPluralRules> New(
-      Isolate* isolate, Handle<Map> map, Handle<Object> locales,
-      Handle<Object> options);
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSPluralRules> New(
+      Isolate* isolate, DirectHandle<Map> map, DirectHandle<Object> locales,
+      DirectHandle<Object> options, const char* method_name);
 
-  static Handle<JSObject> ResolvedOptions(Isolate* isolate,
-                                          Handle<JSPluralRules> plural_rules);
+  static DirectHandle<JSObject> ResolvedOptions(
+      Isolate* isolate, DirectHandle<JSPluralRules> plural_rules);
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<String> ResolvePlural(
-      Isolate* isolate, Handle<JSPluralRules> plural_rules, double number);
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<String> ResolvePlural(
+      Isolate* isolate, DirectHandle<JSPluralRules> plural_rules,
+      double number);
 
-  V8_WARN_UNUSED_RESULT static MaybeHandle<String> ResolvePluralRange(
-      Isolate* isolate, Handle<JSPluralRules> plural_rules, double x, double y);
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<String> ResolvePluralRange(
+      Isolate* isolate, DirectHandle<JSPluralRules> plural_rules, double x,
+      double y);
 
   V8_EXPORT_PRIVATE static const std::set<std::string>& GetAvailableLocales();
 
@@ -59,22 +53,42 @@ class JSPluralRules
   inline void set_type(Type type);
   inline Type type() const;
 
-  Handle<String> TypeAsString() const;
+  Handle<String> TypeAsString(Isolate* isolate) const;
 
   DECL_PRINTER(JSPluralRules)
+  struct Flags : BitFieldGroup<Flags, uint32_t> {
+    using BitFieldGroup::BitFieldGroup;
 
-  // Bit positions in |flags|.
-  DEFINE_TORQUE_GENERATED_JS_PLURAL_RULES_FLAGS()
+    using TypeBit = First<JSPluralRules::Type, 1>;
 
-  static_assert(Type::CARDINAL <= TypeBit::kMax);
-  static_assert(Type::ORDINAL <= TypeBit::kMax);
+    BIT_FIELD_GROUP_ACCESSORS(type, TypeBit)
+  };
 
-  DECL_ACCESSORS(icu_plural_rules, Managed<icu::PluralRules>)
-  DECL_ACCESSORS(icu_number_formatter,
-                 Managed<icu::number::LocalizedNumberFormatter>)
+  static_assert(Flags::TypeBit::is_valid(Type::CARDINAL));
+  static_assert(Flags::TypeBit::is_valid(Type::ORDINAL));
 
-  TQ_OBJECT_CONSTRUCTORS(JSPluralRules)
-};
+  inline Tagged<String> locale() const;
+  inline void set_locale(Tagged<String> value,
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Flags flags() const;
+  inline void set_flags(Flags value);
+
+  inline Tagged<CppGCManaged<PluralRulesInternal>> internal() const;
+  inline void set_internal(Tagged<CppGCManaged<PluralRulesInternal>> value,
+                           WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  DECL_VERIFIER(JSPluralRules)
+
+  static const int kHeaderSize;
+
+ public:
+  TaggedMember<String> locale_;
+  SmiBitFieldMember<Flags> flags_;
+  TaggedMember<CppGCManaged<PluralRulesInternal>> internal_;
+} V8_OBJECT_END;
+
+inline constexpr int JSPluralRules::kHeaderSize = sizeof(JSPluralRules);
 
 }  // namespace internal
 }  // namespace v8

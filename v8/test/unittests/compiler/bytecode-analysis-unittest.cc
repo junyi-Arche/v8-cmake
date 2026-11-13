@@ -4,6 +4,8 @@
 
 #include "src/compiler/bytecode-analysis.h"
 
+#include <iomanip>
+
 #include "src/compiler/bytecode-liveness-map.h"
 #include "src/interpreter/bytecode-array-builder.h"
 #include "src/interpreter/bytecode-array-iterator.h"
@@ -29,8 +31,8 @@ class BytecodeAnalysisTest : public TestWithIsolateAndZone {
   static void SetUpTestSuite() {
     CHECK_NULL(save_flags_);
     save_flags_ = new SaveFlags();
-    i::v8_flags.ignition_elide_noneffectful_bytecodes = false;
-    i::v8_flags.ignition_reo = false;
+    i::v8_flags.ignition_elide_noneffectful_bytecodes.Set(false);
+    i::v8_flags.ignition_reo.Set(false);
 
     TestWithIsolateAndZone::SetUpTestSuite();
   }
@@ -51,7 +53,7 @@ class BytecodeAnalysisTest : public TestWithIsolateAndZone {
     for (auto liveness : expected_liveness) {
       std::stringstream ss;
       ss << std::setw(4) << iterator.current_offset() << " : ";
-      iterator.PrintTo(ss);
+      iterator.PrintCurrentBytecodeTo(ss);
 
       EXPECT_EQ(liveness.first,
                 ToString(*analysis.GetInLivenessFor(iterator.current_offset())))
@@ -485,6 +487,41 @@ TEST_F(BytecodeAnalysisTest, SuspendPoint) {
 
   builder.LoadAccumulatorWithRegister(reg_0);
   expected_liveness.emplace_back("L...", "...L");
+
+  builder.Return();
+  expected_liveness.emplace_back("...L", "....");
+
+  Handle<BytecodeArray> bytecode = builder.ToBytecodeArray(isolate());
+
+  EnsureLivenessMatches(bytecode, expected_liveness);
+}
+
+TEST_F(BytecodeAnalysisTest, JumpIfToBooleanTryCatch) {
+  interpreter::BytecodeArrayBuilder builder(zone(), 3, 3);
+  std::vector<std::pair<std::string, std::string>> expected_liveness;
+
+  interpreter::Register reg_1(1);
+  interpreter::Register reg_context(2);
+
+  interpreter::TryCatchBuilder try_builder(&builder, nullptr, nullptr,
+                                           HandlerTable::CAUGHT);
+  try_builder.BeginTry(reg_context);
+  {
+    interpreter::BytecodeLabel label;
+    builder.JumpIfTrue(ToBooleanMode::kConvertToBoolean, &label);
+    expected_liveness.emplace_back("...L", "...L");
+
+    builder.Bind(&label);
+  }
+  try_builder.EndTry();
+  expected_liveness.emplace_back("...L", "...L");
+
+  // Catch
+  {
+    builder.LoadAccumulatorWithRegister(reg_1);
+    expected_liveness.emplace_back(".L..", "...L");
+  }
+  try_builder.EndCatch();
 
   builder.Return();
   expected_liveness.emplace_back("...L", "....");

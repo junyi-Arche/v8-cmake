@@ -63,6 +63,7 @@
 #ifndef GOOGLEMOCK_INCLUDE_GMOCK_GMOCK_NICE_STRICT_H_
 #define GOOGLEMOCK_INCLUDE_GMOCK_GMOCK_NICE_STRICT_H_
 
+#include <cstdint>
 #include <type_traits>
 
 #include "gmock/gmock-spec-builders.h"
@@ -70,11 +71,11 @@
 
 namespace testing {
 template <class MockClass>
-class NiceMock;
+class [[nodiscard]] NiceMock;
 template <class MockClass>
-class NaggyMock;
+class [[nodiscard]] NaggyMock;
 template <class MockClass>
-class StrictMock;
+class [[nodiscard]] StrictMock;
 
 namespace internal {
 template <typename T>
@@ -97,7 +98,7 @@ constexpr bool HasStrictnessModifier() {
 // deregistration. This guarantees that MockClass's constructor and destructor
 // run with the same level of strictness as its instance methods.
 
-#if GTEST_OS_WINDOWS && !GTEST_OS_WINDOWS_MINGW && \
+#if defined(GTEST_OS_WINDOWS) && !defined(GTEST_OS_WINDOWS_MINGW) && \
     (defined(_MSC_VER) || defined(__clang__))
 // We need to mark these classes with this declspec to ensure that
 // the empty base class optimization is performed.
@@ -107,33 +108,45 @@ constexpr bool HasStrictnessModifier() {
 #endif
 
 template <typename Base>
-class NiceMockImpl {
+class [[nodiscard]] NiceMockImpl {
  public:
-  NiceMockImpl() { ::testing::Mock::AllowUninterestingCalls(this); }
+  NiceMockImpl() {
+    ::testing::Mock::AllowUninterestingCalls(reinterpret_cast<uintptr_t>(this));
+  }
 
-  ~NiceMockImpl() { ::testing::Mock::UnregisterCallReaction(this); }
+  ~NiceMockImpl() {
+    ::testing::Mock::UnregisterCallReaction(reinterpret_cast<uintptr_t>(this));
+  }
 };
 
 template <typename Base>
-class NaggyMockImpl {
+class [[nodiscard]] NaggyMockImpl {
  public:
-  NaggyMockImpl() { ::testing::Mock::WarnUninterestingCalls(this); }
+  NaggyMockImpl() {
+    ::testing::Mock::WarnUninterestingCalls(reinterpret_cast<uintptr_t>(this));
+  }
 
-  ~NaggyMockImpl() { ::testing::Mock::UnregisterCallReaction(this); }
+  ~NaggyMockImpl() {
+    ::testing::Mock::UnregisterCallReaction(reinterpret_cast<uintptr_t>(this));
+  }
 };
 
 template <typename Base>
-class StrictMockImpl {
+class [[nodiscard]] StrictMockImpl {
  public:
-  StrictMockImpl() { ::testing::Mock::FailUninterestingCalls(this); }
+  StrictMockImpl() {
+    ::testing::Mock::FailUninterestingCalls(reinterpret_cast<uintptr_t>(this));
+  }
 
-  ~StrictMockImpl() { ::testing::Mock::UnregisterCallReaction(this); }
+  ~StrictMockImpl() {
+    ::testing::Mock::UnregisterCallReaction(reinterpret_cast<uintptr_t>(this));
+  }
 };
 
 }  // namespace internal
 
 template <class MockClass>
-class GTEST_INTERNAL_EMPTY_BASE_CLASS NiceMock
+class [[nodiscard]] GTEST_INTERNAL_EMPTY_BASE_CLASS NiceMock
     : private internal::NiceMockImpl<MockClass>,
       public MockClass {
  public:
@@ -169,11 +182,12 @@ class GTEST_INTERNAL_EMPTY_BASE_CLASS NiceMock
   }
 
  private:
-  GTEST_DISALLOW_COPY_AND_ASSIGN_(NiceMock);
+  NiceMock(const NiceMock&) = delete;
+  NiceMock& operator=(const NiceMock&) = delete;
 };
 
 template <class MockClass>
-class GTEST_INTERNAL_EMPTY_BASE_CLASS NaggyMock
+class [[nodiscard]] GTEST_INTERNAL_EMPTY_BASE_CLASS NaggyMock
     : private internal::NaggyMockImpl<MockClass>,
       public MockClass {
   static_assert(!internal::HasStrictnessModifier<MockClass>(),
@@ -210,11 +224,12 @@ class GTEST_INTERNAL_EMPTY_BASE_CLASS NaggyMock
   }
 
  private:
-  GTEST_DISALLOW_COPY_AND_ASSIGN_(NaggyMock);
+  NaggyMock(const NaggyMock&) = delete;
+  NaggyMock& operator=(const NaggyMock&) = delete;
 };
 
 template <class MockClass>
-class GTEST_INTERNAL_EMPTY_BASE_CLASS StrictMock
+class [[nodiscard]] GTEST_INTERNAL_EMPTY_BASE_CLASS StrictMock
     : private internal::StrictMockImpl<MockClass>,
       public MockClass {
  public:
@@ -251,7 +266,8 @@ class GTEST_INTERNAL_EMPTY_BASE_CLASS StrictMock
   }
 
  private:
-  GTEST_DISALLOW_COPY_AND_ASSIGN_(StrictMock);
+  StrictMock(const StrictMock&) = delete;
+  StrictMock& operator=(const StrictMock&) = delete;
 };
 
 #undef GTEST_INTERNAL_EMPTY_BASE_CLASS

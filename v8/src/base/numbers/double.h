@@ -5,6 +5,8 @@
 #ifndef V8_BASE_NUMBERS_DOUBLE_H_
 #define V8_BASE_NUMBERS_DOUBLE_H_
 
+#include <bit>
+
 #include "src/base/macros.h"
 #include "src/base/numbers/diy-fp.h"
 
@@ -12,10 +14,10 @@ namespace v8 {
 namespace base {
 
 // We assume that doubles and uint64_t have the same endianness.
-inline uint64_t double_to_uint64(double d) {
+inline constexpr uint64_t double_to_uint64(double d) {
   return base::bit_cast<uint64_t>(d);
 }
-inline double uint64_to_double(uint64_t d64) {
+inline constexpr double uint64_to_double(uint64_t d64) {
   return base::bit_cast<double>(d64);
 }
 
@@ -30,10 +32,9 @@ class Double {
       52;  // Excludes the hidden bit.
   static constexpr int kSignificandSize = 53;
 
-  Double() : d64_(0) {}
-  explicit Double(double d) : d64_(double_to_uint64(d)) {}
-  explicit Double(uint64_t d64) : d64_(d64) {}
-  explicit Double(DiyFp diy_fp) : d64_(DiyFpToUint64(diy_fp)) {}
+  constexpr Double() : d64_(0) {}
+  constexpr explicit Double(double d) : d64_(double_to_uint64(d)) {}
+  constexpr explicit Double(uint64_t d64) : d64_(d64) {}
 
   // The value encoded by this Double must be greater or equal to +0.0.
   // It must not be special (infinity, or NaN).
@@ -61,10 +62,10 @@ class Double {
   }
 
   // Returns the double's bit as uint64.
-  uint64_t AsUint64() const { return d64_; }
+  constexpr uint64_t AsUint64() const { return d64_; }
 
   // Returns the next greater double. Returns +infinity on input +infinity.
-  double NextDouble() const {
+  constexpr double NextDouble() const {
     if (d64_ == kInfinity) return Double(kInfinity).value();
     if (Sign() < 0 && Significand() == 0) {
       // -0.0
@@ -77,7 +78,7 @@ class Double {
     }
   }
 
-  int Exponent() const {
+  constexpr int Exponent() const {
     if (IsDenormal()) return kDenormalExponent;
 
     uint64_t d64 = AsUint64();
@@ -86,7 +87,7 @@ class Double {
     return biased_e - kExponentBias;
   }
 
-  uint64_t Significand() const {
+  constexpr uint64_t Significand() const {
     uint64_t d64 = AsUint64();
     uint64_t significand = d64 & kSignificandMask;
     if (!IsDenormal()) {
@@ -97,34 +98,27 @@ class Double {
   }
 
   // Returns true if the double is a denormal.
-  bool IsDenormal() const {
+  constexpr bool IsDenormal() const {
     uint64_t d64 = AsUint64();
     return (d64 & kExponentMask) == 0;
   }
 
   // We consider denormals not to be special.
   // Hence only Infinity and NaN are special.
-  bool IsSpecial() const {
+  constexpr bool IsSpecial() const {
     uint64_t d64 = AsUint64();
     return (d64 & kExponentMask) == kExponentMask;
   }
 
-  bool IsInfinite() const {
+  constexpr bool IsInfinite() const {
     uint64_t d64 = AsUint64();
     return ((d64 & kExponentMask) == kExponentMask) &&
            ((d64 & kSignificandMask) == 0);
   }
 
-  int Sign() const {
+  constexpr int Sign() const {
     uint64_t d64 = AsUint64();
     return (d64 & kSignMask) == 0 ? 1 : -1;
-  }
-
-  // Precondition: the value encoded by this Double must be greater or equal
-  // than +0.0.
-  DiyFp UpperBoundary() const {
-    DCHECK_GT(Sign(), 0);
-    return DiyFp(Significand() * 2 + 1, Exponent() - 1);
   }
 
   // Returns the two boundaries of this.
@@ -153,58 +147,16 @@ class Double {
     *out_m_minus = m_minus;
   }
 
-  double value() const { return uint64_to_double(d64_); }
-
-  // Returns the significand size for a given order of magnitude.
-  // If v = f*2^e with 2^p-1 <= f <= 2^p then p+e is v's order of magnitude.
-  // This function returns the number of significant binary digits v will have
-  // once its encoded into a double. In almost all cases this is equal to
-  // kSignificandSize. The only exception are denormals. They start with leading
-  // zeroes and their effective significand-size is hence smaller.
-  static int SignificandSizeForOrderOfMagnitude(int order) {
-    if (order >= (kDenormalExponent + kSignificandSize)) {
-      return kSignificandSize;
-    }
-    if (order <= kDenormalExponent) return 0;
-    return order - kDenormalExponent;
-  }
+  constexpr double value() const { return uint64_to_double(d64_); }
 
  private:
   static constexpr int kExponentBias = 0x3FF + kPhysicalSignificandSize;
   static constexpr int kDenormalExponent = -kExponentBias + 1;
-  static constexpr int kMaxExponent = 0x7FF - kExponentBias;
   static constexpr uint64_t kInfinity = 0x7FF0'0000'0000'0000;
 
   // The field d64_ is not marked as const to permit the usage of the copy
   // constructor.
   uint64_t d64_;
-
-  static uint64_t DiyFpToUint64(DiyFp diy_fp) {
-    uint64_t significand = diy_fp.f();
-    int exponent = diy_fp.e();
-    while (significand > kHiddenBit + kSignificandMask) {
-      significand >>= 1;
-      exponent++;
-    }
-    if (exponent >= kMaxExponent) {
-      return kInfinity;
-    }
-    if (exponent < kDenormalExponent) {
-      return 0;
-    }
-    while (exponent > kDenormalExponent && (significand & kHiddenBit) == 0) {
-      significand <<= 1;
-      exponent--;
-    }
-    uint64_t biased_exponent;
-    if (exponent == kDenormalExponent && (significand & kHiddenBit) == 0) {
-      biased_exponent = 0;
-    } else {
-      biased_exponent = static_cast<uint64_t>(exponent + kExponentBias);
-    }
-    return (significand & kSignificandMask) |
-           (biased_exponent << kPhysicalSignificandSize);
-  }
 };
 
 }  // namespace base

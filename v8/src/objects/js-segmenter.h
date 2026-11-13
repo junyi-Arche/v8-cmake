@@ -1,6 +1,7 @@
 // Copyright 2020 the V8 project authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 #ifndef V8_OBJECTS_JS_SEGMENTER_H_
 #define V8_OBJECTS_JS_SEGMENTER_H_
 
@@ -14,6 +15,7 @@
 #include "src/base/bit-field.h"
 #include "src/execution/isolate.h"
 #include "src/heap/factory.h"
+#include "src/objects/bit-field-group.h"
 #include "src/objects/managed.h"
 #include "src/objects/objects.h"
 #include "unicode/uversion.h"
@@ -28,29 +30,34 @@ class BreakIterator;
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/js-segmenter-tq.inc"
-
-class JSSegmenter : public TorqueGeneratedJSSegmenter<JSSegmenter, JSObject> {
+V8_OBJECT class JSSegmenter : public JSObject {
  public:
   // Creates segmenter object with properties derived from input locales and
   // options.
-  V8_WARN_UNUSED_RESULT static MaybeHandle<JSSegmenter> New(
-      Isolate* isolate, Handle<Map> map, Handle<Object> locales,
-      Handle<Object> options);
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSSegmenter> New(
+      Isolate* isolate, DirectHandle<Map> map, DirectHandle<Object> locales,
+      DirectHandle<Object> options, const char* method_name);
 
-  V8_WARN_UNUSED_RESULT static Handle<JSObject> ResolvedOptions(
-      Isolate* isolate, Handle<JSSegmenter> segmenter_holder);
+  V8_WARN_UNUSED_RESULT static DirectHandle<JSObject> ResolvedOptions(
+      Isolate* isolate, DirectHandle<JSSegmenter> segmenter_holder);
 
   V8_EXPORT_PRIVATE static const std::set<std::string>& GetAvailableLocales();
 
   Handle<String> GranularityAsString(Isolate* isolate) const;
 
   // Segmenter accessors.
-  DECL_ACCESSORS(icu_break_iterator, Managed<icu::BreakIterator>)
+  inline Tagged<String> locale() const;
+  inline void set_locale(Tagged<String> value,
+                         WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<Managed<icu::BreakIterator>> icu_break_iterator() const;
+  inline void set_icu_break_iterator(
+      Tagged<Managed<icu::BreakIterator>> value,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   // Granularity: identifying the segmenter used.
   //
-  // ecma402 #sec-segmenter-internal-slots
+  // https://tc39.es/ecma402/#sec-segmenter-internal-slots
   enum class Granularity {
     GRAPHEME,  // for character-breaks
     WORD,      // for word-breaks
@@ -62,17 +69,33 @@ class JSSegmenter : public TorqueGeneratedJSSegmenter<JSSegmenter, JSObject> {
   Handle<String> static GetGranularityString(Isolate* isolate,
                                              Granularity granularity);
 
-  // Bit positions in |flags|.
-  DEFINE_TORQUE_GENERATED_JS_SEGMENTER_FLAGS()
+  struct Flags : BitFieldGroup<Flags, uint32_t> {
+    using BitFieldGroup::BitFieldGroup;
 
-  static_assert(Granularity::GRAPHEME <= GranularityBits::kMax);
-  static_assert(Granularity::WORD <= GranularityBits::kMax);
-  static_assert(Granularity::SENTENCE <= GranularityBits::kMax);
+    using GranularityBits = First<JSSegmenter::Granularity, 2>;
+
+    BIT_FIELD_GROUP_ACCESSORS(granularity, GranularityBits)
+  };
+
+  inline Flags flags() const;
+  inline void set_flags(Flags value);
+
+  static_assert(Flags::GranularityBits::is_valid(Granularity::GRAPHEME));
+  static_assert(Flags::GranularityBits::is_valid(Granularity::WORD));
+  static_assert(Flags::GranularityBits::is_valid(Granularity::SENTENCE));
 
   DECL_PRINTER(JSSegmenter)
+  DECL_VERIFIER(JSSegmenter)
 
-  TQ_OBJECT_CONSTRUCTORS(JSSegmenter)
-};
+  static const int kHeaderSize;
+
+ public:
+  TaggedMember<String> locale_;
+  TaggedMember<Foreign> icu_break_iterator_;
+  SmiBitFieldMember<Flags> flags_;
+} V8_OBJECT_END;
+
+inline constexpr int JSSegmenter::kHeaderSize = sizeof(JSSegmenter);
 
 }  // namespace internal
 }  // namespace v8

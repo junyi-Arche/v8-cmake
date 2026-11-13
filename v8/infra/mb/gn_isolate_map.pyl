@@ -39,6 +39,10 @@
     "label": "//test/unittests:generate-bytecode-expectations",
     "type": "script",
   },
+  "intl": {
+    "label": "//test/intl:v8_intl",
+    "type": "script",
+  },
   "mjsunit": {
     "label": "//test/mjsunit:v8_mjsunit",
     "type": "script",
@@ -69,6 +73,10 @@
   },
   "run-num-fuzzer": {
     "label": "//test:v8_run_num_fuzzer",
+    "type": "script",
+  },
+  "snapshot_set": {
+    "label": "//:snapshot_set",
     "type": "script",
   },
   "test262": {

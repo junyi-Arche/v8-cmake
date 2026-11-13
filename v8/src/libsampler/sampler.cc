@@ -5,6 +5,7 @@
 #include "src/libsampler/sampler.h"
 
 #include "include/v8-isolate.h"
+#include "include/v8-platform.h"
 #include "include/v8-unwinder.h"
 
 #ifdef USE_SIGNALS
@@ -13,17 +14,17 @@
 #include <pthread.h>
 #include <signal.h>
 #include <sys/time.h>
+
 #include <atomic>
 
-#if !V8_OS_QNX && !V8_OS_AIX
+#include "src/base/platform/memory-protection-key.h"
+#include "src/base/platform/time.h"
+
+#if !V8_OS_QNX && !V8_OS_AIX && !V8_OS_ZOS
 #include <sys/syscall.h>
 #endif
 
-#if V8_OS_AIX || V8_TARGET_ARCH_S390X
-
-#include "src/base/platform/time.h"
-
-#elif V8_OS_DARWIN
+#if V8_OS_DARWIN
 #include <mach/mach.h>
 // OpenBSD doesn't have <ucontext.h>. ucontext_t lives in <signal.h>
 // and is a typedef for struct sigcontext. There is no uc_mcontext.
@@ -36,8 +37,6 @@
 #elif V8_OS_WIN || V8_OS_CYGWIN
 
 #include <windows.h>
-
-#include "src/base/win32-headers.h"
 
 #elif V8_OS_FUCHSIA
 
@@ -66,8 +65,15 @@ using zx_thread_state_general_regs_t = zx_arm64_general_regs_t;
 #include <algorithm>
 #include <vector>
 
+#include "absl/base/internal/sysinfo.h"
 #include "src/base/atomic-utils.h"
+#include "src/base/platform/mutex.h"
 #include "src/base/platform/platform.h"
+
+#if V8_OS_ZOS
+// Header from zoslib, for __mcontext_t_:
+#include "edcwccwi.h"
+#endif
 
 #if V8_OS_ANDROID && !defined(__BIONIC_HAVE_UCONTEXT_T)
 
@@ -194,19 +200,46 @@ AtomicGuard::~AtomicGuard() {
 
 bool AtomicGuard::is_success() const { return is_success_; }
 
+namespace {
+// Tracks whether a SIGPROF sent by Sampler::DoSample() is currently in flight
+// for this target thread. Standard SIGPROF signals do not queue in the kernel:
+// multiple pthread_kill(tid, SIGPROF) calls to the same thread (e.g., from
+// back-to-back DoSample() calls or multiple Samplers attached to the same
+// thread) before HandleProfilerSignal runs coalesce into a single signal
+// delivery. Tracking pending state per target thread ensures at most one
+// in-flight SIGPROF per thread and a strict 1-to-1 match between
+// pending_signals_ increments and HandleProfilerSignal deliveries.
+//
+// Sampler::PlatformData() is constructed on the target VM thread and captures
+// the address of this thread_local variable so that:
+// 1. The sampler thread can access the target thread's flag via
+//    platform_data()->signal_pending().
+// 2. HandleProfilerSignal (running on the target thread) can access
+//    signal_pending_on_thread directly without locking or lazy TLS
+//    initialization inside the signal handler.
+constinit thread_local std::atomic_bool signal_pending_on_thread{false};
+}  // namespace
+
 class Sampler::PlatformData {
  public:
-  PlatformData() : vm_tid_(pthread_self()) {}
-  pthread_t vm_tid() const { return vm_tid_; }
+  PlatformData()
+      : vm_tid_(base::OS::GetCurrentThreadId()),
+        vm_tself_(pthread_self()),
+        signal_pending_(&signal_pending_on_thread) {}
+  int vm_tid() const { return vm_tid_; }
+  pthread_t vm_tself() const { return vm_tself_; }
+  std::atomic_bool* signal_pending() const { return signal_pending_; }
 
  private:
-  pthread_t vm_tid_;
+  int vm_tid_;
+  pthread_t vm_tself_;
+  std::atomic_bool* signal_pending_;
 };
 
 void SamplerManager::AddSampler(Sampler* sampler) {
   AtomicGuard atomic_guard(&samplers_access_counter_);
   DCHECK(sampler->IsActive());
-  pthread_t thread_id = sampler->platform_data()->vm_tid();
+  int thread_id = sampler->platform_data()->vm_tid();
   auto it = sampler_map_.find(thread_id);
   if (it == sampler_map_.end()) {
     SamplerList samplers;
@@ -222,12 +255,11 @@ void SamplerManager::AddSampler(Sampler* sampler) {
 void SamplerManager::RemoveSampler(Sampler* sampler) {
   AtomicGuard atomic_guard(&samplers_access_counter_);
   DCHECK(sampler->IsActive());
-  pthread_t thread_id = sampler->platform_data()->vm_tid();
+  int thread_id = sampler->platform_data()->vm_tid();
   auto it = sampler_map_.find(thread_id);
   DCHECK_NE(it, sampler_map_.end());
   SamplerList& samplers = it->second;
-  samplers.erase(std::remove(samplers.begin(), samplers.end(), sampler),
-                 samplers.end());
+  std::erase(samplers, sampler);
   if (samplers.empty()) {
     sampler_map_.erase(it);
   }
@@ -237,7 +269,7 @@ void SamplerManager::DoSample(const v8::RegisterState& state) {
   AtomicGuard atomic_guard(&samplers_access_counter_, false);
   // TODO(petermarshall): Add stat counters for the bailouts here.
   if (!atomic_guard.is_success()) return;
-  pthread_t thread_id = pthread_self();
+  int thread_id = base::OS::GetCurrentThreadId();
   auto it = sampler_map_.find(thread_id);
   if (it == sampler_map_.end()) return;
   SamplerList& samplers = it->second;
@@ -314,6 +346,8 @@ class Sampler::PlatformData {
 #endif  // USE_SIGNALS
 
 #if defined(USE_SIGNALS)
+namespace {
+
 class SignalHandler {
  public:
   static void IncreaseSamplerCount() {
@@ -323,6 +357,16 @@ class SignalHandler {
 
   static void DecreaseSamplerCount() {
     base::RecursiveMutexGuard lock_guard(mutex_.Pointer());
+    // Wait (holding mutex_, so no new SIGPROF can be sent) until every
+    // in-flight SIGPROF has finished HandleProfilerSignal(). This ensures no
+    // handler still uses this sampler after Stop() returns, and that the old
+    // handler is never restored while our SIGPROF is pending (SIG_DFL would
+    // kill the process, https://crbug.com/573397777). Flushing via SIG_IGN is
+    // not an option on macOS (https://crbug.com/575305420).
+    while (pending_signals_.load(std::memory_order_acquire) > 0) {
+      base::OS::Sleep(base::TimeDelta::FromMicroseconds(1));
+    }
+    DCHECK_GT(client_count_, 0);
     if (--client_count_ == 0) Restore();
   }
 
@@ -330,6 +374,29 @@ class SignalHandler {
     // mutex_ will also be used in Sampler::DoSample to guard the state below.
     base::RecursiveMutexGuard lock_guard(mutex_.Pointer());
     return signal_handler_installed_;
+  }
+
+  static void SendProfilingSignal(pthread_t thread,
+                                  std::atomic_bool* signal_pending) {
+    DCHECK(signal_handler_installed_);
+    // Only send SIGPROF if no signal is already in flight for this target
+    // thread. This prevents the kernel from coalescing multiple SIGPROF signals
+    // into one delivery, keeping pending_signals_ accurate. Because the caller
+    // set record_sample_ with seq_cst beforehand and HandleProfilerSignal
+    // clears signal_pending_on_thread with seq_cst before reading
+    // record_sample_, an already in-flight signal is guaranteed to observe
+    // record_sample_.
+    bool expected = false;
+    if (!signal_pending->compare_exchange_strong(expected, true,
+                                                 std::memory_order_seq_cst)) {
+      return;
+    }
+    pending_signals_.fetch_add(1, std::memory_order_relaxed);
+    if (pthread_kill(thread, SIGPROF) != 0) {
+      if (signal_pending->exchange(false, std::memory_order_seq_cst)) {
+        pending_signals_.fetch_sub(1, std::memory_order_release);
+      }
+    }
   }
 
   static v8::base::RecursiveMutex* mutex() { return mutex_.Pointer(); }
@@ -350,13 +417,11 @@ class SignalHandler {
 
   static void Restore() {
     if (signal_handler_installed_) {
+      // DecreaseSamplerCount() already drained pending_signals_ to 0 while
+      // holding mutex_, so no SIGPROF is pending or mid-delivery when we
+      // restore the previous signal handler.
+      DCHECK_EQ(0, pending_signals_.load(std::memory_order_relaxed));
       signal_handler_installed_ = false;
-#if V8_OS_AIX || V8_TARGET_ARCH_S390X
-      // On Aix, IBMi & zLinux SIGPROF can sometimes arrive after the
-      // default signal handler is restored, resulting in intermittent test
-      // failure when profiling is enabled (https://crbug.com/v8/12952)
-      base::OS::Sleep(base::TimeDelta::FromMicroseconds(10));
-#endif
       sigaction(SIGPROF, &old_signal_handler_, nullptr);
     }
   }
@@ -364,11 +429,15 @@ class SignalHandler {
   static void FillRegisterState(void* context, RegisterState* regs);
   static void HandleProfilerSignal(int signal, siginfo_t* info, void* context);
 
-  // Protects the process wide state below.
+  // Protects the process wide state below (except pending_signals_, which is
+  // updated atomically so HandleProfilerSignal stays lock-free).
   static base::LazyRecursiveMutex mutex_;
   static int client_count_;
   static bool signal_handler_installed_;
   static struct sigaction old_signal_handler_;
+  // Number of target threads that currently have an in-flight SIGPROF sent by
+  // SendProfilingSignal().
+  static std::atomic_int pending_signals_;
 };
 
 base::LazyRecursiveMutex SignalHandler::mutex_ =
@@ -377,23 +446,45 @@ base::LazyRecursiveMutex SignalHandler::mutex_ =
 int SignalHandler::client_count_ = 0;
 struct sigaction SignalHandler::old_signal_handler_;
 bool SignalHandler::signal_handler_installed_ = false;
+std::atomic_int SignalHandler::pending_signals_{0};
 
 void SignalHandler::HandleProfilerSignal(int signal, siginfo_t* info,
                                          void* context) {
   USE(info);
   if (signal != SIGPROF) return;
+  const int saved_errno = errno;
+  // Clear signal_pending_on_thread with seq_cst *before* SamplerManager::
+  // DoSample() consumes record_sample_ so that any concurrent Sampler::
+  // DoSample() call that sets record_sample_ after DoSample() has checked this
+  // sampler will see signal_pending_on_thread == false and send a new SIGPROF.
+  const bool was_pending =
+      signal_pending_on_thread.exchange(false, std::memory_order_seq_cst);
+
+#if V8_HAS_PKU_SUPPORT
+  base::MemoryProtectionKey::SetDefaultPermissionsForAllKeysInSignalHandler();
+#endif
+
   v8::RegisterState state;
   FillRegisterState(context, &state);
   SamplerManager::instance()->DoSample(state);
+
+  // Decrement pending_signals_ only after SamplerManager::DoSample() completes,
+  // and only if this SIGPROF was sent by SendProfilingSignal() (guarded by
+  // was_pending in case an external SIGPROF arrives).
+  if (was_pending) {
+    pending_signals_.fetch_sub(1, std::memory_order_release);
+  }
+  errno = saved_errno;
 }
 
 void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
   // Extracting the sample from the context is extremely machine dependent.
   ucontext_t* ucontext = reinterpret_cast<ucontext_t*>(context);
-#if !(V8_OS_OPENBSD || \
-      (V8_OS_LINUX &&  \
-       (V8_HOST_ARCH_PPC || V8_HOST_ARCH_S390 || V8_HOST_ARCH_PPC64)))
+#if !(V8_OS_OPENBSD || V8_OS_ZOS || \
+      (V8_OS_LINUX && (V8_HOST_ARCH_S390X || V8_HOST_ARCH_PPC64)))
   mcontext_t& mcontext = ucontext->uc_mcontext;
+#elif V8_OS_ZOS
+  __mcontext_t_* mcontext = reinterpret_cast<__mcontext_t_*>(context);
 #endif
 #if V8_OS_LINUX
 #if V8_HOST_ARCH_IA32
@@ -433,7 +524,7 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
   state->pc = reinterpret_cast<void*>(mcontext.__pc);
   state->sp = reinterpret_cast<void*>(mcontext.__gregs[3]);
   state->fp = reinterpret_cast<void*>(mcontext.__gregs[22]);
-#elif V8_HOST_ARCH_PPC || V8_HOST_ARCH_PPC64
+#elif V8_HOST_ARCH_PPC64
 #if V8_LIBC_GLIBC
   state->pc = reinterpret_cast<void*>(ucontext->uc_mcontext.regs->nip);
   state->sp = reinterpret_cast<void*>(ucontext->uc_mcontext.regs->gpr[PT_R1]);
@@ -446,15 +537,8 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
   state->fp = reinterpret_cast<void*>(ucontext->uc_mcontext.gp_regs[31]);
   state->lr = reinterpret_cast<void*>(ucontext->uc_mcontext.gp_regs[36]);
 #endif
-#elif V8_HOST_ARCH_S390
-#if V8_TARGET_ARCH_32_BIT
-  // 31-bit target will have bit 0 (MSB) of the PSW set to denote addressing
-  // mode.  This bit needs to be masked out to resolve actual address.
-  state->pc =
-      reinterpret_cast<void*>(ucontext->uc_mcontext.psw.addr & 0x7FFFFFFF);
-#else
+#elif V8_HOST_ARCH_S390X
   state->pc = reinterpret_cast<void*>(ucontext->uc_mcontext.psw.addr);
-#endif  // V8_TARGET_ARCH_32_BIT
   state->sp = reinterpret_cast<void*>(ucontext->uc_mcontext.gregs[15]);
   state->fp = reinterpret_cast<void*>(ucontext->uc_mcontext.gregs[11]);
   state->lr = reinterpret_cast<void*>(ucontext->uc_mcontext.gregs[14]);
@@ -465,6 +549,12 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
   state->fp = reinterpret_cast<void*>(mcontext.__gregs[REG_S0]);
   state->lr = reinterpret_cast<void*>(mcontext.__gregs[REG_RA]);
 #endif  // V8_HOST_ARCH_*
+
+#elif V8_OS_ZOS
+  state->pc = reinterpret_cast<void*>(mcontext->__mc_psw);
+  state->sp = reinterpret_cast<void*>(mcontext->__mc_gr[15]);
+  state->fp = reinterpret_cast<void*>(mcontext->__mc_gr[11]);
+  state->lr = reinterpret_cast<void*>(mcontext->__mc_gr[14]);
 #elif V8_OS_IOS
 
 #if V8_TARGET_ARCH_ARM64
@@ -472,6 +562,7 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
   state->pc = reinterpret_cast<void*>(mcontext->__ss.__pc);
   state->sp = reinterpret_cast<void*>(mcontext->__ss.__sp);
   state->fp = reinterpret_cast<void*>(mcontext->__ss.__fp);
+  state->lr = reinterpret_cast<void*>(mcontext->__ss.__lr);
 #elif V8_TARGET_ARCH_X64
   // Building for the iOS simulator.
   state->pc = reinterpret_cast<void*>(mcontext->__ss.__rip);
@@ -497,6 +588,8 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
       reinterpret_cast<void*>(arm_thread_state64_get_sp(mcontext->__ss));
   state->fp =
       reinterpret_cast<void*>(arm_thread_state64_get_fp(mcontext->__ss));
+  state->lr =
+      reinterpret_cast<void*>(arm_thread_state64_get_lr(mcontext->__ss));
 #endif  // V8_HOST_ARCH_*
 #elif V8_OS_FREEBSD
 #if V8_HOST_ARCH_IA32
@@ -554,10 +647,22 @@ void SignalHandler::FillRegisterState(void* context, RegisterState* state) {
 #endif  // V8_OS_AIX
 }
 
+}  // namespace
 #endif  // USE_SIGNALS
 
 Sampler::Sampler(Isolate* isolate)
-    : isolate_(isolate), data_(std::make_unique<PlatformData>()) {}
+    : isolate_(isolate), data_(std::make_unique<PlatformData>()) {
+  // Abseil's deadlock detection uses locks. If we end up taking a sample absl
+  // internally holds this lock, we can end up deadlocking.
+  SetMutexDeadlockDetectionMode(absl::OnDeadlockCycle::kIgnore);
+  // Abseil's Mutex contention path lazily calibrates the nominal CPU frequency
+  // on first contention using a 1ms nanosleep loop. If SIGPROF signals arrive
+  // at high frequency during that calibration, Linux's timer slack on relative
+  // nanosleep restarts can cause the remaining sleep time to grow on every
+  // EINTR, livelocking the thread. Trigger the one-time initialization before
+  // sampling starts.
+  absl::base_internal::NominalCPUFrequency();
+}
 
 Sampler::~Sampler() { DCHECK(!IsActive()); }
 
@@ -573,20 +678,25 @@ void Sampler::Start() {
 void Sampler::Stop() {
 #if defined(USE_SIGNALS)
   SamplerManager::instance()->RemoveSampler(this);
-  SignalHandler::DecreaseSamplerCount();
 #endif
   DCHECK(IsActive());
+  // Clear active_ before DecreaseSamplerCount() so that a concurrent
+  // Sampler::DoSample() on this sampler cannot send a new SIGPROF even if
+  // another active sampler keeps SignalHandler::Installed() true.
   SetActive(false);
+#if defined(USE_SIGNALS)
+  SignalHandler::DecreaseSamplerCount();
+#endif
 }
 
 #if defined(USE_SIGNALS)
 
 void Sampler::DoSample() {
   base::RecursiveMutexGuard lock_guard(SignalHandler::mutex());
-  if (!SignalHandler::Installed()) return;
-  DCHECK(IsActive());
+  if (!SignalHandler::Installed() || !IsActive()) return;
   SetShouldRecordSample();
-  pthread_kill(platform_data()->vm_tid(), SIGPROF);
+  SignalHandler::SendProfilingSignal(platform_data()->vm_tself(),
+                                     platform_data()->signal_pending());
 }
 
 #elif V8_OS_WIN || V8_OS_CYGWIN
@@ -629,7 +739,7 @@ void Sampler::DoSample() {
   if (profiled_thread == ZX_HANDLE_INVALID) return;
 
   zx_handle_t suspend_token = ZX_HANDLE_INVALID;
-  if (zx_task_suspend_token(profiled_thread, &suspend_token) != ZX_OK) return;
+  if (zx_task_suspend(profiled_thread, &suspend_token) != ZX_OK) return;
 
   // Wait for the target thread to become suspended, or to exit.
   // TODO(wez): There is currently no suspension count for threads, so there

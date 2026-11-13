@@ -5,15 +5,30 @@
 #ifndef V8_HEAP_FACTORY_BASE_H_
 #define V8_HEAP_FACTORY_BASE_H_
 
+#include <algorithm>
+#include <string_view>
+
 #include "src/base/export-template.h"
 #include "src/base/strings.h"
+#include "src/base/strong-alias.h"
 #include "src/common/globals.h"
+#include "src/handles/maybe-handles.h"
 #include "src/objects/code-kind.h"
-#include "src/objects/fixed-array.h"
 #include "src/objects/function-kind.h"
 #include "src/objects/instance-type.h"
 #include "src/roots/roots.h"
-#include "torque-generated/class-forward-declarations.h"
+#ifndef V8_METAGEN_GENERATION_PASS
+// Forward declarations only, and generated after the metagen harvest
+// parses this header. The harvest reads class definitions, so nothing
+// it collects comes from here. The checked-in copy under src/gen/ if
+// v8_use_checked_in_generated_headers, the generated header otherwise.
+// See src/gen/README.md.
+#ifdef V8_USE_CHECKED_IN_GENERATED_HEADERS
+#include "src/gen/intl-wasm/class-forward-declarations.h"  // IWYU pragma: export
+#else
+#include "torque-generated/class-forward-declarations.h"  // IWYU pragma: export, nogncheck
+#endif
+#endif
 
 namespace v8 {
 namespace internal {
@@ -23,12 +38,20 @@ class BytecodeArray;
 class ClassPositions;
 class CoverageInfo;
 class DeoptimizationLiteralArray;
+class DeoptimizationFrameTranslation;
+class FixedArray;
+template <typename T, typename Base>
+class FixedIntegerArrayBase;
 class FreshlyAllocatedBigInt;
 class FunctionLiteral;
+class FunctionTemplateRareData;
 class HeapObject;
 class ObjectBoilerplateDescription;
+template <typename T>
+class PodArray;
 class PreparseData;
 class RegExpBoilerplateDescription;
+class RegExpDataWrapper;
 class SeqOneByteString;
 class SeqTwoByteString;
 class SharedFunctionInfo;
@@ -50,24 +73,15 @@ class FactoryBase;
 
 enum class NumberCacheMode { kIgnore, kSetOnly, kBoth };
 
-// Putting Torque-generated definitions in a superclass allows to shadow them
-// easily when they shouldn't be used and to reference them when they happen to
-// have the same signature.
-template <typename Impl>
-class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE) TorqueGeneratedFactory {
- private:
-  FactoryBase<Impl>* factory() { return static_cast<FactoryBase<Impl>*>(this); }
-
- public:
-#include "torque-generated/factory.inc"
-};
+using FixedInt32Array = FixedIntegerArrayBase<int32_t, ByteArray>;
+using FixedUInt32Array = FixedIntegerArrayBase<uint32_t, ByteArray>;
 
 struct NewCodeOptions {
   CodeKind kind;
   Builtin builtin;
+  bool is_context_specialized;
   bool is_turbofanned;
-  int stack_slots;
-  AllocationType allocation;
+  uint16_t parameter_count;
   int instruction_size;
   int metadata_size;
   unsigned int inlined_bytecode_size;
@@ -75,9 +89,13 @@ struct NewCodeOptions {
   int handler_table_offset;
   int constant_pool_offset;
   int code_comments_offset;
+  int32_t jump_table_info_offset;
   int32_t unwinding_info_offset;
-  Handle<HeapObject> bytecode_or_deoptimization_data;
-  Handle<ByteArray> bytecode_offsets_or_source_position_table;
+  MaybeHandle<UnionOf<BytecodeArray, InterpreterData>>
+      bytecode_or_interpreter_data;
+  MaybeHandle<DeoptimizationData> deoptimization_data;
+  MaybeHandle<TrustedByteArray> bytecode_offset_table;
+  MaybeHandle<TrustedByteArray> source_position_table;
   // Either instruction_stream is set and instruction_start is kNullAddress, or
   // instruction_stream is empty and instruction_start a valid target.
   MaybeHandle<InstructionStream> instruction_stream;
@@ -85,146 +103,204 @@ struct NewCodeOptions {
 };
 
 template <typename Impl>
-class FactoryBase : public TorqueGeneratedFactory<Impl> {
+class FactoryBase {
  public:
+  template <typename T, typename... Args>
+  inline DirectHandle<T> New(AllocationType allocation, Args&&... args);
+  template <typename T, AllocationType kAllocation, typename... Args>
+  inline DirectHandle<T> New(Args&&... args);
+
   Handle<Code> NewCode(const NewCodeOptions& options);
 
+  DirectHandle<CodeWrapper> NewCodeWrapper();
+
   // Converts the given boolean condition to JavaScript boolean value.
-  inline Handle<Oddball> ToBoolean(bool value);
+  inline Handle<Boolean> ToBoolean(bool value);
 
 #define ROOT_ACCESSOR(Type, name, CamelName) inline Handle<Type> name();
   READ_ONLY_ROOT_LIST(ROOT_ACCESSOR)
+  MUTABLE_ROOT_LIST(ROOT_ACCESSOR)
+#ifndef V8_ENABLE_TDZ_HOLE
+  ROOT_ACCESSOR(TdzHole, tdz_hole_value, TdzHoleValue)
+#endif
 #undef ROOT_ACCESSOR
 
-  // Numbers (e.g. literals) are pretenured by the parser.
+  // Numbers (e.g. literals) are allocated in old space by the parser.
   // The return value may be a smi or a heap number.
   template <AllocationType allocation = AllocationType::kYoung>
-  inline Handle<Object> NewNumber(double value);
+  inline Handle<Number> NewNumber(double value);
   template <AllocationType allocation = AllocationType::kYoung>
-  inline Handle<Object> NewNumberFromInt(int32_t value);
+  inline Handle<Number> NewNumberFromInt(int32_t value);
   template <AllocationType allocation = AllocationType::kYoung>
-  inline Handle<Object> NewNumberFromUint(uint32_t value);
+  inline Handle<Number> NewNumberFromUint(uint32_t value);
   template <AllocationType allocation = AllocationType::kYoung>
-  inline Handle<Object> NewNumberFromSize(size_t value);
+  inline DirectHandle<Number> NewNumberFromSize(size_t value);
   template <AllocationType allocation = AllocationType::kYoung>
-  inline Handle<Object> NewNumberFromInt64(int64_t value);
+  inline DirectHandle<Number> NewNumberFromInt64(int64_t value);
   template <AllocationType allocation = AllocationType::kYoung>
   inline Handle<HeapNumber> NewHeapNumber(double value);
   template <AllocationType allocation = AllocationType::kYoung>
   inline Handle<HeapNumber> NewHeapNumberFromBits(uint64_t bits);
+
   template <AllocationType allocation = AllocationType::kYoung>
-  inline Handle<HeapNumber> NewHeapNumberWithHoleNaN();
+  inline Handle<HeapNumber> NewHeapInt32(int32_t value);
 
-  template <AllocationType allocation>
-  Handle<HeapNumber> NewHeapNumber();
+  template <AllocationType allocation = AllocationType::kYoung>
+  inline Handle<UninitializedHeapNumber> NewUninitializedHeapNumber();
 
-  Handle<Struct> NewStruct(InstanceType type,
-                           AllocationType allocation = AllocationType::kYoung);
-
-  // Create a pre-tenured empty AccessorPair.
+  // Create an empty AccessorPair in old space.
   Handle<AccessorPair> NewAccessorPair();
 
   // Allocates a fixed array initialized with undefined values.
   Handle<FixedArray> NewFixedArray(
-      int length, AllocationType allocation = AllocationType::kYoung);
+      uint32_t length, AllocationType allocation = AllocationType::kYoung,
+      AllocationHint hint = AllocationHint());
+
+  // Allocates a trusted fixed array in trusted space, initialized with zeros.
+  Handle<TrustedFixedArray> NewTrustedFixedArray(
+      uint32_t length, AllocationType allocation = AllocationType::kTrusted);
+
+  // Allocates a protected fixed array in trusted space, initialized with zeros.
+  Handle<ProtectedFixedArray> NewProtectedFixedArray(uint32_t length);
 
   // Allocates a fixed array-like object with given map and initialized with
   // undefined values.
   Handle<FixedArray> NewFixedArrayWithMap(
-      Handle<Map> map, int length,
+      DirectHandle<Map> map, uint32_t length,
       AllocationType allocation = AllocationType::kYoung);
 
   // Allocate a new fixed array with non-existing entries (the hole).
   Handle<FixedArray> NewFixedArrayWithHoles(
-      int length, AllocationType allocation = AllocationType::kYoung);
+      uint32_t length, AllocationType allocation = AllocationType::kYoung);
 
-  // Allocate a new fixed array with Smi(0) entries.
-  Handle<FixedArray> NewFixedArrayWithZeroes(
-      int length, AllocationType allocation = AllocationType::kYoung);
+  // Allocate a new fixed array with Tagged<Smi>(0) entries.
+  DirectHandle<FixedArray> NewFixedArrayWithZeroes(
+      uint32_t length, AllocationType allocation = AllocationType::kYoung);
 
   // Allocate a new uninitialized fixed double array.
   // The function returns a pre-allocated empty fixed array for length = 0,
   // so the return type must be the general fixed array class.
   Handle<FixedArrayBase> NewFixedDoubleArray(
-      int length, AllocationType allocation = AllocationType::kYoung);
+      uint32_t length, AllocationType allocation = AllocationType::kYoung);
 
   // Allocates a weak fixed array-like object with given map and initialized
   // with undefined values. Length must be > 0.
   Handle<WeakFixedArray> NewWeakFixedArrayWithMap(
-      Map map, int length, AllocationType allocation = AllocationType::kYoung);
+      Tagged<Map> map, uint32_t length,
+      AllocationType allocation = AllocationType::kYoung);
 
   // Allocates a fixed array which may contain in-place weak references. The
   // array is initialized with undefined values
   // The function returns a pre-allocated empty weak fixed array for length = 0.
   Handle<WeakFixedArray> NewWeakFixedArray(
-      int length, AllocationType allocation = AllocationType::kYoung);
+      uint32_t length, AllocationType allocation = AllocationType::kYoung);
+
+  // Allocates a trusted weak fixed array in trusted space, initialized with
+  // zeros.
+  Handle<TrustedWeakFixedArray> NewTrustedWeakFixedArray(uint32_t length);
+
+  // Allocates a protected weak fixed array in trusted space, initialized with
+  // zeros.
+  Handle<ProtectedWeakFixedArray> NewProtectedWeakFixedArray(uint32_t length);
 
   // The function returns a pre-allocated empty byte array for length = 0.
   Handle<ByteArray> NewByteArray(
-      int length, AllocationType allocation = AllocationType::kYoung);
+      uint32_t length, AllocationType allocation = AllocationType::kYoung,
+      AllocationAlignment alignment = kTaggedAligned);
 
-  Handle<DeoptimizationLiteralArray> NewDeoptimizationLiteralArray(int length);
+  // Allocates a trusted byte array in trusted space, initialized with zeros.
+  Handle<TrustedByteArray> NewTrustedByteArray(
+      uint32_t length,
+      AllocationType allocation_type = AllocationType::kTrusted);
 
-  Handle<BytecodeArray> NewBytecodeArray(int length,
-                                         const uint8_t* raw_bytecodes,
-                                         int frame_size, int parameter_count,
-                                         Handle<FixedArray> constant_pool);
+  DirectHandle<DeoptimizationLiteralArray> NewDeoptimizationLiteralArray(
+      uint32_t length);
+  DirectHandle<DeoptimizationFrameTranslation>
+  NewDeoptimizationFrameTranslation(uint32_t length);
+
+  // Allocates a BytecodeArray object.
+  // The returned object will not yet be "published" (accessible from within
+  // the sandbox) as it must first be verified by the sandbox's
+  // BytecodeVerifier. Only afterwards will the object be usable.
+  Handle<BytecodeArray> NewBytecodeArray(
+      int length, const uint8_t* raw_bytecodes, int frame_size,
+      uint16_t parameter_count, uint16_t max_arguments,
+      DirectHandle<TrustedFixedArray> constant_pool,
+      DirectHandle<TrustedByteArray> handler_table);
+
+  DirectHandle<BytecodeWrapper> NewBytecodeWrapper(
+      AllocationType allocation = AllocationType::kOld);
 
   // Allocates a fixed array for name-value pairs of boilerplate properties and
-  // calculates the number of properties we need to store in the backing store.
+  // records the number of properties we need to store in the backing store.
   Handle<ObjectBoilerplateDescription> NewObjectBoilerplateDescription(
-      int boilerplate, int all_properties, int index_keys, bool has_seen_proto);
+      uint32_t boilerplate, uint32_t backing_store_size);
 
   // Create a new ArrayBoilerplateDescription struct.
   Handle<ArrayBoilerplateDescription> NewArrayBoilerplateDescription(
-      ElementsKind elements_kind, Handle<FixedArrayBase> constant_values);
+      ElementsKind elements_kind, DirectHandle<FixedArrayBase> constant_values);
 
-  Handle<RegExpBoilerplateDescription> NewRegExpBoilerplateDescription(
-      Handle<FixedArray> data, Handle<String> source, Smi flags);
+  DirectHandle<RegExpDataWrapper> NewRegExpDataWrapper();
+
+  DirectHandle<RegExpBoilerplateDescription> NewRegExpBoilerplateDescription(
+      DirectHandle<RegExpData> data, Tagged<Smi> flags);
 
   // Create a new TemplateObjectDescription struct.
   Handle<TemplateObjectDescription> NewTemplateObjectDescription(
-      Handle<FixedArray> raw_strings, Handle<FixedArray> cooked_strings);
+      DirectHandle<FixedArray> raw_strings,
+      DirectHandle<FixedArray> cooked_strings);
 
   Handle<Script> NewScript(
-      Handle<PrimitiveHeapObject> source,
+      DirectHandle<UnionOf<String, Undefined>> source,
       ScriptEventType event_type = ScriptEventType::kCreate);
   Handle<Script> NewScriptWithId(
-      Handle<PrimitiveHeapObject> source, int script_id,
+      DirectHandle<UnionOf<String, Undefined>> source, int script_id,
       ScriptEventType event_type = ScriptEventType::kCreate);
 
-  Handle<ArrayList> NewArrayList(
-      int size, AllocationType allocation = AllocationType::kYoung);
+  // Allocates SloppyArgumentsElements with all mapped entries set to the hole
+  // (unmapped). If |context| or |arguments| is empty, the corresponding slot is
+  // filled with undefined and must be initialized by the caller before use.
+  DirectHandle<SloppyArgumentsElements> NewSloppyArgumentsElements(
+      uint32_t length, MaybeDirectHandle<Context> context,
+      MaybeDirectHandle<FixedArray> arguments,
+      AllocationType allocation = AllocationType::kYoung);
+  DirectHandle<ArrayList> NewArrayList(
+      uint32_t size, AllocationType allocation = AllocationType::kYoung);
 
   Handle<SharedFunctionInfo> NewSharedFunctionInfoForLiteral(
-      FunctionLiteral* literal, Handle<Script> script, bool is_toplevel);
+      FunctionLiteral* literal, DirectHandle<Script> script, bool is_toplevel);
 
   // Create a copy of a given SharedFunctionInfo for use as a placeholder in
   // off-thread compilation
   Handle<SharedFunctionInfo> CloneSharedFunctionInfo(
-      Handle<SharedFunctionInfo> other);
+      DirectHandle<SharedFunctionInfo> other);
+
+  DirectHandle<SharedFunctionInfoWrapper> NewSharedFunctionInfoWrapper(
+      DirectHandle<SharedFunctionInfo> sfi);
 
   Handle<PreparseData> NewPreparseData(int data_length, int children_length);
 
-  Handle<UncompiledDataWithoutPreparseData>
-  NewUncompiledDataWithoutPreparseData(Handle<String> inferred_name,
+  DirectHandle<UncompiledDataWithoutPreparseData>
+  NewUncompiledDataWithoutPreparseData(DirectHandle<String> inferred_name,
                                        int32_t start_position,
                                        int32_t end_position);
 
-  Handle<UncompiledDataWithPreparseData> NewUncompiledDataWithPreparseData(
-      Handle<String> inferred_name, int32_t start_position,
-      int32_t end_position, Handle<PreparseData>);
+  DirectHandle<UncompiledDataWithPreparseData>
+  NewUncompiledDataWithPreparseData(DirectHandle<String> inferred_name,
+                                    int32_t start_position,
+                                    int32_t end_position,
+                                    DirectHandle<PreparseData>);
 
-  Handle<UncompiledDataWithoutPreparseDataWithJob>
-  NewUncompiledDataWithoutPreparseDataWithJob(Handle<String> inferred_name,
-                                              int32_t start_position,
-                                              int32_t end_position);
+  DirectHandle<UncompiledDataWithoutPreparseDataWithJob>
+  NewUncompiledDataWithoutPreparseDataWithJob(
+      DirectHandle<String> inferred_name, int32_t start_position,
+      int32_t end_position);
 
-  Handle<UncompiledDataWithPreparseDataAndJob>
-  NewUncompiledDataWithPreparseDataAndJob(Handle<String> inferred_name,
+  DirectHandle<UncompiledDataWithPreparseDataAndJob>
+  NewUncompiledDataWithPreparseDataAndJob(DirectHandle<String> inferred_name,
                                           int32_t start_position,
                                           int32_t end_position,
-                                          Handle<PreparseData>);
+                                          DirectHandle<PreparseData>);
 
   // Allocates a FeedbackMetadata object and zeroes the data section.
   Handle<FeedbackMetadata> NewFeedbackMetadata(
@@ -233,19 +309,25 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
 
   Handle<CoverageInfo> NewCoverageInfo(const ZoneVector<SourceRange>& slots);
 
-  Handle<String> InternalizeString(base::Vector<const uint8_t> string,
-                                   bool convert_encoding = false);
-  Handle<String> InternalizeString(base::Vector<const uint16_t> string,
-                                   bool convert_encoding = false);
+  Handle<InternalizedString> InternalizeString(
+      base::Vector<const uint8_t> string);
+  Handle<InternalizedString> InternalizeString(
+      base::Vector<const uint16_t> string);
+  Handle<InternalizedString> InternalizeString(std::string_view str) {
+    DCHECK(std::all_of(str.begin(), str.end(), [](char c) {
+      return static_cast<unsigned char>(c) <= 0x7f;
+    }));
+    return InternalizeString(base::OneByteVector(str.data(), str.size()));
+  }
 
   template <class StringTableKey>
-  Handle<String> InternalizeStringWithKey(StringTableKey* key);
+  Handle<InternalizedString> InternalizeStringWithKey(StringTableKey* key);
 
-  Handle<SeqOneByteString> NewOneByteInternalizedString(
+  Handle<InternalizedString> NewOneByteInternalizedString(
       base::Vector<const uint8_t> str, uint32_t raw_hash_field);
-  Handle<SeqTwoByteString> NewTwoByteInternalizedString(
+  Handle<InternalizedString> NewTwoByteInternalizedString(
       base::Vector<const base::uc16> str, uint32_t raw_hash_field);
-  Handle<SeqOneByteString> NewOneByteInternalizedStringFromTwoByte(
+  DirectHandle<InternalizedString> NewOneByteInternalizedStringFromTwoByte(
       base::Vector<const base::uc16> str, uint32_t raw_hash_field);
 
   Handle<SeqOneByteString> AllocateRawOneByteInternalizedString(
@@ -267,111 +349,158 @@ class FactoryBase : public TorqueGeneratedFactory<Impl> {
         .ToHandleChecked();
   }
 
+  inline Handle<String> NewStringFromAsciiChecked(
+      std::string_view str,
+      AllocationType allocation = AllocationType::kYoung) {
+    return NewStringFromOneByte(base::OneByteVector(str.data(), str.length()),
+                                allocation)
+        .ToHandleChecked();
+  }
+
   // Allocates and partially initializes an one-byte or two-byte String. The
   // characters of the string are uninitialized. Currently used in regexp code
-  // only, where they are pretenured.
+  // only, where they are allocated in old space.
   V8_WARN_UNUSED_RESULT MaybeHandle<SeqOneByteString> NewRawOneByteString(
-      int length, AllocationType allocation = AllocationType::kYoung);
+      uint32_t length, AllocationType allocation = AllocationType::kYoung,
+      AllocationHint hint = AllocationHint());
   V8_WARN_UNUSED_RESULT MaybeHandle<SeqTwoByteString> NewRawTwoByteString(
-      int length, AllocationType allocation = AllocationType::kYoung);
+      uint32_t length, AllocationType allocation = AllocationType::kYoung,
+      AllocationHint hint = AllocationHint());
   // Create a new cons string object which consists of a pair of strings.
-  V8_WARN_UNUSED_RESULT MaybeHandle<String> NewConsString(
-      Handle<String> left, Handle<String> right,
+  template <template <typename> typename HandleType>
+    requires(std::is_convertible_v<HandleType<String>, DirectHandle<String>>)
+  V8_WARN_UNUSED_RESULT HandleType<String>::MaybeType NewConsString(
+      HandleType<String> left, HandleType<String> right,
       AllocationType allocation = AllocationType::kYoung);
+  template <template <typename> typename HandleType, typename LString,
+            typename RString>
+    requires(std::is_convertible_v<HandleType<LString>, DirectHandle<String>> &&
+             std::is_convertible_v<HandleType<RString>, DirectHandle<String>>)
+  V8_WARN_UNUSED_RESULT HandleType<String>::MaybeType NewConsString(
+      HandleType<LString> left, HandleType<RString> right,
+      AllocationType allocation = AllocationType::kYoung) {
+    return NewConsString(static_cast<HandleType<String>>(left),
+                         static_cast<HandleType<String>>(right), allocation);
+  }
 
   V8_WARN_UNUSED_RESULT Handle<String> NewConsString(
-      Handle<String> left, Handle<String> right, int length, bool one_byte,
-      AllocationType allocation = AllocationType::kYoung);
+      DirectHandle<String> left, DirectHandle<String> right, int length,
+      bool one_byte, AllocationType allocation = AllocationType::kYoung);
 
   V8_WARN_UNUSED_RESULT Handle<String> NumberToString(
-      Handle<Object> number, NumberCacheMode mode = NumberCacheMode::kBoth);
-  V8_WARN_UNUSED_RESULT Handle<String> HeapNumberToString(
-      Handle<HeapNumber> number, double value,
+      DirectHandle<Object> number,
+      NumberCacheMode mode = NumberCacheMode::kBoth);
+  V8_WARN_UNUSED_RESULT Handle<String> DoubleToString(
+      double value, bool canonicalize = true,
       NumberCacheMode mode = NumberCacheMode::kBoth);
   V8_WARN_UNUSED_RESULT Handle<String> SmiToString(
-      Smi number, NumberCacheMode mode = NumberCacheMode::kBoth);
+      Tagged<Smi> number, NumberCacheMode mode = NumberCacheMode::kBoth);
 
   V8_WARN_UNUSED_RESULT MaybeHandle<SeqOneByteString> NewRawSharedOneByteString(
-      int length);
+      uint32_t length);
   V8_WARN_UNUSED_RESULT MaybeHandle<SeqTwoByteString> NewRawSharedTwoByteString(
-      int length);
+      uint32_t length);
 
   // Allocates a new BigInt with {length} digits. Only to be used by
   // MutableBigInt::New*.
   Handle<FreshlyAllocatedBigInt> NewBigInt(
-      int length, AllocationType allocation = AllocationType::kYoung);
+      uint32_t length, AllocationType allocation = AllocationType::kYoung);
 
   // Create a serialized scope info.
   Handle<ScopeInfo> NewScopeInfo(int length,
                                  AllocationType type = AllocationType::kOld);
 
-  Handle<SourceTextModuleInfo> NewSourceTextModuleInfo();
+  DirectHandle<SourceTextModuleInfo> NewSourceTextModuleInfo();
 
   Handle<DescriptorArray> NewDescriptorArray(
-      int number_of_entries, int slack = 0,
-      AllocationType allocation = AllocationType::kYoung);
+      int number_of_descriptors, int slack = 0,
+      AllocationType allocation = AllocationType::kYoung
+#ifdef V8_ENABLE_DESCRIPTOR_ARRAY_LOOKUP_TABLE
+      ,
+      bool allocate_lookup_table = true
+#endif  // V8_ENABLE_DESCRIPTOR_ARRAY_LOOKUP_TABLE
+  );
 
   Handle<ClassPositions> NewClassPositions(int start, int end);
 
   Handle<SwissNameDictionary> NewSwissNameDictionary(
-      int at_least_space_for = kSwissNameDictionaryInitialCapacity,
+      uint32_t at_least_space_for = kSwissNameDictionaryInitialCapacity,
       AllocationType allocation = AllocationType::kYoung);
 
   Handle<SwissNameDictionary> NewSwissNameDictionaryWithCapacity(
-      int capacity, AllocationType allocation);
+      uint32_t capacity, AllocationType allocation);
 
-  Handle<FunctionTemplateRareData> NewFunctionTemplateRareData();
+  DirectHandle<FunctionTemplateRareData> NewFunctionTemplateRareData();
 
-  MaybeHandle<Map> GetInPlaceInternalizedStringMap(Map from_string_map);
+  MaybeDirectHandle<Map> GetInPlaceInternalizedStringMap(
+      Tagged<Map> from_string_map);
 
   AllocationType RefineAllocationTypeForInPlaceInternalizableString(
-      AllocationType allocation, Map string_map);
+      AllocationType allocation, Tagged<Map> string_map);
+
+  JSDispatchHandle NewJSDispatchHandle(uint16_t parameter_count,
+                                       DirectHandle<Code> code,
+                                       JSDispatchTable::Space* space);
 
  protected:
   // Must be large enough to fit any double, int, or size_t.
   static constexpr int kNumberToStringBufferSize = 32;
 
   // Allocate memory for an uninitialized array (e.g., a FixedArray or similar).
-  HeapObject AllocateRawArray(int size, AllocationType allocation);
-  HeapObject AllocateRawFixedArray(int length, AllocationType allocation);
-  HeapObject AllocateRawWeakArrayList(int length, AllocationType allocation);
-
-  template <typename StructType>
-  inline StructType NewStructInternal(InstanceType type,
-                                      AllocationType allocation);
-  Struct NewStructInternal(ReadOnlyRoots roots, Map map, int size,
-                           AllocationType allocation);
-
-  HeapObject AllocateRawWithImmortalMap(
-      int size, AllocationType allocation, Map map,
+  Tagged<HeapObject> AllocateRawArray(
+      int size, AllocationType allocation,
+      AllocationHint hint = AllocationHint(),
       AllocationAlignment alignment = kTaggedAligned);
-  HeapObject NewWithImmortalMap(Map map, AllocationType allocation);
+  Tagged<HeapObject> AllocateRawFixedArray(uint32_t length,
+                                           AllocationType allocation);
+  Tagged<HeapObject> AllocateRawWeakArrayList(uint32_t length,
+                                              AllocationType allocation);
 
-  Handle<FixedArray> NewFixedArrayWithFiller(Handle<Map> map, int length,
-                                             Handle<HeapObject> filler,
+  AllocationWitness AllocateWithWitness(
+      int size, AllocationType allocation,
+      AllocationAlignment alignment = kTaggedAligned,
+      AllocationHint hint = AllocationHint());
+
+  Tagged<HeapObject> AllocateRawWithImmortalMap(
+      int size, AllocationType allocation, Tagged<Map> map,
+      AllocationAlignment alignment = kTaggedAligned,
+      AllocationHint hint = AllocationHint());
+  Tagged<HeapObject> NewWithImmortalMap(Tagged<Map> map,
+                                        AllocationType allocation);
+
+  Handle<FixedArray> NewFixedArrayWithFiller(DirectHandle<Map> map,
+                                             uint32_t length,
+                                             DirectHandle<HeapObject> filler,
                                              AllocationType allocation);
 
   Handle<SharedFunctionInfo> NewSharedFunctionInfo(AllocationType allocation);
   Handle<SharedFunctionInfo> NewSharedFunctionInfo(
-      MaybeHandle<String> maybe_name,
-      MaybeHandle<HeapObject> maybe_function_data, Builtin builtin,
+      MaybeDirectHandle<String> maybe_name,
+      MaybeDirectHandle<HeapObject> maybe_function_data, Builtin builtin,
+      int len, AdaptArguments adapt,
       FunctionKind kind = FunctionKind::kNormalFunction);
 
   Handle<String> MakeOrFindTwoCharacterString(uint16_t c1, uint16_t c2);
 
   template <typename SeqStringT>
-  MaybeHandle<SeqStringT> NewRawStringWithMap(int length, Map map,
-                                              AllocationType allocation);
+  MaybeHandle<SeqStringT> NewRawStringWithMap(
+      uint32_t length, Tagged<Map> map, AllocationType allocation,
+      AllocationHint hint = AllocationHint());
 
  private:
   Impl* impl() { return static_cast<Impl*>(this); }
   auto isolate() { return impl()->isolate(); }
   ReadOnlyRoots read_only_roots() { return impl()->read_only_roots(); }
 
-  HeapObject AllocateRaw(int size, AllocationType allocation,
-                         AllocationAlignment alignment = kTaggedAligned);
+  Tagged<HeapObject> AllocateRaw(int size, AllocationType allocation,
+                                 AllocationAlignment alignment = kTaggedAligned,
+                                 AllocationHint hint = AllocationHint());
 
-  friend TorqueGeneratedFactory<Impl>;
+  template <class Derived, class Shape, class Super>
+  friend class TaggedArrayBase;
+  template <class Derived, class Shape, class Super>
+  friend class PrimitiveArrayBase;
+  friend class DoubleStringCache;
 };
 
 extern template class EXPORT_TEMPLATE_DECLARE(V8_EXPORT_PRIVATE)

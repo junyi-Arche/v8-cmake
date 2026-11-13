@@ -120,8 +120,8 @@ GCCallbacksTest* GCCallbacksTest::current_test_ = nullptr;
 
 TEST_F(GCCallbacksTest, GCCallbacks) {
   // For SimulateFullSpace in PrologueCallbackAlloc and EpilogueCallbackAlloc.
-  i::v8_flags.stress_concurrent_allocation = false;
-  v8::Isolate* isolate = context()->GetIsolate();
+  i::v8_flags.stress_concurrent_allocation.Set(false);
+  v8::Isolate* isolate = reinterpret_cast<v8::Isolate*>(i_isolate());
   gc_callbacks_isolate_ = isolate;
   isolate->AddGCPrologueCallback(PrologueCallback);
   isolate->AddGCEpilogueCallback(EpilogueCallback);
@@ -163,5 +163,185 @@ TEST_F(GCCallbacksTest, GCCallbacks) {
   isolate->RemoveGCEpilogueCallback(EpilogueCallbackAlloc);
 }
 
+TEST_F(GCCallbacksTest, DisallowJSObjectModification) {
+  // `v8_unittests` runs death tests in "threadsafe" mode, which re-spawns the
+  // process and re-runs the test from `main()` for every
+  // `EXPECT_DEATH_IF_SUPPORTED` check. Ensure `i::v8_flags.hard_abort = true`
+  // so each expected `CHECK` failure terminates immediately without `abort()` /
+  // core-dump overhead.
+  i::v8_flags.hard_abort.Set(true);
+
+  v8::Isolate* isolate = v8_isolate();
+  v8::HandleScope scope(isolate);
+  v8::Local<v8::Context> context = isolate->GetCurrentContext();
+
+  v8::Local<v8::String> existing_key = NewString("existing");
+  v8::Local<v8::String> new_key = NewString("new_prop");
+  v8::Local<v8::Value> value = v8::Integer::New(isolate, 42);
+
+  v8::Local<v8::Object> fast_obj = v8::Object::New(isolate);
+  CHECK(fast_obj->CreateDataProperty(context, existing_key, value).FromJust());
+  CHECK(Utils::OpenDirectHandle(*fast_obj)->HasFastProperties());
+
+  v8::Local<v8::Object> dict_obj = v8::Object::New(isolate);
+  CHECK(dict_obj->CreateDataProperty(context, existing_key, value).FromJust());
+  i::JSObject::NormalizeProperties(
+      i_isolate(), i::Cast<i::JSObject>(Utils::OpenDirectHandle(*dict_obj)),
+      i::KEEP_INOBJECT_PROPERTIES, 0, "test");
+  CHECK(!Utils::OpenDirectHandle(*dict_obj)->HasFastProperties());
+
+#if !defined(DEBUG) && defined(OFFICIAL_BUILD)
+  constexpr const char* kExpectedDeathMessage = "";
+#else
+  constexpr const char* kExpectedDeathMessage =
+      "Check failed: AllowJSObjectModification::IsAllowed";
+#endif
+
+  size_t prologue_count = 0;
+  size_t epilogue_count = 0;
+  using CallbackFn =
+      std::function<void(v8::Isolate*, v8::GCType, v8::GCCallbackFlags)>;
+  CallbackFn on_prologue = [&](v8::Isolate*, v8::GCType, v8::GCCallbackFlags) {
+    // Adding a new property to a fast-mode JSObject.
+    EXPECT_DEATH_IF_SUPPORTED(
+        fast_obj->CreateDataProperty(context, new_key, value).Check(),
+        kExpectedDeathMessage);
+    // Adding an indexed element to a fast-mode JSObject.
+    EXPECT_DEATH_IF_SUPPORTED(
+        fast_obj->CreateDataProperty(context, 0, value).Check(),
+        kExpectedDeathMessage);
+    // Reconfiguring an existing property on a fast-mode JSObject.
+    EXPECT_DEATH_IF_SUPPORTED(
+        fast_obj->DefineOwnProperty(context, existing_key, value, v8::ReadOnly)
+            .Check(),
+        kExpectedDeathMessage);
+    // Deleting a property from a fast-mode JSObject.
+    EXPECT_DEATH_IF_SUPPORTED(fast_obj->Delete(context, existing_key).Check(),
+                              kExpectedDeathMessage);
+    // Adding a property to a dictionary-mode JSObject.
+    EXPECT_DEATH_IF_SUPPORTED(
+        dict_obj->CreateDataProperty(context, new_key, value).Check(),
+        kExpectedDeathMessage);
+    // Deleting a property from a dictionary-mode JSObject.
+    EXPECT_DEATH_IF_SUPPORTED(dict_obj->Delete(context, existing_key).Check(),
+                              kExpectedDeathMessage);
+    prologue_count++;
+  };
+  CallbackFn on_epilogue = [&](v8::Isolate*, v8::GCType, v8::GCCallbackFlags) {
+    // Run a single representative check in epilogue to avoid spawning 6 more
+    // "threadsafe" death-test subprocesses.
+    EXPECT_DEATH_IF_SUPPORTED(
+        fast_obj->CreateDataProperty(context, new_key, value).Check(),
+        kExpectedDeathMessage);
+    epilogue_count++;
+  };
+
+  auto callback_thunk = [](v8::Isolate* isolate, v8::GCType type,
+                           v8::GCCallbackFlags flags, void* data) {
+    auto* fn = static_cast<CallbackFn*>(data);
+    (*fn)(isolate, type, flags);
+  };
+
+  isolate->AddGCPrologueCallback(callback_thunk, &on_prologue);
+  isolate->AddGCEpilogueCallback(callback_thunk, &on_epilogue);
+  InvokeMajorGC();
+  isolate->RemoveGCPrologueCallback(callback_thunk, &on_prologue);
+  isolate->RemoveGCEpilogueCallback(callback_thunk, &on_epilogue);
+
+  EXPECT_EQ(1u, prologue_count);
+  EXPECT_EQ(1u, epilogue_count);
+}
+
 }  // namespace
 }  // namespace v8
+
+namespace v8::internal {
+using GCCallbackFlagsTest = TestWithHeapInternalsAndContext;
+
+using GCCallbackFunction = std::function<void(v8::Isolate* isolate, v8::GCType,
+                                              v8::GCCallbackFlags flags)>;
+
+class CallbackScope {
+ public:
+  CallbackScope(v8::Isolate* isolate, GCCallbackFunction prologue,
+                GCCallbackFunction epilogue)
+      : isolate_(isolate), prologue_(prologue), epilogue_(epilogue) {
+    isolate_->AddGCPrologueCallback(PrologueCallback, this);
+    isolate_->AddGCEpilogueCallback(EpilogueCallback, this);
+  }
+
+  ~CallbackScope() {
+    isolate_->RemoveGCPrologueCallback(PrologueCallback, this);
+    isolate_->RemoveGCEpilogueCallback(EpilogueCallback, this);
+  }
+
+ private:
+  static void PrologueCallback(v8::Isolate* isolate, v8::GCType gc_type,
+                               v8::GCCallbackFlags flags, void* data) {
+    reinterpret_cast<CallbackScope*>(data)->prologue_(isolate, gc_type, flags);
+  }
+
+  static void EpilogueCallback(v8::Isolate* isolate, v8::GCType gc_type,
+                               v8::GCCallbackFlags flags, void* data) {
+    reinterpret_cast<CallbackScope*>(data)->epilogue_(isolate, gc_type, flags);
+  }
+
+  v8::Isolate* isolate_;
+  GCCallbackFunction prologue_;
+  GCCallbackFunction epilogue_;
+};
+
+TEST_F(GCCallbackFlagsTest, CollectAllAvailableGarbage) {
+  ManualGCScope gc_scope(i_isolate());
+
+  size_t prologue_count = 0;
+  size_t epilogue_count = 0;
+
+  CallbackScope callback_scope(
+      v8_isolate(),
+      [&](v8::Isolate* isolate, v8::GCType, v8::GCCallbackFlags flags) {
+        ASSERT_TRUE(flags &
+                    GCCallbackFlags::kGCCallbackFlagCollectAllAvailableGarbage);
+        ASSERT_FALSE(flags & GCCallbackFlags::kGCCallbackFlagLastResort);
+        prologue_count++;
+      },
+      [&](v8::Isolate* isolate, v8::GCType, v8::GCCallbackFlags flags) {
+        ASSERT_TRUE(flags &
+                    GCCallbackFlags::kGCCallbackFlagCollectAllAvailableGarbage);
+        ASSERT_FALSE(flags & GCCallbackFlags::kGCCallbackFlagLastResort);
+        epilogue_count++;
+      });
+
+  i_isolate()->heap()->CollectAllAvailableGarbage(
+      GarbageCollectionReason::kHeapProfiler);
+  EXPECT_GT(prologue_count, 0u);
+  EXPECT_EQ(prologue_count, epilogue_count);
+}
+
+TEST_F(GCCallbackFlagsTest, CollectAllAvailableGarbageAndLastResort) {
+  ManualGCScope gc_scope(i_isolate());
+
+  size_t prologue_count = 0;
+  size_t epilogue_count = 0;
+
+  CallbackScope callback_scope(
+      v8_isolate(),
+      [&](v8::Isolate* isolate, v8::GCType, v8::GCCallbackFlags flags) {
+        ASSERT_TRUE(flags &
+                    GCCallbackFlags::kGCCallbackFlagCollectAllAvailableGarbage);
+        ASSERT_TRUE(flags & GCCallbackFlags::kGCCallbackFlagLastResort);
+        prologue_count++;
+      },
+      [&](v8::Isolate* isolate, v8::GCType, v8::GCCallbackFlags flags) {
+        ASSERT_TRUE(flags &
+                    GCCallbackFlags::kGCCallbackFlagCollectAllAvailableGarbage);
+        ASSERT_TRUE(flags & GCCallbackFlags::kGCCallbackFlagLastResort);
+        epilogue_count++;
+      });
+
+  i_isolate()->heap()->CollectAllAvailableGarbage(
+      GarbageCollectionReason::kLastResort);
+  EXPECT_GT(prologue_count, 0u);
+  EXPECT_EQ(prologue_count, epilogue_count);
+}
+}  // namespace v8::internal

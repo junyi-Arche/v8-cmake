@@ -5,9 +5,11 @@
 #ifndef V8_EXECUTION_LOCAL_ISOLATE_H_
 #define V8_EXECUTION_LOCAL_ISOLATE_H_
 
+#include <optional>
+
 #include "src/base/macros.h"
-#include "src/execution/shared-mutex-guard-if-off-thread.h"
-#include "src/execution/thread-id.h"
+#include "src/base/thread-id.h"
+#include "src/execution/mutex-guard-if-off-thread.h"
 #include "src/handles/handles.h"
 #include "src/handles/local-handles.h"
 #include "src/handles/maybe-handles.h"
@@ -24,6 +26,7 @@ class Processor;
 namespace internal {
 
 class Isolate;
+class IsolateData;
 class LocalLogger;
 class RuntimeCallStats;
 
@@ -44,7 +47,11 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
  public:
   using HandleScopeType = LocalHandleScope;
 
-  explicit LocalIsolate(Isolate* isolate, ThreadKind kind);
+  // The parameter `stack_start` is only used for stack-allocated instances,
+  // where `kind == ThreadKind::kBackground`.
+  explicit LocalIsolate(Isolate* isolate, ThreadKind kind,
+                        v8::base::Stack::StackSlot stack_start =
+                            v8::base::Stack::GetCurrentFrameAddress());
   ~LocalIsolate();
 
   // Kinda sketchy.
@@ -61,7 +68,9 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
   inline Address cage_base() const;
   inline Address code_cage_base() const;
   inline ReadOnlyHeap* read_only_heap() const;
-  inline Object root(RootIndex index) const;
+  inline RootsTable& roots_table();
+  inline const RootsTable& roots_table() const;
+  inline Tagged<Object> root(RootIndex index) const;
   inline Handle<Object> root_handle(RootIndex index) const;
 
   base::RandomNumberGenerator* fuzzer_rng() const {
@@ -69,10 +78,10 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
   }
 
   StringTable* string_table() const { return isolate_->string_table(); }
-  base::SharedMutex* internalized_string_access() {
+  base::Mutex* internalized_string_access() {
     return isolate_->internalized_string_access();
   }
-  base::SharedMutex* shared_function_info_access() {
+  base::Mutex* shared_function_info_access() {
     return isolate_->shared_function_info_access();
   }
   const AstStringConstants* ast_string_constants() {
@@ -91,36 +100,45 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
     return isolate_->is_precise_binary_code_coverage();
   }
 
+  inline bool is_short_builtin_calls_enabled() const;
+
   v8::internal::LocalFactory* factory() {
     // Upcast to the privately inherited base-class using c-style casts to avoid
     // undefined behavior (as static_cast cannot cast across private bases).
     return (v8::internal::LocalFactory*)this;
   }
 
+  IsolateGroup* isolate_group() const { return isolate_->isolate_group(); }
+
+  inline const IsolateData* isolate_data() const;
+
   AccountingAllocator* allocator() { return isolate_->allocator(); }
 
-  bool has_pending_exception() const { return false; }
+  bool has_exception() const { return false; }
   bool serializer_enabled() const { return isolate_->serializer_enabled(); }
 
   void RegisterDeserializerStarted();
   void RegisterDeserializerFinished();
   bool has_active_deserializer() const;
 
-  template <typename T>
-  Handle<T> Throw(Handle<Object> exception) {
-    UNREACHABLE();
-  }
+  void Throw(Tagged<Object> exception) { UNREACHABLE(); }
   [[noreturn]] void FatalProcessOutOfHeapMemory(const char* location) {
     UNREACHABLE();
   }
 
+  JSDispatchTable& js_dispatch_table() const {
+    return isolate_->js_dispatch_table();
+  }
+
   int GetNextScriptId();
-  uint32_t GetNextUniqueSharedFunctionInfoId();
+  uint32_t GetAndIncNextUniqueSfiId() {
+    return isolate_->GetAndIncNextUniqueSfiId();
+  }
 
   // TODO(cbruni): rename this back to logger() once the V8FileLogger
   // refactoring is completed.
   LocalLogger* v8_file_logger() const { return logger_.get(); }
-  ThreadId thread_id() const { return thread_id_; }
+  base::ThreadId thread_id() const { return thread_id_; }
   Address stack_limit() const { return stack_limit_; }
 #ifdef V8_RUNTIME_CALL_STATS
   RuntimeCallStats* runtime_call_stats() const { return runtime_call_stats_; }
@@ -132,26 +150,40 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
     return bigint_processor_;
   }
 
+  JSDispatchTable::Space* GetJSDispatchTableSpaceFor(Address owning_slot) {
+    return isolate_->GetJSDispatchTableSpaceFor(owning_slot);
+  }
+
   // AsIsolate is only allowed on the main-thread.
   Isolate* AsIsolate() {
     DCHECK(is_main_thread());
-    DCHECK_EQ(ThreadId::Current(), isolate_->thread_id());
+    DCHECK_EQ(base::ThreadId::Current(), isolate_->thread_id());
     return isolate_;
   }
   LocalIsolate* AsLocalIsolate() { return this; }
+
+  LocalIsolate* shared_space_isolate() const {
+    return isolate_->shared_space_isolate()->main_thread_local_isolate();
+  }
 
   // TODO(victorgomes): Remove this when/if MacroAssembler supports LocalIsolate
   // only constructor.
   Isolate* GetMainThreadIsolateUnsafe() const { return isolate_; }
 
-  Object* pending_message_address() {
+  const v8::StartupData* snapshot_blob() const {
+    return isolate_->snapshot_blob();
+  }
+  Tagged<Object>* pending_message_address() {
     return isolate_->pending_message_address();
   }
 
   int NextOptimizationId() { return isolate_->NextOptimizationId(); }
 
   template <typename Callback>
-  V8_INLINE void BlockMainThreadWhileParked(Callback callback);
+  V8_INLINE void ExecuteMainThreadWhileParked(Callback callback);
+
+  template <typename Callback>
+  V8_INLINE void ParkIfOnBackgroundAndExecute(Callback callback);
 
 #ifdef V8_INTL_SUPPORT
   // WARNING: This might be out-of-sync with the main-thread.
@@ -161,6 +193,11 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
  private:
   friend class v8::internal::LocalFactory;
   friend class LocalIsolateFactory;
+  friend class IsolateForPointerCompression;
+  friend class IsolateForSandbox;
+
+  // See IsolateForSandbox.
+  Isolate* ForSandbox() { return isolate_; }
 
   void InitializeBigIntProcessor();
 
@@ -171,13 +208,13 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
   Isolate* const isolate_;
 
   std::unique_ptr<LocalLogger> logger_;
-  ThreadId const thread_id_;
+  base::ThreadId const thread_id_;
   Address const stack_limit_;
 
   bigint::Processor* bigint_processor_{nullptr};
 
 #ifdef V8_RUNTIME_CALL_STATS
-  base::Optional<WorkerThreadRuntimeCallStatsScope> rcs_scope_;
+  std::optional<WorkerThreadRuntimeCallStatsScope> rcs_scope_;
   RuntimeCallStats* runtime_call_stats_;
 #endif
 #ifdef V8_INTL_SUPPORT
@@ -185,21 +222,20 @@ class V8_EXPORT_PRIVATE LocalIsolate final : private HiddenLocalFactory {
 #endif
 };
 
-template <base::MutexSharedType kIsShared>
-class V8_NODISCARD SharedMutexGuardIfOffThread<LocalIsolate, kIsShared> final {
+template <>
+class V8_NODISCARD MutexGuardIfOffThread<LocalIsolate> final {
  public:
-  SharedMutexGuardIfOffThread(base::SharedMutex* mutex, LocalIsolate* isolate) {
+  MutexGuardIfOffThread(base::Mutex* mutex, LocalIsolate* isolate) {
     DCHECK_NOT_NULL(mutex);
     DCHECK_NOT_NULL(isolate);
     if (!isolate->is_main_thread()) mutex_guard_.emplace(mutex);
   }
 
-  SharedMutexGuardIfOffThread(const SharedMutexGuardIfOffThread&) = delete;
-  SharedMutexGuardIfOffThread& operator=(const SharedMutexGuardIfOffThread&) =
-      delete;
+  MutexGuardIfOffThread(const MutexGuardIfOffThread&) = delete;
+  MutexGuardIfOffThread& operator=(const MutexGuardIfOffThread&) = delete;
 
  private:
-  base::Optional<base::SharedMutexGuard<kIsShared>> mutex_guard_;
+  std::optional<base::MutexGuard> mutex_guard_;
 };
 
 }  // namespace internal

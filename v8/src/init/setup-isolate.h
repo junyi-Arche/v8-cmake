@@ -12,6 +12,8 @@ namespace internal {
 
 class Builtins;
 enum class Builtin : int32_t;
+template <typename T>
+class Tagged;
 class Code;
 class Heap;
 class Isolate;
@@ -23,8 +25,8 @@ class Isolate;
 // - setup-isolate-deserialize.cc: always loads things from snapshot.
 // - setup-isolate-full.cc: loads from snapshot or bootstraps from scratch,
 //                          controlled by the |create_heap_objects| flag.
-// For testing, the implementation in setup-isolate-for-tests.cc can be chosen
-// to force the behavior of setup-isolate-full.cc at runtime.
+// For testing, the implementation in test/unittests/setup-isolate-for-tests.h
+// can be chosen to force the behavior of setup-isolate-full.cc at runtime.
 //
 // The actual implementations of generation of builtins and handlers is in
 // setup-builtins-internal.cc and setup-interpreter-internal.cc, and is
@@ -38,8 +40,10 @@ class V8_EXPORT_PRIVATE SetupIsolateDelegate {
   virtual void SetupBuiltins(Isolate* isolate, bool compile_builtins);
 
  protected:
-  static void SetupBuiltinsInternal(Isolate* isolate);
-  static void AddBuiltin(Builtins* builtins, Builtin builtin, Code code);
+  static void SetupBuiltinsInternal(Isolate* isolate,
+                                    bool compute_builtins_effects);
+  static void AddBuiltin(Builtins* builtins, Builtin builtin,
+                         Tagged<Code> code);
   static void PopulateWithPlaceholders(Isolate* isolate);
   static void ReplacePlaceholders(Isolate* isolate);
 

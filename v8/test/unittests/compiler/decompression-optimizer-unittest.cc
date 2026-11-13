@@ -2,13 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/compiler/decompression-optimizer.h"
-
 #include "test/unittests/compiler/graph-unittest.h"
 
 namespace v8 {
 namespace internal {
 namespace compiler {
+
+// TODO(391750831): This needs to be ported to Turboshaft.
+#if 0
 
 class DecompressionOptimizerTest : public GraphTest {
  public:
@@ -194,7 +195,7 @@ TEST_F(DecompressionOptimizerTest, Word32ShlSmiTag) {
   Node* word32_shl =
       graph()->NewNode(machine()->Word32Shl(), load, smi_shift_bits);
   graph()->SetEnd(
-      graph()->NewNode(machine()->BitcastWord32ToWord64(), word32_shl));
+      graph()->NewNode(machine()->ChangeUint32ToUint64(), word32_shl));
   // Change the nodes, and test the change.
   Reduce();
   EXPECT_EQ(LoadMachRep(load), CompressedMachRep(MachineType::AnyTagged()));
@@ -234,8 +235,8 @@ TEST_F(DecompressionOptimizerTest, TypedStateValues) {
   Node* index = Parameter(Type::UnsignedSmall(), 1);
   const int number_of_inputs = 2;
   const ZoneVector<MachineType>* types_for_state_values =
-      graph()->zone()->New<ZoneVector<MachineType>>(number_of_inputs,
-                                                    graph()->zone());
+      graph()->zone()->New<ZoneVector<MachineType>>(
+          number_of_inputs, MachineType::AnyTagged(), graph()->zone());
   SparseInputMask dense = SparseInputMask::Dense();
 
   // Test for both AnyTagged and TaggedPointer.
@@ -251,9 +252,13 @@ TEST_F(DecompressionOptimizerTest, TypedStateValues) {
           constant_1);
       Node* constant_2 =
           graph()->NewNode(common()->HeapConstant(heap_constants[j]));
+      FrameStateFunctionInfo const* function_info =
+          common()->CreateFrameStateFunctionInfo(
+              FrameStateType::kUnoptimizedFunction, 0, 0, 0, {}, {});
       graph()->SetEnd(graph()->NewNode(
           common()->FrameState(BytecodeOffset::None(),
-                               OutputFrameStateCombine::Ignore(), nullptr),
+                               OutputFrameStateCombine::Ignore(),
+                               function_info),
           typed_state_values, typed_state_values, typed_state_values,
           constant_2, UndefinedConstant(), graph()->start()));
 
@@ -488,6 +493,7 @@ TEST_F(DecompressionOptimizerTest, BitcastTaggedToWordForTagAndSmiBits) {
     }
   }
 }
+#endif
 
 }  // namespace compiler
 }  // namespace internal

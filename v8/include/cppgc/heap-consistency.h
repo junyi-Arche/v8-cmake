@@ -114,7 +114,7 @@ class HeapConsistency final {
    * has not yet been processed.
    *
    * \param params The parameters retrieved from `GetWriteBarrierType()`.
-   * \param object The pointer to the object. May be an interior pointer to a
+   * \param object The pointer to the object. May be an interior pointer to
    *   an interface of the actual object.
    */
   static V8_INLINE void DijkstraWriteBarrier(const WriteBarrierParams& params,
@@ -146,8 +146,8 @@ class HeapConsistency final {
   }
 
   /**
-   * Steele-style write barrier that re-processes an object if it has already
-   * been processed.
+   * Steele-style write barrier that processes an object regardless of whether
+   * or not it has already been processed.
    *
    * \param params The parameters retrieved from `GetWriteBarrierType()`.
    * \param object The pointer to the object which must point to an object that

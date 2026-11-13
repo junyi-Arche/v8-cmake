@@ -4,6 +4,7 @@
 
 #include "src/compiler/turboshaft/types.h"
 
+#include <optional>
 #include <sstream>
 #include <string_view>
 
@@ -45,6 +46,7 @@ bool Type::Equals(const Type& other) const {
     case Kind::kAny:
       return true;
   }
+  UNREACHABLE();
 }
 
 bool Type::IsSubtypeOf(const Type& other) const {
@@ -71,6 +73,7 @@ bool Type::IsSubtypeOf(const Type& other) const {
     case Kind::kAny:
       UNREACHABLE();
   }
+  UNREACHABLE();
 }
 
 void Type::PrintTo(std::ostream& stream) const {
@@ -110,7 +113,7 @@ void Type::PrintTo(std::ostream& stream) const {
 void Type::Print() const {
   StdoutStream os;
   PrintTo(os);
-  os << std::endl;
+  os << '\n';
 }
 
 // static
@@ -141,10 +144,11 @@ Type Type::LeastUpperBound(const Type& lhs, const Type& rhs, Zone* zone) {
     case Type::Kind::kTuple:
       return TupleType::LeastUpperBound(lhs.AsTuple(), rhs.AsTuple(), zone);
   }
+  UNREACHABLE();
 }
 
-base::Optional<Type> Type::ParseFromString(const std::string_view& str,
-                                           Zone* zone) {
+std::optional<Type> Type::ParseFromString(const std::string_view& str,
+                                          Zone* zone) {
   TypeParser parser(str, zone);
   return parser.Parse();
 }
@@ -169,6 +173,7 @@ Handle<TurboshaftType> Type::AllocateOnHeap(Factory* factory) const {
     case Kind::kAny:
       UNIMPLEMENTED();
   }
+  UNREACHABLE();
 }
 
 template <size_t Bits>
@@ -185,6 +190,7 @@ bool WordType<Bits>::Contains(word_t value) const {
       return false;
     }
   }
+  UNREACHABLE();
 }
 
 template <size_t Bits>
@@ -203,6 +209,7 @@ bool WordType<Bits>::Equals(const WordType<Bits>& other) const {
       return true;
     }
   }
+  UNREACHABLE();
 }
 
 template <size_t Bits>
@@ -227,6 +234,7 @@ bool WordType<Bits>::IsSubtypeOf(const WordType<Bits>& other) const {
       return true;
     }
   }
+  UNREACHABLE();
 }
 
 template <size_t Bits, typename word_t = typename WordType<Bits>::word_t>
@@ -252,12 +260,13 @@ WordType<Bits> LeastUpperBoundFromRanges(word_t l_from, word_t l_to,
     const auto to = std::max(l_to, r_to);
     if (to >= from) return WordType<Bits>::Any();
     auto result = WordType<Bits>::Range(from, to, zone);
-    DCHECK(result.is_wrapping());
+    DCHECK_IMPLIES(result.is_range(), result.is_wrapping());
     return result;
   }
 
-  if (rhs_wrapping)
+  if (rhs_wrapping) {
     return LeastUpperBoundFromRanges<Bits>(r_from, r_to, l_from, l_to, zone);
+  }
   DCHECK(lhs_wrapping);
   DCHECK(!rhs_wrapping);
   // Case 3 & 4: lhs is wrapping, rhs is not
@@ -265,18 +274,20 @@ WordType<Bits> LeastUpperBoundFromRanges(word_t l_from, word_t l_to,
   // rhs -------|XX|-   -|XX|-------   ----|XXXXX|-   ---|XX|-----
   // ==> XXX|---|XXXX   XXXX|---|XXX   XXXXXXXXXXXX   XXXXXX|--|XX
   if (r_from <= l_to) {
-    if (r_to <= l_to)
+    if (r_to <= l_to) {
       return WordType<Bits>::Range(l_from, l_to, zone);       // y covered by x
+    }
     if (r_to >= l_from) return WordType<Bits>::Any();         // ex3
     auto result = WordType<Bits>::Range(l_from, r_to, zone);  // ex 1
-    DCHECK(result.is_wrapping());
+    DCHECK_IMPLIES(result.is_range(), result.is_wrapping());
     return result;
   } else if (r_to >= l_from) {
-    if (r_from >= l_from)
+    if (r_from >= l_from) {
       return WordType<Bits>::Range(l_from, l_to, zone);       // y covered by x
+    }
     DCHECK_GT(r_from, l_to);                                  // handled above
     auto result = WordType<Bits>::Range(r_from, l_to, zone);  // ex 2
-    DCHECK(result.is_wrapping());
+    DCHECK_IMPLIES(result.is_range(), result.is_wrapping());
     return result;
   } else {
     const auto df = r_from - l_to;
@@ -284,7 +295,7 @@ WordType<Bits> LeastUpperBoundFromRanges(word_t l_from, word_t l_to,
     WordType<Bits> result =
         df > dt ? WordType<Bits>::Range(r_from, l_to, zone)  // ex 4
                 : WordType<Bits>::Range(l_from, r_to, zone);
-    DCHECK(result.is_wrapping());
+    DCHECK_IMPLIES(result.is_range(), result.is_wrapping());
     return result;
   }
 }
@@ -370,11 +381,68 @@ Type WordType<Bits>::Intersect(const WordType<Bits>& lhs,
   }
 
   if (lhs_wrapping && rhs.is_wrapping()) {
-    const auto result_from = std::max(lhs.range_from(), rhs.range_from());
-    const auto result_to = std::min(lhs.range_to(), rhs.range_to());
-    auto result = WordType::Range(result_from, result_to, zone);
-    DCHECK(result.is_wrapping());
-    return result;
+    // Intersection of wrapping ranges:
+    // Case 1:
+    // lhs: |-------|         |-------------|
+    //           lhs_to    lhs_from
+    //
+    // rhs: |------------|         |--------|
+    //                rhs_to    rhs_from
+    //
+    // res: |-------|              |--------|
+    if (lhs.range_to() < rhs.range_from() &&
+        rhs.range_to() < lhs.range_from()) {
+      const auto result_from = std::max(lhs.range_from(), rhs.range_from());
+      const auto result_to = std::min(lhs.range_to(), rhs.range_to());
+      auto result = WordType::Range(result_from, result_to, zone);
+      // The result might be optimized to be a Set instead of Range, if it has
+      // only a few elements. But if it's Range, then it's a wrapping range.
+      DCHECK_IMPLIES(result.is_range(), result.is_wrapping());
+      return result;
+    }
+
+    // Case 2:
+    // lhs: |-------------|         |-------|
+    //                 lhs_to    lhs_from
+    //
+    // rhs: |----|      |-------------------|
+    //        rhs_to rhs_from
+    //
+    // res: |----|      |-|         |-------|
+    // (not reprensentable as a wrapped range)
+    //
+    // Case 3:
+    // lhs: |----|         |----------------|
+    //        lhs_to    lhs_from
+    //
+    // rhs: |------------------|      |-----|
+    //                      rhs_to rhs_from
+    //
+    // res: |----|         |---|      |-----|
+    // (not reprensentable as a wrapped range)
+
+    switch (resolution_mode) {
+      case ResolutionMode::kPreciseOrInvalid:
+        return Type::Invalid();
+      case ResolutionMode::kOverApproximate: {
+        // Both lhs and rhs are valid overapproximations. Pick the smaller one.
+        const word_t lhs_size =
+            (std::numeric_limits<word_t>::max() - lhs.range_from() + 1) +
+            (lhs.range_to() + 1);
+        const word_t rhs_size =
+            (std::numeric_limits<word_t>::max() - rhs.range_from() + 1) +
+            (rhs.range_to() + 1);
+        if (lhs_size < rhs_size) return lhs;
+        if (rhs_size < lhs_size) return rhs;
+        return lhs.range_from() <= rhs.range_from() ? lhs : rhs;
+      }
+      case ResolutionMode::kGreatestLowerBound:
+        // The wrapping part [0, min(to1, to2)] U [max(from1, from2), max] is a
+        // valid maximal representable lower bound (under-approximation).
+        return WordType::Range(std::max(lhs.range_from(), rhs.range_from()),
+                               std::min(lhs.range_to(), rhs.range_to()), zone);
+    }
+    UNREACHABLE();
   }
 
   const auto& x = lhs_wrapping ? lhs : rhs;
@@ -405,6 +473,7 @@ Type WordType<Bits>::Intersect(const WordType<Bits>& lhs,
                  ? s_h
                  : s_l;
   }
+  UNREACHABLE();
 }
 
 template <size_t Bits>
@@ -478,6 +547,7 @@ bool FloatType<Bits>::Contains(float_t value) const {
       return false;
     }
   }
+  UNREACHABLE();
 }
 
 template <size_t Bits>
@@ -500,6 +570,7 @@ bool FloatType<Bits>::Equals(const FloatType<Bits>& other) const {
       return true;
     }
   }
+  UNREACHABLE();
 }
 
 template <size_t Bits>
@@ -528,8 +599,10 @@ bool FloatType<Bits>::IsSubtypeOf(const FloatType<Bits>& other) const {
           }
           return true;
       }
+      UNREACHABLE();
     }
   }
+  UNREACHABLE();
 }
 
 template <size_t Bits>
@@ -691,7 +764,7 @@ Type TupleType::LeastUpperBound(const TupleType& lhs, const TupleType& rhs,
                                 Zone* zone) {
   if (lhs.size() != rhs.size()) return Type::Any();
   Payload p;
-  p.array = zone->NewArray<Type>(lhs.size());
+  p.array = zone->AllocateArray<Type>(lhs.size());
   for (int i = 0; i < lhs.size(); ++i) {
     p.array[i] = Type::LeastUpperBound(lhs.element(i), rhs.element(i), zone);
   }

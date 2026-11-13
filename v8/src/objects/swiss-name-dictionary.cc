@@ -12,21 +12,25 @@ namespace v8 {
 namespace internal {
 
 // static
-Handle<SwissNameDictionary> SwissNameDictionary::DeleteEntry(
-    Isolate* isolate, Handle<SwissNameDictionary> table, InternalIndex entry) {
+template <template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<SwissNameDictionary>,
+                                 DirectHandle<SwissNameDictionary>>)
+HandleType<SwissNameDictionary> SwissNameDictionary::DeleteEntry(
+    Isolate* isolate, HandleType<SwissNameDictionary> table,
+    InternalIndex entry) {
   // GetCtrl() does the bounds check.
-  DCHECK(IsFull(table->GetCtrl(entry.as_int())));
+  DCHECK(IsFull(table->GetCtrl(entry.as_uint32())));
 
-  int i = entry.as_int();
+  uint32_t i = entry.as_uint32();
 
   table->SetCtrl(i, Ctrl::kDeleted);
   table->ClearDataTableEntry(isolate, i);
   // We leave the PropertyDetails unchanged because they are not relevant for
   // GC.
 
-  int nof = table->NumberOfElements();
+  uint32_t nof = table->NumberOfElements();
   table->SetNumberOfElements(nof - 1);
-  int nod = table->NumberOfDeletedElements();
+  uint32_t nod = table->NumberOfDeletedElements();
   table->SetNumberOfDeletedElements(nod + 1);
 
   // TODO(v8:11388) Abseil's flat_hash_map doesn't shrink on deletion, but may
@@ -38,32 +42,38 @@ Handle<SwissNameDictionary> SwissNameDictionary::DeleteEntry(
 }
 
 // static
-template <typename IsolateT>
-Handle<SwissNameDictionary> SwissNameDictionary::Rehash(
-    IsolateT* isolate, Handle<SwissNameDictionary> table, int new_capacity) {
+template <typename IsolateT, template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<SwissNameDictionary>,
+                                 DirectHandle<SwissNameDictionary>>)
+HandleType<SwissNameDictionary> SwissNameDictionary::Rehash(
+    IsolateT* isolate, HandleType<SwissNameDictionary> table,
+    uint32_t new_capacity) {
   DCHECK(IsValidCapacity(new_capacity));
   DCHECK_LE(table->NumberOfElements(), MaxUsableCapacity(new_capacity));
   ReadOnlyRoots roots(isolate);
 
-  Handle<SwissNameDictionary> new_table =
+  HandleType<SwissNameDictionary> new_table =
       isolate->factory()->NewSwissNameDictionaryWithCapacity(
-          new_capacity, Heap::InYoungGeneration(*table) ? AllocationType::kYoung
-                                                        : AllocationType::kOld);
+          new_capacity, HeapLayout::InYoungGeneration(*table)
+                            ? AllocationType::kYoung
+                            : AllocationType::kOld);
 
   DisallowHeapAllocation no_gc;
 
-  int new_enum_index = 0;
+  uint32_t new_enum_index = 0;
   new_table->SetNumberOfElements(table->NumberOfElements());
-  for (int enum_index = 0; enum_index < table->UsedCapacity(); ++enum_index) {
-    int entry = table->EntryForEnumerationIndex(enum_index);
+  for (uint32_t enum_index = 0; enum_index < table->UsedCapacity();
+       ++enum_index) {
+    uint32_t entry = table->EntryForEnumerationIndex(enum_index);
 
-    Object key;
+    Tagged<Object> key;
 
     if (table->ToKey(roots, entry, &key)) {
-      Object value = table->ValueAtRaw(entry);
+      Tagged<Object> value = table->ValueAtRaw(entry);
       PropertyDetails details = table->DetailsAt(entry);
 
-      int new_entry = new_table->AddInternal(Name::cast(key), value, details);
+      uint32_t new_entry =
+          new_table->AddInternal(Cast<Name>(key), value, details);
 
       // TODO(v8::11388) Investigate ways of hoisting the branching needed to
       // select the correct meta table entry size (based on the capacity of the
@@ -77,29 +87,29 @@ Handle<SwissNameDictionary> SwissNameDictionary::Rehash(
   return new_table;
 }
 
-bool SwissNameDictionary::EqualsForTesting(SwissNameDictionary other) {
-  if (Capacity() != other.Capacity() ||
-      NumberOfElements() != other.NumberOfElements() ||
-      NumberOfDeletedElements() != other.NumberOfDeletedElements() ||
-      Hash() != other.Hash()) {
+bool SwissNameDictionary::EqualsForTesting(Tagged<SwissNameDictionary> other) {
+  if (Capacity() != other->Capacity() ||
+      NumberOfElements() != other->NumberOfElements() ||
+      NumberOfDeletedElements() != other->NumberOfDeletedElements() ||
+      Hash() != other->Hash()) {
     return false;
   }
 
-  for (int i = 0; i < Capacity() + kGroupWidth; i++) {
-    if (CtrlTable()[i] != other.CtrlTable()[i]) {
+  for (uint32_t i = 0; i < Capacity() + kGroupWidth; i++) {
+    if (CtrlTable()[i] != other->CtrlTable()[i]) {
       return false;
     }
   }
-  for (int i = 0; i < Capacity(); i++) {
-    if (KeyAt(i) != other.KeyAt(i) || ValueAtRaw(i) != other.ValueAtRaw(i)) {
+  for (uint32_t i = 0; i < Capacity(); i++) {
+    if (KeyAt(i) != other->KeyAt(i) || ValueAtRaw(i) != other->ValueAtRaw(i)) {
       return false;
     }
     if (IsFull(GetCtrl(i))) {
-      if (DetailsAt(i) != other.DetailsAt(i)) return false;
+      if (DetailsAt(i) != other->DetailsAt(i)) return false;
     }
   }
-  for (int i = 0; i < UsedCapacity(); i++) {
-    if (EntryForEnumerationIndex(i) != other.EntryForEnumerationIndex(i)) {
+  for (uint32_t i = 0; i < UsedCapacity(); i++) {
+    if (EntryForEnumerationIndex(i) != other->EntryForEnumerationIndex(i)) {
       return false;
     }
   }
@@ -107,31 +117,32 @@ bool SwissNameDictionary::EqualsForTesting(SwissNameDictionary other) {
 }
 
 // static
-Handle<SwissNameDictionary> SwissNameDictionary::ShallowCopy(
-    Isolate* isolate, Handle<SwissNameDictionary> table) {
+DirectHandle<SwissNameDictionary> SwissNameDictionary::ShallowCopy(
+    Isolate* isolate, DirectHandle<SwissNameDictionary> table) {
   // TODO(v8:11388) Consider doing some cleanup during copying: For example, we
   // could turn kDeleted into kEmpty in certain situations. But this would
   // require tidying up the enumeration table in a similar fashion as would be
-  // required when trying to re-use deleted entries.
+  // required when trying to reuse deleted entries.
 
   if (table->Capacity() == 0) {
     return table;
   }
 
-  int capacity = table->Capacity();
-  int used_capacity = table->UsedCapacity();
+  uint32_t capacity = table->Capacity();
+  uint32_t used_capacity = table->UsedCapacity();
 
-  Handle<SwissNameDictionary> new_table =
+  DirectHandle<SwissNameDictionary> new_table =
       isolate->factory()->NewSwissNameDictionaryWithCapacity(
-          capacity, Heap::InYoungGeneration(*table) ? AllocationType::kYoung
-                                                    : AllocationType::kOld);
+          capacity, HeapLayout::InYoungGeneration(*table)
+                        ? AllocationType::kYoung
+                        : AllocationType::kOld);
 
   new_table->SetHash(table->Hash());
 
   DisallowGarbageCollection no_gc;
-  WriteBarrierMode mode = new_table->GetWriteBarrierMode(no_gc);
+  WriteBarrierModeScope mode = new_table->GetWriteBarrierMode(no_gc);
 
-  if (mode == WriteBarrierMode::SKIP_WRITE_BARRIER) {
+  if (*mode == WriteBarrierMode::SKIP_WRITE_BARRIER_SCOPE) {
     // Copy data table and ctrl table, which are stored next to each other.
     void* original_start =
         reinterpret_cast<void*>(table->field_address(DataTableStartOffset()));
@@ -141,12 +152,12 @@ Handle<SwissNameDictionary> SwissNameDictionary::ShallowCopy(
     DCHECK(DataTableEndOffset(capacity) == CtrlTableStartOffset(capacity));
     MemCopy(new_table_start, original_start, bytes_to_copy);
   } else {
-    DCHECK_EQ(UPDATE_WRITE_BARRIER, mode);
+    DCHECK_EQ(UPDATE_WRITE_BARRIER, *mode);
 
     // We may have to trigger write barriers when copying the data table.
-    for (int i = 0; i < capacity; ++i) {
-      Object key = table->KeyAt(i);
-      Object value = table->ValueAtRaw(i);
+    for (uint32_t i = 0; i < capacity; ++i) {
+      Tagged<Object> key = table->KeyAt(i);
+      Tagged<Object> value = table->ValueAtRaw(i);
 
       // Cannot use SetKey/ValueAtPut because they don't accept the hole as data
       // to store.
@@ -160,7 +171,7 @@ Handle<SwissNameDictionary> SwissNameDictionary::ShallowCopy(
   }
 
   // PropertyDetails table may contain uninitialized data for unused slots.
-  for (int i = 0; i < capacity; ++i) {
+  for (uint32_t i = 0; i < capacity; ++i) {
     if (IsFull(table->GetCtrl(i))) {
       new_table->DetailsAtPut(i, table->DetailsAt(i));
     }
@@ -168,28 +179,32 @@ Handle<SwissNameDictionary> SwissNameDictionary::ShallowCopy(
 
   // Meta table is only initialized for the first 2 + UsedCapacity() entries,
   // where size of each entry depends on table capacity.
-  int size_per_meta_table_entry = MetaTableSizePerEntryFor(capacity);
-  int meta_table_used_bytes = (2 + used_capacity) * size_per_meta_table_entry;
-  new_table->meta_table().copy_in(0, table->meta_table().GetDataStartAddress(),
-                                  meta_table_used_bytes);
+  uint32_t size_per_meta_table_entry = MetaTableSizePerEntryFor(capacity);
+  uint32_t meta_table_used_bytes =
+      (2 + used_capacity) * size_per_meta_table_entry;
+  MemCopy(new_table->meta_table()->begin(), table->meta_table()->begin(),
+          meta_table_used_bytes);
 
   return new_table;
 }
 
 // static
-Handle<SwissNameDictionary> SwissNameDictionary::Shrink(
-    Isolate* isolate, Handle<SwissNameDictionary> table) {
+template <template <typename> typename HandleType>
+  requires(std::is_convertible_v<HandleType<SwissNameDictionary>,
+                                 DirectHandle<SwissNameDictionary>>)
+HandleType<SwissNameDictionary> SwissNameDictionary::Shrink(
+    Isolate* isolate, HandleType<SwissNameDictionary> table) {
   // TODO(v8:11388) We're using the same logic to decide whether or not to
   // shrink as OrderedNameDictionary and NameDictionary here. We should compare
   // this with the logic used by Abseil's flat_hash_map, which has a heuristic
   // for triggering an (in-place) rehash on addition, but never shrinks the
-  // table. Abseil's heuristic doesn't take the numbere of deleted elements into
+  // table. Abseil's heuristic doesn't take the number of deleted elements into
   // account, because it doesn't track that.
 
-  int nof = table->NumberOfElements();
-  int capacity = table->Capacity();
+  uint32_t nof = table->NumberOfElements();
+  uint32_t capacity = table->Capacity();
   if (nof >= (capacity >> 2)) return table;
-  int new_capacity = std::max(capacity / 2, kInitialCapacity);
+  uint32_t new_capacity = std::max(capacity / 2, kInitialCapacity);
   return Rehash(isolate, table, new_capacity);
 }
 
@@ -212,33 +227,33 @@ void SwissNameDictionary::Rehash(IsolateT* isolate) {
   DisallowHeapAllocation no_gc;
 
   struct Entry {
-    Name key;
-    Object value;
+    Tagged<Name> key;
+    Tagged<Object> value;
     PropertyDetails details;
   };
 
   if (Capacity() == 0) return;
 
-  Entry dummy{Name(), Object(), PropertyDetails::Empty()};
+  Entry dummy{Tagged<Name>(), Tagged<Object>(), PropertyDetails::Empty()};
   std::vector<Entry> data(NumberOfElements(), dummy);
 
   ReadOnlyRoots roots(isolate);
-  int data_index = 0;
-  for (int enum_index = 0; enum_index < UsedCapacity(); ++enum_index) {
-    int entry = EntryForEnumerationIndex(enum_index);
-    Object key;
+  uint32_t data_index = 0;
+  for (uint32_t enum_index = 0; enum_index < UsedCapacity(); ++enum_index) {
+    uint32_t entry = EntryForEnumerationIndex(enum_index);
+    Tagged<Object> key;
     if (!ToKey(roots, entry, &key)) continue;
 
     data[data_index++] =
-        Entry{Name::cast(key), ValueAtRaw(entry), DetailsAt(entry)};
+        Entry{Cast<Name>(key), ValueAtRaw(entry), DetailsAt(entry)};
   }
 
   Initialize(isolate, meta_table(), Capacity());
 
-  int new_enum_index = 0;
-  SetNumberOfElements(static_cast<int>(data.size()));
+  uint32_t new_enum_index = 0;
+  SetNumberOfElements(static_cast<uint32_t>(data.size()));
   for (Entry& e : data) {
-    int new_entry = AddInternal(e.key, e.value, e.details);
+    uint32_t new_entry = AddInternal(e.key, e.value, e.details);
 
     // TODO(v8::11388) Investigate ways of hoisting the branching needed to
     // select the correct meta table entry size (based on the capacity of the
@@ -252,12 +267,12 @@ void SwissNameDictionary::Rehash(IsolateT* isolate) {
 // HashTable<..>::NumberOfEnumerableProperties. Consolidate both versions
 // elsewhere (e.g., hash-table-utils)?
 int SwissNameDictionary::NumberOfEnumerableProperties() {
-  ReadOnlyRoots roots = this->GetReadOnlyRoots();
+  ReadOnlyRoots roots = GetReadOnlyRoots();
   int result = 0;
   for (InternalIndex i : this->IterateEntries()) {
-    Object k;
+    Tagged<Object> k;
     if (!this->ToKey(roots, i, &k)) continue;
-    if (k.FilterKey(ENUMERABLE_STRINGS)) continue;
+    if (Object::FilterKey(k, ENUMERABLE_STRINGS)) continue;
     PropertyDetails details = this->DetailsAt(i);
     PropertyAttributes attr = details.attributes();
     if ((int{attr} & ONLY_ENUMERABLE) == 0) result++;
@@ -268,12 +283,13 @@ int SwissNameDictionary::NumberOfEnumerableProperties() {
 // TODO(emrich, v8:11388): This is almost an identical copy of
 // Dictionary<..>::SlowReverseLookup. Consolidate both versions elsewhere (e.g.,
 // hash-table-utils)?
-Object SwissNameDictionary::SlowReverseLookup(Isolate* isolate, Object value) {
+Tagged<Object> SwissNameDictionary::SlowReverseLookup(Isolate* isolate,
+                                                      Tagged<Object> value) {
   ReadOnlyRoots roots(isolate);
   for (InternalIndex i : IterateEntries()) {
-    Object k;
+    Tagged<Object> k;
     if (!ToKey(roots, i, &k)) continue;
-    Object e = this->ValueAt(i);
+    Tagged<Object> e = this->ValueAt(i);
     if (e == value) return k;
   }
   return roots.undefined_value();
@@ -296,24 +312,49 @@ static_assert(SwissNameDictionary::MaxUsableCapacity(
               std::numeric_limits<uint16_t>::max());
 
 template V8_EXPORT_PRIVATE void SwissNameDictionary::Initialize(
-    Isolate* isolate, ByteArray meta_table, int capacity);
+    Isolate* isolate, Tagged<ByteArray> meta_table, uint32_t capacity);
 template V8_EXPORT_PRIVATE void SwissNameDictionary::Initialize(
-    LocalIsolate* isolate, ByteArray meta_table, int capacity);
+    LocalIsolate* isolate, Tagged<ByteArray> meta_table, uint32_t capacity);
 
-template V8_EXPORT_PRIVATE Handle<SwissNameDictionary>
+template V8_EXPORT_PRIVATE DirectHandle<SwissNameDictionary>
+SwissNameDictionary::DeleteEntry(Isolate* isolate,
+                                 DirectHandle<SwissNameDictionary> table,
+                                 InternalIndex entry);
+template V8_EXPORT_PRIVATE IndirectHandle<SwissNameDictionary>
+SwissNameDictionary::DeleteEntry(Isolate* isolate,
+                                 IndirectHandle<SwissNameDictionary> table,
+                                 InternalIndex entry);
+
+template V8_EXPORT_PRIVATE DirectHandle<SwissNameDictionary>
 SwissNameDictionary::Rehash(LocalIsolate* isolate,
-                            Handle<SwissNameDictionary> table,
-                            int new_capacity);
-template V8_EXPORT_PRIVATE Handle<SwissNameDictionary>
-SwissNameDictionary::Rehash(Isolate* isolate, Handle<SwissNameDictionary> table,
-                            int new_capacity);
+                            DirectHandle<SwissNameDictionary> table,
+                            uint32_t new_capacity);
+template V8_EXPORT_PRIVATE DirectHandle<SwissNameDictionary>
+SwissNameDictionary::Rehash(Isolate* isolate,
+                            DirectHandle<SwissNameDictionary> table,
+                            uint32_t new_capacity);
+template V8_EXPORT_PRIVATE IndirectHandle<SwissNameDictionary>
+SwissNameDictionary::Rehash(LocalIsolate* isolate,
+                            IndirectHandle<SwissNameDictionary> table,
+                            uint32_t new_capacity);
+template V8_EXPORT_PRIVATE IndirectHandle<SwissNameDictionary>
+SwissNameDictionary::Rehash(Isolate* isolate,
+                            IndirectHandle<SwissNameDictionary> table,
+                            uint32_t new_capacity);
 
 template V8_EXPORT_PRIVATE void SwissNameDictionary::Rehash(
     LocalIsolate* isolate);
 template V8_EXPORT_PRIVATE void SwissNameDictionary::Rehash(Isolate* isolate);
 
-constexpr int SwissNameDictionary::kInitialCapacity;
-constexpr int SwissNameDictionary::kGroupWidth;
+template V8_EXPORT_PRIVATE DirectHandle<SwissNameDictionary>
+SwissNameDictionary::Shrink(Isolate* isolate,
+                            DirectHandle<SwissNameDictionary> table);
+template V8_EXPORT_PRIVATE IndirectHandle<SwissNameDictionary>
+SwissNameDictionary::Shrink(Isolate* isolate,
+                            IndirectHandle<SwissNameDictionary> table);
+
+constexpr uint32_t SwissNameDictionary::kInitialCapacity;
+constexpr uint32_t SwissNameDictionary::kGroupWidth;
 
 }  // namespace internal
 }  // namespace v8

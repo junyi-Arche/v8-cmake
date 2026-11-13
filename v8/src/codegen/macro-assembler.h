@@ -12,22 +12,6 @@
 // Helper types to make boolean flag easier to read at call-site.
 enum class InvokeType { kCall, kJump };
 
-// Flags used for the AllocateInNewSpace functions.
-enum AllocationFlags {
-  // No special flags.
-  NO_ALLOCATION_FLAGS = 0,
-  // The content of the result register already contains the allocation top in
-  // new space.
-  RESULT_CONTAINS_TOP = 1 << 0,
-  // Specify that the requested size of the space to allocate is specified in
-  // words instead of bytes.
-  SIZE_IN_WORDS = 1 << 1,
-  // Align the allocation to a multiple of kDoubleSize
-  DOUBLE_ALIGNMENT = 1 << 2,
-  // Directly allocate in old space
-  PRETENURE = 1 << 3,
-};
-
 enum class JumpMode {
   kJump,          // Does a direct jump to the given address
   kPushAndReturn  // Pushes the given address as the current return address and
@@ -35,6 +19,26 @@ enum class JumpMode {
 };
 
 enum class SmiCheck { kOmit, kInline };
+enum class ReadOnlyCheck { kOmit, kInline };
+
+enum class ComparisonMode {
+  // The default compare mode will use a 32-bit comparison when pointer
+  // compression is enabled and the root is a tagged value.
+  kDefault,
+  // This mode can be used when the value to compare may not be located inside
+  // the main pointer compression cage.
+  kFullPointer,
+  // The caller only tests the result for equality, so the comparison may
+  // leave every flag other than Z undefined.
+  kEqualityOnly,
+};
+
+enum class SetIsolateDataSlots {
+  kNo,
+  kYes,
+};
+
+enum class ArgumentAdaptionMode { kAdapt, kDontAdapt };
 
 // This is the only place allowed to include the platform-specific headers.
 #define INCLUDED_FROM_MACRO_ASSEMBLER_H
@@ -48,7 +52,7 @@ enum class SmiCheck { kOmit, kInline };
 #elif V8_TARGET_ARCH_ARM
 #include "src/codegen/arm/constants-arm.h"
 #include "src/codegen/arm/macro-assembler-arm.h"
-#elif V8_TARGET_ARCH_PPC || V8_TARGET_ARCH_PPC64
+#elif V8_TARGET_ARCH_PPC64
 #include "src/codegen/ppc/constants-ppc.h"
 #include "src/codegen/ppc/macro-assembler-ppc.h"
 #elif V8_TARGET_ARCH_MIPS64
@@ -57,7 +61,7 @@ enum class SmiCheck { kOmit, kInline };
 #elif V8_TARGET_ARCH_LOONG64
 #include "src/codegen/loong64/constants-loong64.h"
 #include "src/codegen/loong64/macro-assembler-loong64.h"
-#elif V8_TARGET_ARCH_S390
+#elif V8_TARGET_ARCH_S390X
 #include "src/codegen/s390/constants-s390.h"
 #include "src/codegen/s390/macro-assembler-s390.h"
 #elif V8_TARGET_ARCH_RISCV32 || V8_TARGET_ARCH_RISCV64
@@ -82,10 +86,11 @@ static constexpr int kMaxCParameters = 256;
 
 class V8_NODISCARD FrameScope {
  public:
-  explicit FrameScope(MacroAssembler* masm, StackFrame::Type type)
+  explicit FrameScope(MacroAssembler* masm, StackFrame::Type type,
+                      SourceLocation loc = SourceLocation())
       :
 #ifdef V8_CODE_COMMENTS
-        comment_(masm, frame_name(type)),
+        comment_(masm, frame_name(type), loc),
 #endif
         masm_(masm),
         type_(type),
@@ -164,7 +169,7 @@ class V8_NODISCARD FrameAndConstantPoolScope {
   DISALLOW_IMPLICIT_CONSTRUCTORS(FrameAndConstantPoolScope);
 };
 
-// Class for scoping the the unavailability of constant pool access.
+// Class for scoping the unavailability of constant pool access.
 class V8_NODISCARD ConstantPoolUnavailableScope {
  public:
   explicit ConstantPoolUnavailableScope(Assembler* assembler)

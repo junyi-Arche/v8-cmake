@@ -18,6 +18,7 @@
 namespace v8 {
 
 class Context;
+class Location;
 class UnboundScript;
 
 /**
@@ -30,8 +31,8 @@ class V8_EXPORT Function : public Object {
    * for a given FunctionCallback.
    */
   static MaybeLocal<Function> New(
-      Local<Context> context, FunctionCallback callback,
-      Local<Value> data = Local<Value>(), int length = 0,
+      Local<Context> context, FunctionCallback callback, Local<Data> data = {},
+      int length = 0,
       ConstructorBehavior behavior = ConstructorBehavior::kAllow,
       SideEffectType side_effect_type = SideEffectType::kHasSideEffect);
 
@@ -47,20 +48,25 @@ class V8_EXPORT Function : public Object {
    * When side effect checks are enabled, passing kHasNoSideEffect allows the
    * constructor to be invoked without throwing. Calls made within the
    * constructor are still checked.
+   *
+   * Passing kHasNoSideEffect also allows an API constructor to be instantiated
+   * inside a DisallowJavascriptExecutionScope, provided the constructor
+   * callback itself does not execute JavaScript.
    */
   V8_WARN_UNUSED_RESULT MaybeLocal<Object> NewInstanceWithSideEffectType(
       Local<Context> context, int argc, Local<Value> argv[],
       SideEffectType side_effect_type = SideEffectType::kHasSideEffect) const;
 
+  V8_WARN_UNUSED_RESULT MaybeLocal<Value> Call(v8::Isolate* isolate,
+                                               Local<Context> context,
+                                               Local<Value> recv, int argc,
+                                               Local<Value> argv[]);
   V8_WARN_UNUSED_RESULT MaybeLocal<Value> Call(Local<Context> context,
                                                Local<Value> recv, int argc,
                                                Local<Value> argv[]);
 
   void SetName(Local<String> name);
   Local<Value> GetName() const;
-
-  V8_DEPRECATED("No direct replacement")
-  MaybeLocal<UnboundScript> GetUnboundScript() const;
 
   /**
    * Name inferred from variable or property assignment of this function.
@@ -86,6 +92,18 @@ class V8_EXPORT Function : public Object {
    * kLineOffsetNotFound if no information available.
    */
   int GetScriptColumnNumber() const;
+
+  /**
+   * Returns zero based line and column number of function body, else returns
+   * {-1, -1}.
+   */
+  Location GetScriptLocation() const;
+
+  /**
+   * Returns zero based start position (character offset) of function body and
+   * kLineOffsetNotFound if no information available.
+   */
+  int GetScriptStartPosition() const;
 
   /**
    * Returns scriptId.

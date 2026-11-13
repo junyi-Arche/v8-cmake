@@ -15,7 +15,7 @@ namespace v8::internal::compiler {
 
 // Forward declarations.
 class CommonOperatorBuilder;
-class Graph;
+class TFGraph;
 class JSGraph;
 class MachineOperatorBuilder;
 struct ObjectAccess;
@@ -124,7 +124,7 @@ class V8_EXPORT_PRIVATE WasmLoadElimination final
   Reduction ReduceWasmArrayInitializeLength(Node* node);
   Reduction ReduceStringPrepareForGetCodeunit(Node* node);
   Reduction ReduceStringAsWtf16(Node* node);
-  Reduction ReduceExternInternalize(Node* node);
+  Reduction ReduceAnyConvertExtern(Node* node);
   Reduction ReduceEffectPhi(Node* node);
   Reduction ReduceStart(Node* node);
   Reduction ReduceOtherNode(Node* node);
@@ -138,7 +138,9 @@ class V8_EXPORT_PRIVATE WasmLoadElimination final
   AbstractState const* ComputeLoopState(Node* node,
                                         AbstractState const* state) const;
   // Returns the replacement value and effect for a load given an initial value
-  // node, after optional {TypeGuard}ing and i8/i16 adaptation to i32.
+  // node, after optional {TypeGuard}ing and i8/i16 adaptation to i32. Returns
+  // {dead(), dead()} if the types prove the load is unreachable, or
+  // {nullptr, nullptr} if replacement must be skipped.
   std::tuple<Node*, Node*> TruncateAndExtendOrType(Node* value, Node* effect,
                                                    Node* control,
                                                    wasm::ValueType field_type,
@@ -148,7 +150,7 @@ class V8_EXPORT_PRIVATE WasmLoadElimination final
   CommonOperatorBuilder* common() const;
   MachineOperatorBuilder* machine() const;
   Isolate* isolate() const;
-  Graph* graph() const;
+  TFGraph* graph() const;
   JSGraph* jsgraph() const { return jsgraph_; }
   Node* dead() const { return dead_; }
   Zone* zone() const { return zone_; }

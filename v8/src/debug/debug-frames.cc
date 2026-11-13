@@ -7,6 +7,8 @@
 #include "src/builtins/accessors.h"
 #include "src/deoptimizer/deoptimizer.h"
 #include "src/execution/frames-inl.h"
+#include "src/objects/debug-objects-inl.h"
+#include "src/sandbox/check.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/debug/debug-wasm-objects.h"
@@ -26,27 +28,40 @@ FrameInspector::FrameInspector(CommonFrame* frame, int inlined_frame_index,
 
   is_constructor_ = summary.is_constructor();
   source_position_ = summary.SourcePosition();
-  script_ = Handle<Script>::cast(summary.script());
+  script_ = Cast<Script>(summary.script());
   receiver_ = summary.receiver();
 
   if (summary.IsJavaScript()) {
     function_ = summary.AsJavaScript().function();
   }
+#if V8_ENABLE_WEBASSEMBLY
+  if (summary.IsWasmInlined()) {
+    is_wasm_inlined_ = true;
+  }
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 #if V8_ENABLE_WEBASSEMBLY
   JavaScriptFrame* js_frame =
-      frame->is_java_script() ? javascript_frame() : nullptr;
+      frame->is_javascript() ? javascript_frame() : nullptr;
   DCHECK(js_frame || frame->is_wasm());
 #else
   JavaScriptFrame* js_frame = javascript_frame();
 #endif  // V8_ENABLE_WEBASSEMBLY
-  is_optimized_ = frame_->is_optimized();
+  is_optimized_ =
+      js_frame && js_frame->is_optimized() && summary.IsJavaScript();
 
   // Calculate the deoptimized frame.
   if (is_optimized_) {
     DCHECK_NOT_NULL(js_frame);
+    int jsframe_index = 0;
+    FrameSummaries summaries = js_frame->Summarize();
+    for (int i = 0; i < inlined_frame_index; ++i) {
+      if (summaries.frames[i].IsJavaScript()) {
+        jsframe_index++;
+      }
+    }
     deoptimized_frame_.reset(Deoptimizer::DebuggerInspectableFrame(
-        js_frame, inlined_frame_index, isolate));
+        js_frame, jsframe_index, isolate));
   }
 }
 
@@ -74,52 +89,94 @@ Handle<Object> FrameInspector::GetContext() {
                             : handle(frame_->context(), isolate_);
 }
 
-Handle<String> FrameInspector::GetFunctionName() {
+DirectHandle<String> FrameInspector::GetFunctionName() {
 #if V8_ENABLE_WEBASSEMBLY
   if (IsWasm()) {
+#if V8_ENABLE_DRUMBRAKE
+    if (IsWasmInterpreter()) {
+      auto wasm_frame = WasmInterpreterEntryFrame::cast(frame_);
+      auto instance_data =
+          handle(wasm_frame->trusted_instance_data(), isolate_);
+      return GetWasmFunctionDebugName(
+          isolate_, instance_data,
+          wasm_frame->function_index(inlined_frame_index_));
+    }
+#endif  // V8_ENABLE_DRUMBRAKE
+    if (is_wasm_inlined_) {
+      FrameSummary summary = FrameSummary::Get(frame_, inlined_frame_index_);
+      auto wasm_inlined = summary.AsWasmInlined();
+      return GetWasmFunctionDebugName(isolate_,
+                                      wasm_inlined.wasm_trusted_instance_data(),
+                                      wasm_inlined.function_index());
+    }
     auto wasm_frame = WasmFrame::cast(frame_);
-    auto wasm_instance = handle(wasm_frame->wasm_instance(), isolate_);
-    return GetWasmFunctionDebugName(isolate_, wasm_instance,
-                                    wasm_frame->function_index());
+    auto instance_data = handle(wasm_frame->trusted_instance_data(), isolate_);
+    int top_func_index = FrameSummary::Get(wasm_frame, inlined_frame_index_)
+                             .AsWasm()
+                             .function_index();
+    return GetWasmFunctionDebugName(isolate_, instance_data, top_func_index);
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
-  return JSFunction::GetDebugName(function_);
+  return JSFunction::GetDebugName(isolate_, function_);
 }
 
 #if V8_ENABLE_WEBASSEMBLY
-bool FrameInspector::IsWasm() { return frame_->is_wasm(); }
+bool FrameInspector::IsWasm() const {
+  return frame_->is_wasm() || is_wasm_inlined_;
+}
+#if V8_ENABLE_DRUMBRAKE
+bool FrameInspector::IsWasmInterpreter() const {
+  return frame_->is_wasm_interpreter_entry();
+}
+#endif  // V8_ENABLE_DRUMBRAKE
 #endif  // V8_ENABLE_WEBASSEMBLY
 
-bool FrameInspector::IsJavaScript() { return frame_->is_java_script(); }
-
-bool FrameInspector::ParameterIsShadowedByContextLocal(
-    Handle<ScopeInfo> info, Handle<String> parameter_name) {
-  return info->ContextSlotIndex(parameter_name) != -1;
+bool FrameInspector::IsJavaScript() const {
+#if V8_ENABLE_WEBASSEMBLY
+  return frame_->is_javascript() && !is_wasm_inlined_;
+#else
+  return frame_->is_javascript();
+#endif  // V8_ENABLE_WEBASSEMBLY
 }
 
-RedirectActiveFunctions::RedirectActiveFunctions(SharedFunctionInfo shared,
-                                                 Mode mode)
+bool FrameInspector::ParameterIsShadowedByContextLocal(
+    DirectHandle<ScopeInfo> info, DirectHandle<String> parameter_name) {
+  return info->ContextSlotIndex(*parameter_name) != -1;
+}
+
+RedirectActiveFunctions::RedirectActiveFunctions(
+    Isolate* isolate, Tagged<SharedFunctionInfo> shared, Mode mode)
     : shared_(shared), mode_(mode) {
-  DCHECK(shared.HasBytecodeArray());
-  if (mode == Mode::kUseDebugBytecode) {
-    DCHECK(shared.HasDebugInfo());
-  }
+  DCHECK(shared->HasBytecodeArray());
+  DCHECK(shared->HasDebugInfo(isolate));
 }
 
 void RedirectActiveFunctions::VisitThread(Isolate* isolate,
                                           ThreadLocalTop* top) {
+  Tagged<DebugInfo> debug_info = shared_->GetDebugInfo(isolate);
+  Tagged<BytecodeArray> original_bytecode =
+      debug_info->OriginalBytecodeArray(isolate);
+  Tagged<BytecodeArray> debug_bytecode =
+      debug_info->DebugBytecodeArray(isolate);
+
   for (JavaScriptStackFrameIterator it(isolate, top); !it.done();
        it.Advance()) {
     JavaScriptFrame* frame = it.frame();
-    JSFunction function = frame->function();
+    // Skip live-edited frames, they'll be restarted from scratch anyway.
+    if (isolate->debug()->ShouldRestartFrame(frame->id())) continue;
+    Tagged<JSFunction> function = frame->function();
     if (!frame->is_interpreted()) continue;
-    if (function.shared() != shared_) continue;
+    if (function->shared() != shared_) continue;
     InterpretedFrame* interpreted_frame =
         reinterpret_cast<InterpretedFrame*>(frame);
-    BytecodeArray bytecode = mode_ == Mode::kUseDebugBytecode
-                                 ? shared_.GetDebugInfo().DebugBytecodeArray()
-                                 : shared_.GetBytecodeArray(isolate);
-    interpreted_frame->PatchBytecodeArray(bytecode);
+
+    if (mode_ == Mode::kUseDebugBytecode) {
+      SBXCHECK_EQ(interpreted_frame->GetBytecodeArray(), original_bytecode);
+      interpreted_frame->PatchBytecodeArray(debug_bytecode);
+    } else {
+      SBXCHECK_EQ(interpreted_frame->GetBytecodeArray(), debug_bytecode);
+      interpreted_frame->PatchBytecodeArray(original_bytecode);
+    }
   }
 }
 

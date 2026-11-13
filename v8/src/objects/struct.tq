@@ -3,20 +3,18 @@
 // found in the LICENSE file.
 
 @abstract
-extern class Struct extends HeapObject {
-}
+@cppObjectLayoutDefinition
+extern class Struct extends HeapObject {}
 
-extern class Tuple2 extends Struct {
-  value1: Object;
-  value2: Object;
-}
+extern class Tuple2 extends Struct;
 
-extern class ClassPositions extends Struct {
-  start: Smi;
-  end: Smi;
-}
+extern class ClassPositions extends Struct;
 
-extern class AccessorPair extends Struct {
-  getter: Object;
-  setter: Object;
+extern class AccessorPair extends Struct;
+
+extern class ForInEnumeratorHolder extends Struct {
+  enum_cache_map: Map;
+  named_keys: FixedArray;
+  elements_length: Smi;
+  cache_length: Smi;
 }

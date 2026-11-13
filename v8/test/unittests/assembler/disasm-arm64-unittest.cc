@@ -52,22 +52,22 @@ using DisasmArm64Test = TestWithIsolate;
   uint8_t* buf = static_cast<uint8_t*>(malloc(INSTR_SIZE));                   \
   uint32_t encoding = 0;                                                      \
   MacroAssembler* assm =                                                      \
-      new MacroAssembler((isolate()), v8::internal::CodeObjectRequired::kYes, \
+      new MacroAssembler((isolate()), v8::internal::CodeObjectRequired{true}, \
                          ExternalAssemblerBuffer(buf, INSTR_SIZE));           \
   Decoder<DispatchingDecoderVisitor>* decoder =                               \
       new Decoder<DispatchingDecoderVisitor>();                               \
   DisassemblingDecoder* disasm = new DisassemblingDecoder();                  \
   decoder->AppendVisitor(disasm)
 
-#define SET_UP_ASM()                                                         \
-  HandleScope scope(isolate());                                              \
-  uint8_t* buf = static_cast<uint8_t*>(malloc(INSTR_SIZE));                  \
-  uint32_t encoding = 0;                                                     \
-  Assembler* assm = new Assembler(AssemblerOptions{},                        \
-                                  ExternalAssemblerBuffer(buf, INSTR_SIZE)); \
-  Decoder<DispatchingDecoderVisitor>* decoder =                              \
-      new Decoder<DispatchingDecoderVisitor>();                              \
-  DisassemblingDecoder* disasm = new DisassemblingDecoder();                 \
+#define SET_UP_ASM()                                                          \
+  HandleScope scope(isolate());                                               \
+  uint8_t* buf = static_cast<uint8_t*>(malloc(INSTR_SIZE));                   \
+  uint32_t encoding = 0;                                                      \
+  Assembler* assm = new Assembler(isolate()->allocator(), AssemblerOptions{}, \
+                                  ExternalAssemblerBuffer(buf, INSTR_SIZE));  \
+  Decoder<DispatchingDecoderVisitor>* decoder =                               \
+      new Decoder<DispatchingDecoderVisitor>();                               \
+  DisassemblingDecoder* disasm = new DisassemblingDecoder();                  \
   decoder->AppendVisitor(disasm)
 
 #define COMPARE(ASM, EXP)                                                \
@@ -131,6 +131,9 @@ TEST_F(DisasmArm64Test, bootstrap) {
   COMPARE(dci(0x93407c00), "sxtw x0, w0");
   COMPARE(dci(0x2a000020), "orr w0, w1, w0");
   COMPARE(dci(0xa8c67bfd), "ldp fp, lr, [sp], #96");
+  COMPARE(dci(0xf9800800), "prfm pldl1keep, [x0, #16]");
+  COMPARE(dci(0xf8b7c973), "prfm pstl2strm, [x11, w23, sxtw]");
+  COMPARE(dci(0xf98003e4), "prfm pldl3keep, [sp]");
 
   CLEANUP();
 }
@@ -789,6 +792,8 @@ TEST_F(DisasmArm64Test, branch) {
   COMPARE_PREFIX(b(INST_OFF(-0x8000000)), "b #-0x8000000");
   COMPARE_PREFIX(b(INST_OFF(0xffffc), eq), "b.eq #+0xffffc");
   COMPARE_PREFIX(b(INST_OFF(-0x100000), mi), "b.mi #-0x100000");
+  COMPARE_PREFIX(bc(INST_OFF(0xffffc), ge), "bc.ge #+0xffffc");
+  COMPARE_PREFIX(bc(INST_OFF(-0x100000), lt), "bc.lt #-0x100000");
   COMPARE_PREFIX(bl(INST_OFF(0x4)), "bl #+0x4");
   COMPARE_PREFIX(bl(INST_OFF(-0x4)), "bl #-0x4");
   COMPARE_PREFIX(bl(INST_OFF(0xffffc)), "bl #+0xffffc");
@@ -1514,6 +1519,30 @@ TEST_F(DisasmArm64Test, load_store_acquire_release) {
   COMPARE(caspal(x4, x5, x6, x7, MemOperand(sp)),
           "caspal x4, x5, x6, x7, [sp]");
 
+  {
+    CpuFeatureScope lrcpc2_scope(assm, LRCPC2,
+                                 CpuFeatureScope::kDontCheckSupported);
+    COMPARE(stlurb(w0, MemOperand(x1, 0)), "stlurb w0, [x1]");
+    COMPARE(stlurb(w2, MemOperand(x3, -1)), "stlurb w2, [x3, #-1]");
+    COMPARE(stlurb(wzr, MemOperand(sp, 255)), "stlurb wzr, [sp, #255]");
+    COMPARE(stlurh(w4, MemOperand(x5, -256)), "stlurh w4, [x5, #-256]");
+    COMPARE(stlurh(wzr, MemOperand(sp, 0)), "stlurh wzr, [sp]");
+    COMPARE(stlur(w6, MemOperand(x7, -1)), "stlur w6, [x7, #-1]");
+    COMPARE(stlur(x8, MemOperand(x9, 7)), "stlur x8, [x9, #7]");
+    COMPARE(stlur(xzr, MemOperand(sp, -8)), "stlur xzr, [sp, #-8]");
+
+    COMPARE(ldapurb(w10, MemOperand(x11, 0)), "ldapurb w10, [x11]");
+    COMPARE(ldapurb(w12, MemOperand(x13, -1)), "ldapurb w12, [x13, #-1]");
+    COMPARE(ldapursb(w14, MemOperand(x15, 127)), "ldapursb w14, [x15, #127]");
+    COMPARE(ldapursb(x16, MemOperand(x17, -128)), "ldapursb x16, [x17, #-128]");
+    COMPARE(ldapurh(w18, MemOperand(x19, 2)), "ldapurh w18, [x19, #2]");
+    COMPARE(ldapursh(w20, MemOperand(x21, -2)), "ldapursh w20, [x21, #-2]");
+    COMPARE(ldapursh(x22, MemOperand(x23, 6)), "ldapursh x22, [x23, #6]");
+    COMPARE(ldapur(w24, MemOperand(x25, -1)), "ldapur w24, [x25, #-1]");
+    COMPARE(ldapur(x26, MemOperand(x27, 15)), "ldapur x26, [cp, #15]");
+    COMPARE(ldapursw(x28, MemOperand(sp, -4)), "ldapursw x28, [sp, #-4]");
+  }
+
   CLEANUP();
 }
 
@@ -1701,18 +1730,27 @@ TEST_F(DisasmArm64Test, fmov_imm) {
 }
 
 TEST_F(DisasmArm64Test, fmov_reg) {
-  SET_UP_ASM();
-
-  COMPARE(fmov(w3, s13), "fmov w3, s13");
-  COMPARE(fmov(x6, d26), "fmov x6, d26");
-  COMPARE(fmov(s11, w30), "fmov s11, w30");
-  COMPARE(fmov(d31, x2), "fmov d31, x2");
-  COMPARE(fmov(s12, s13), "fmov s12, s13");
-  COMPARE(fmov(d22, d23), "fmov d22, d23");
-  COMPARE(fmov(v0.D(), 1, x13), "fmov v0.D[1], x13");
-  COMPARE(fmov(x13, v0.D(), 1), "fmov x13, v0.D[1]");
-
-  CLEANUP();
+  {
+    SET_UP_ASM();
+    COMPARE(fmov(w3, s13), "fmov w3, s13");
+    COMPARE(fmov(x6, d26), "fmov x6, d26");
+    COMPARE(fmov(s11, w30), "fmov s11, w30");
+    COMPARE(fmov(d31, x2), "fmov d31, x2");
+    COMPARE(fmov(s12, s13), "fmov s12, s13");
+    COMPARE(fmov(d22, d23), "fmov d22, d23");
+    COMPARE(fmov(v0.D(), 1, x13), "fmov v0.D[1], x13");
+    COMPARE(fmov(x13, v0.D(), 1), "fmov x13, v0.D[1]");
+    CLEANUP();
+  }
+  {
+    SET_UP_MASM();
+    COMPARE(Mov(v1.V2S(), v1.V2S()), "mov v1.8b, v1.8b");
+    COMPARE(Mov(v2.V4S(), v2.V4S()), "mov v2.16b, v2.16b");
+    COMPARE(Mov(v3.V2D(), v3.V2D()), "mov v3.16b, v3.16b");
+    COMPARE(Fmov(s4, s4), "fmov s4, s4");
+    COMPARE(Fmov(d5, d5), "fmov d5, d5");
+    CLEANUP();
+  }
 }
 
 TEST_F(DisasmArm64Test, fp_dp1) {
@@ -2014,14 +2052,14 @@ TEST_F(DisasmArm64Test, debug) {
     HandleScope scope(isolate());
     uint8_t* buf = static_cast<uint8_t*>(malloc(INSTR_SIZE));
     uint32_t encoding = 0;
-    AssemblerOptions options;
+    AssemblerOptions options{};
 #ifdef USE_SIMULATOR
     options.enable_simulator_code = (i == 1);
 #else
     CHECK(!options.enable_simulator_code);
 #endif
-    Assembler* assm =
-        new Assembler(options, ExternalAssemblerBuffer(buf, INSTR_SIZE));
+    Assembler* assm = new Assembler(i_isolate()->allocator(), options,
+                                    ExternalAssemblerBuffer(buf, INSTR_SIZE));
     Decoder<DispatchingDecoderVisitor>* decoder =
         new Decoder<DispatchingDecoderVisitor>();
     DisassemblingDecoder* disasm = new DisassemblingDecoder();
@@ -2062,6 +2100,16 @@ TEST_F(DisasmArm64Test, brk) {
   COMPARE(brk(0), "brk #0x0");
   COMPARE(brk(1), "brk #0x1");
   COMPARE(brk(65535), "brk #0xffff");
+
+  CLEANUP();
+}
+
+TEST_F(DisasmArm64Test, udf) {
+  SET_UP_ASM();
+
+  COMPARE(dci(0), "udf #0x0");
+  COMPARE(dci(1), "udf #0x1");
+  COMPARE(dci(65535), "udf #0xffff");
 
   CLEANUP();
 }
@@ -2241,6 +2289,8 @@ TEST_F(DisasmArm64Test, barriers) {
   V(V4S(), "4s")
 
 #define NEON_FORMAT_LIST_FP(V) \
+  V(V4H(), "4h")               \
+  V(V8H(), "8h")               \
   V(V2S(), "2s")               \
   V(V4S(), "4s")               \
   V(V2D(), "2d")
@@ -4039,6 +4089,25 @@ TEST_F(DisasmArm64Test, neon_3different) {
   COMPARE(Pmull2(v2.V8H(), v3.V16B(), v4.V16B()),
           "pmull2 v2.8h, v3.16b, v4.16b");
 
+  {
+    CpuFeatureScope feature_scope(assm, PMULL1Q,
+                                  CpuFeatureScope::kDontCheckSupported);
+
+    COMPARE(Pmull(v5.V1Q(), v6.V1D(), v7.V1D()), "pmull v5.1q, v6.1d, v7.1d");
+    COMPARE(Pmull2(v8.V1Q(), v9.V2D(), v10.V2D()),
+            "pmull2 v8.1q, v9.2d, v10.2d");
+  }
+
+  {
+    CpuFeatureScope feature_scope(assm, DOTPROD,
+                                  CpuFeatureScope::kDontCheckSupported);
+
+    COMPARE(Sdot(v11.V2S(), v20.V8B(), v25.V8B()),
+            "sdot v11.2s, v20.8b, v25.8b");
+    COMPARE(Sdot(v26.V4S(), v5.V16B(), v14.V16B()),
+            "sdot v26.4s, v5.16b, v14.16b");
+  }
+
   CLEANUP();
 }
 
@@ -4697,6 +4766,22 @@ TEST_F(DisasmArm64Test, neon_2regmisc) {
   CLEANUP();
 }
 
+TEST_F(DisasmArm64Test, neon_sha3) {
+  SET_UP_MASM();
+
+  CpuFeatureScope feature_scope(assm, SHA3,
+                                CpuFeatureScope::kDontCheckSupported);
+  COMPARE(Bcax(v0.V16B(), v1.V16B(), v2.V16B(), v3.V16B()),
+          "bcax v0.16b, v1.16b, v2.16b, v3.16b");
+  COMPARE(Eor3(v10.V16B(), v11.V16B(), v12.V16B(), v13.V16B()),
+          "eor3 v10.16b, v11.16b, v12.16b, v13.16b");
+  COMPARE(Xar(v2.V2D(), v4.V2D(), v6.V2D(), 1), "xar v2.2d, v4.2d, v6.2d, #1");
+  COMPARE(Xar(v3.V2D(), v21.V2D(), v24.V2D(), 63),
+          "xar v3.2d, v21.2d, v24.2d, #63");
+
+  CLEANUP();
+}
+
 TEST_F(DisasmArm64Test, neon_acrosslanes) {
   SET_UP_MASM();
 
@@ -5100,6 +5185,83 @@ TEST_F(DisasmArm64Test, neon_shift_immediate) {
   COMPARE(Fcvtzu(v7.V2D(), v5.V2D(), 33), "fcvtzu v7.2d, v5.2d, #33");
   COMPARE(Fcvtzu(s8, s6, 13), "fcvtzu s8, s6, #13");
   COMPARE(Fcvtzu(d8, d6, 34), "fcvtzu d8, d6, #34");
+
+  CLEANUP();
+}
+
+TEST_F(DisasmArm64Test, mops) {
+  SET_UP_MASM();
+  CpuFeatureScope feature_scope(assm, MOPS,
+                                CpuFeatureScope::kDontCheckSupported);
+
+  COMPARE(cpyp(x0, x30, x28), "cpyp [x0]!, [lr]!, x28!");
+  COMPARE(cpym(x1, x10, x23), "cpym [x1]!, [x10]!, x23!");
+  COMPARE(cpye(x14, x15, x19), "cpye [x14]!, [x15]!, x19!");
+
+  COMPARE(setp(x7, x17, x11), "setp [x7]!, x17!, x11");
+  COMPARE(setm(x8, x7, x9), "setm [x8]!, x7!, x9");
+  COMPARE(sete(x3, x23, x1), "sete [x3]!, x23!, x1");
+  CLEANUP();
+}
+
+TEST_F(DisasmArm64Test, cssc) {
+  SET_UP_MASM();
+
+  CpuFeatureScope feature_scope(assm, CSSC,
+                                CpuFeatureScope::kDontCheckSupported);
+
+  COMPARE(Abs(w0, w22), "abs w0, w22");
+  COMPARE(Abs(x0, x23), "abs x0, x23");
+  COMPARE(Cnt(w21, w30), "cnt w21, w30");
+  COMPARE(Cnt(x19, x9), "cnt x19, x9");
+  COMPARE(Ctz(w3, w5), "ctz w3, w5");
+  COMPARE(Ctz(x3, x28), "ctz x3, x28");
+  COMPARE(Ctz(w0, wzr), "ctz w0, wzr");
+
+  COMPARE(Smax(w5, w9, w10), "smax w5, w9, w10");
+  COMPARE(Smax(x6, x8, x9), "smax x6, x8, x9");
+  COMPARE(Smin(w11, w8, w17), "smin w11, w8, w17");
+  COMPARE(Smin(x12, x10, x20), "smin x12, x10, x20");
+  COMPARE(Umax(w5, w9, w10), "umax w5, w9, w10");
+  COMPARE(Umax(x6, x8, x9), "umax x6, x8, x9");
+  COMPARE(Umin(w11, w8, w17), "umin w11, w8, w17");
+  COMPARE(Umin(x12, x10, x20), "umin x12, x10, x20");
+
+  COMPARE(Smax(w5, w9, 127), "smax w5, w9, #127");
+  COMPARE(Smax(x6, x8, -128), "smax x6, x8, #-128");
+  COMPARE(Smin(w19, w20, -1), "smin w19, w20, #-1");
+  COMPARE(Smin(x30, xzr, 0), "smin lr, xzr, #0");
+  COMPARE(Umax(w5, w9, 255), "umax w5, w9, #255");
+  COMPARE(Umax(x6, x8, 128), "umax x6, x8, #128");
+  COMPARE(Umin(x30, xzr, 0), "umin lr, xzr, #0");
+
+  CLEANUP();
+}
+
+TEST_F(DisasmArm64Test, sve_bit_permute) {
+  SET_UP_MASM();
+
+  CpuFeatureScope feature_scope(assm, SVEBITPERM,
+                                CpuFeatureScope::kDontCheckSupported);
+
+  COMPARE(Bext(z6.VnB(), z2.VnB(), z5.VnB()), "bext z6.b, z2.b, z5.b");
+  COMPARE(Bext(z6.VnD(), z2.VnD(), z5.VnD()), "bext z6.d, z2.d, z5.d");
+  COMPARE(Bext(z6.VnH(), z2.VnH(), z5.VnH()), "bext z6.h, z2.h, z5.h");
+  COMPARE(Bext(z6.VnS(), z2.VnS(), z5.VnS()), "bext z6.s, z2.s, z5.s");
+
+  CLEANUP();
+}
+
+TEST_F(DisasmArm64Test, mul) {
+  SET_UP_MASM();
+
+  CpuFeatureScope feature_scope(assm, SVE2,
+                                CpuFeatureScope::kDontCheckSupported);
+
+  COMPARE(Mul(z0.VnB(), z1.VnB(), z2.VnB()), "mul z0.b, z1.b, z2.b");
+  COMPARE(Mul(z0.VnH(), z1.VnH(), z2.VnH()), "mul z0.h, z1.h, z2.h");
+  COMPARE(Mul(z0.VnS(), z1.VnS(), z2.VnS()), "mul z0.s, z1.s, z2.s");
+  COMPARE(Mul(z0.VnD(), z1.VnD(), z2.VnD()), "mul z0.d, z1.d, z2.d");
 
   CLEANUP();
 }

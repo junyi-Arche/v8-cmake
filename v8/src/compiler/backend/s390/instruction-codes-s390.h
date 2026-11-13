@@ -88,6 +88,7 @@ namespace compiler {
   V(S390_AbsDouble)                         \
   V(S390_Cntlz32)                           \
   V(S390_Cntlz64)                           \
+  V(S390_Cnttz64)                           \
   V(S390_Popcnt32)                          \
   V(S390_Popcnt64)                          \
   V(S390_Cmp32)                             \
@@ -127,6 +128,7 @@ namespace compiler {
   V(S390_DoubleToFloat32)                   \
   V(S390_DoubleExtractLowWord32)            \
   V(S390_DoubleExtractHighWord32)           \
+  V(S390_DoubleFromWord32Pair)              \
   V(S390_DoubleInsertLowWord32)             \
   V(S390_DoubleInsertHighWord32)            \
   V(S390_DoubleConstruct)                   \
@@ -159,6 +161,7 @@ namespace compiler {
   V(S390_StoreWord16)                       \
   V(S390_StoreWord32)                       \
   V(S390_StoreWord64)                       \
+  V(S390_AtomicStoreCompressTagged)         \
   V(S390_StoreReverse16)                    \
   V(S390_StoreReverse32)                    \
   V(S390_StoreReverse64)                    \

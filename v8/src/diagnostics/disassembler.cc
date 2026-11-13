@@ -5,6 +5,7 @@
 #include "src/diagnostics/disassembler.h"
 
 #include <algorithm>
+#include <array>
 #include <iomanip>
 #include <memory>
 #include <sstream>
@@ -18,6 +19,7 @@
 #include "src/codegen/code-comments.h"
 #include "src/codegen/code-reference.h"
 #include "src/codegen/external-reference-encoder.h"
+#include "src/codegen/jump-table-info.h"
 #include "src/codegen/macro-assembler.h"
 #include "src/debug/debug.h"
 #include "src/deoptimizer/deoptimizer.h"
@@ -25,12 +27,13 @@
 #include "src/execution/isolate-data.h"
 #include "src/ic/ic.h"
 #include "src/objects/objects-inl.h"
+#include "src/sandbox/js-dispatch-table.h"
 #include "src/snapshot/embedded/embedded-data.h"
 #include "src/strings/string-stream.h"
 
 #if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-code-manager.h"
-#include "src/wasm/wasm-engine.h"
+#include "src/wasm/wasm-engine-globals.h"
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 namespace v8 {
@@ -54,7 +57,7 @@ class V8NameConverter : public disasm::NameConverter {
   Isolate* isolate_;
   CodeReference code_;
 
-  base::EmbeddedVector<char, 128> v8_buffer_;
+  mutable std::array<char, 128> v8_buffer_;
 
   // Map from root-register relative offset of the external reference value to
   // the external reference name (stored in the external reference table).
@@ -89,25 +92,25 @@ const char* V8NameConverter::NameOfAddress(uint8_t* pc) const {
                  : nullptr;
 
     if (name != nullptr) {
-      SNPrintF(v8_buffer_, "%p  (%s)", static_cast<void*>(pc), name);
-      return v8_buffer_.begin();
+      base::SNPrintF(v8_buffer_, "%p  (%s)", static_cast<void*>(pc), name);
+      return v8_buffer_.data();
     }
 
     int offs = static_cast<int>(reinterpret_cast<Address>(pc) -
                                 code_.instruction_start());
     // print as code offset, if it seems reasonable
     if (0 <= offs && offs < code_.instruction_size()) {
-      SNPrintF(v8_buffer_, "%p  <+0x%x>", static_cast<void*>(pc), offs);
-      return v8_buffer_.begin();
+      base::SNPrintF(v8_buffer_, "%p  <+0x%x>", static_cast<void*>(pc), offs);
+      return v8_buffer_.data();
     }
 
 #if V8_ENABLE_WEBASSEMBLY
-    wasm::WasmCodeRefScope wasm_code_ref_scope;
+    wasm::WasmCodeRefScope code_ref_scope;
     if (auto* wasm_code = wasm::GetWasmCodeManager()->LookupCode(
             reinterpret_cast<Address>(pc))) {
-      SNPrintF(v8_buffer_, "%p  (%s)", static_cast<void*>(pc),
-               wasm::GetWasmCodeKindAsString(wasm_code->kind()));
-      return v8_buffer_.begin();
+      base::SNPrintF(v8_buffer_, "%p  (%s)", static_cast<void*>(pc),
+                     wasm::GetWasmCodeKindAsString(wasm_code->kind()));
+      return v8_buffer_.data();
     }
 #endif  // V8_ENABLE_WEBASSEMBLY
   }
@@ -144,8 +147,8 @@ const char* V8NameConverter::RootRelativeName(int offset) const {
     RootIndex root_index =
         static_cast<RootIndex>(offset_in_roots_table / kSystemPointerSize);
 
-    SNPrintF(v8_buffer_, "root (%s)", RootsTable::name(root_index));
-    return v8_buffer_.begin();
+    base::SNPrintF(v8_buffer_, "root (%s)", RootsTable::name(root_index));
+    return v8_buffer_.data();
   } else if (static_cast<unsigned>(offset - kExtRefsTableStart) <
              kExtRefsTableSize) {
     uint32_t offset_in_extref_table = offset - kExtRefsTableStart;
@@ -160,10 +163,10 @@ const char* V8NameConverter::RootRelativeName(int offset) const {
       return nullptr;
     }
 
-    SNPrintF(v8_buffer_, "external reference (%s)",
-             isolate_->external_reference_table()->NameFromOffset(
-                 offset_in_extref_table));
-    return v8_buffer_.begin();
+    base::SNPrintF(v8_buffer_, "external reference (%s)",
+                   isolate_->external_reference_table()->NameFromOffset(
+                       offset_in_extref_table));
+    return v8_buffer_.data();
   } else if (static_cast<unsigned>(offset - kBuiltinTier0TableStart) <
              kBuiltinTier0TableSize) {
     uint32_t offset_in_builtins_table = (offset - kBuiltinTier0TableStart);
@@ -171,8 +174,8 @@ const char* V8NameConverter::RootRelativeName(int offset) const {
     Builtin builtin =
         Builtins::FromInt(offset_in_builtins_table / kSystemPointerSize);
     const char* name = Builtins::name(builtin);
-    SNPrintF(v8_buffer_, "builtin (%s)", name);
-    return v8_buffer_.begin();
+    base::SNPrintF(v8_buffer_, "builtin (%s)", name);
+    return v8_buffer_.data();
   } else if (static_cast<unsigned>(offset - kBuiltinTableStart) <
              kBuiltinTableSize) {
     uint32_t offset_in_builtins_table = (offset - kBuiltinTableStart);
@@ -180,8 +183,8 @@ const char* V8NameConverter::RootRelativeName(int offset) const {
     Builtin builtin =
         Builtins::FromInt(offset_in_builtins_table / kSystemPointerSize);
     const char* name = Builtins::name(builtin);
-    SNPrintF(v8_buffer_, "builtin (%s)", name);
-    return v8_buffer_.begin();
+    base::SNPrintF(v8_buffer_, "builtin (%s)", name);
+    return v8_buffer_.data();
   } else {
     // It must be a direct access to one of the external values.
     if (directly_accessed_external_refs_.empty()) {
@@ -190,8 +193,8 @@ const char* V8NameConverter::RootRelativeName(int offset) const {
 
     auto iter = directly_accessed_external_refs_.find(offset);
     if (iter != directly_accessed_external_refs_.end()) {
-      SNPrintF(v8_buffer_, "external value (%s)", iter->second);
-      return v8_buffer_.begin();
+      base::SNPrintF(v8_buffer_, "external value (%s)", iter->second);
+      return v8_buffer_.data();
     }
     return nullptr;
   }
@@ -243,7 +246,7 @@ static void PrintRelocInfo(std::ostringstream& out, Isolate* isolate,
   } else if (RelocInfo::IsEmbeddedObjectMode(rmode)) {
     HeapStringAllocator allocator;
     StringStream accumulator(&allocator);
-    relocinfo->target_object(isolate).ShortPrint(&accumulator);
+    ShortPrint(relocinfo->target_object(), &accumulator);
     std::unique_ptr<char[]> obj_name = accumulator.ToCString();
     const bool is_compressed = RelocInfo::IsCompressedEmbeddedObject(rmode);
     out << "    ;; " << (is_compressed ? "(compressed) " : "")
@@ -253,24 +256,41 @@ static void PrintRelocInfo(std::ostringstream& out, Isolate* isolate,
     const char* reference_name =
         ref_encoder
             ? ref_encoder->NameOfAddress(isolate, address)
-            : ExternalReferenceTable::NameOfIsolateIndependentAddress(address);
+            : ExternalReferenceTable::NameOfIsolateIndependentAddress(
+                  address, IsolateGroup::current()->external_ref_table());
     out << "    ;; external reference (" << reference_name << ")";
+  } else if (rmode == RelocInfo::JS_DISPATCH_HANDLE) {
+    JSDispatchHandle dispatch_handle = relocinfo->js_dispatch_handle();
+    out << "    ;; js dispatch handle:0x" << std::hex << dispatch_handle
+        << std::dec;
+    if (dispatch_handle != kNullJSDispatchHandle) {
+      Tagged<Code> code =
+          isolate->js_dispatch_table().GetCode(relocinfo->js_dispatch_handle());
+      CodeKind kind = code->kind();
+      if (code->is_builtin()) {
+        out << " Builtin::" << Builtins::name(code->builtin_id());
+      } else {
+        out << " " << CodeKindToString(kind);
+      }
+    }
   } else if (RelocInfo::IsCodeTargetMode(rmode)) {
     out << "    ;; code:";
-    Code code =
+    Tagged<Code> code =
         isolate->heap()->FindCodeForInnerPointer(relocinfo->target_address());
-    CodeKind kind = code.kind();
-    if (code.is_builtin()) {
-      out << " Builtin::" << Builtins::name(code.builtin_id());
+    CodeKind kind = code->kind();
+    if (code->is_builtin()) {
+      out << " Builtin::" << Builtins::name(code->builtin_id());
     } else {
       out << " " << CodeKindToString(kind);
     }
 #if V8_ENABLE_WEBASSEMBLY
   } else if (RelocInfo::IsWasmStubCall(rmode) && host.is_wasm_code()) {
-    // Host is isolate-independent, try wasm native module instead.
-    const char* runtime_stub_name = GetRuntimeStubName(
-        host.as_wasm_code()->native_module()->GetRuntimeStubId(
-            relocinfo->wasm_stub_call_address()));
+    Builtin builtin =
+        host.as_wasm_code()->native_module()->GetBuiltinInJumptableSlot(
+            relocinfo->wasm_stub_call_address());
+    const char* runtime_stub_name = builtin == Builtin::kNoBuiltinId
+                                        ? "<unknown wasm stub>"
+                                        : Builtins::name(builtin);
     out << "    ;; wasm stub: " << runtime_stub_name;
 #endif  // V8_ENABLE_WEBASSEMBLY
   } else {
@@ -283,13 +303,30 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
                     const V8NameConverter& converter, uint8_t* begin,
                     uint8_t* end, Address current_pc, size_t range_limit) {
   CHECK(!code.is_null());
-  v8::base::EmbeddedVector<char, 128> decode_buffer;
+  std::array<char, 128> decode_buffer;
   std::ostringstream out;
   uint8_t* pc = begin;
   disasm::Disassembler d(converter,
                          disasm::Disassembler::kContinueOnUnimplementedOpcode);
   RelocIterator rit(code);
   CodeCommentsIterator cit(code.code_comments(), code.code_comments_size());
+
+  std::unique_ptr<JumpTableInfoIterator> table_info_it = nullptr;
+  if constexpr (V8_JUMP_TABLE_INFO_BOOL) {
+    if (code.is_code() && code.as_code()->has_jump_table_info()) {
+      table_info_it = std::make_unique<JumpTableInfoIterator>(
+          code.as_code()->jump_table_info(),
+          code.as_code()->jump_table_info_size());
+#if V8_ENABLE_WEBASSEMBLY
+    } else if (code.is_wasm_code() &&
+               code.as_wasm_code()->has_jump_table_info()) {
+      table_info_it = std::make_unique<JumpTableInfoIterator>(
+          code.as_wasm_code()->jump_table_info(),
+          code.as_wasm_code()->jump_table_info_size());
+#endif  // V8_ENABLE_WEBASSEMBLY
+    }
+  }
+
   int constants = -1;  // no constants being decoded at the start
 
   while (pc < end) {
@@ -297,34 +334,42 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
     uint8_t* prev_pc = pc;
     bool decoding_constant_pool = constants > 0;
     if (decoding_constant_pool) {
-      SNPrintF(
+      base::SNPrintF(
           decode_buffer, "%08x       constant",
           base::ReadUnalignedValue<int32_t>(reinterpret_cast<Address>(pc)));
       constants--;
       pc += 4;
+    } else if (!rit.done() &&
+               rit.rinfo()->pc() == reinterpret_cast<Address>(pc) &&
+               rit.rinfo()->rmode() == RelocInfo::INTERNAL_REFERENCE) {
+      // A raw pointer embedded in code stream.
+      uint8_t* ptr =
+          base::ReadUnalignedValue<uint8_t*>(reinterpret_cast<Address>(pc));
+      base::SNPrintF(
+          decode_buffer, "%08" V8PRIxPTR "       jump table entry %4zu",
+          reinterpret_cast<intptr_t>(ptr), static_cast<size_t>(ptr - begin));
+      pc += sizeof(ptr);
+    } else if (table_info_it && table_info_it->HasCurrent() &&
+               table_info_it->GetPCOffset() ==
+                   static_cast<uint32_t>(pc - begin)) {
+      int32_t target_pc_offset = table_info_it->GetTarget();
+      static_assert(sizeof(target_pc_offset) ==
+                    JumpTableInfoEntry::kTargetSize);
+      base::SNPrintF(decode_buffer, "jump table entry %08x", target_pc_offset);
+      pc += JumpTableInfoEntry::kTargetSize;
+      table_info_it->Next();
+    } else if (int num_const = d.ConstantPoolSizeAt(pc); num_const >= 0) {
+      // Checked after the jump tables, whose entries can look like an arm64
+      // constant pool marker.
+      base::SNPrintF(
+          decode_buffer, "%08x       constant pool begin (num_const = %d)",
+          base::ReadUnalignedValue<int32_t>(reinterpret_cast<Address>(pc)),
+          num_const);
+      constants = num_const;
+      pc += 4;
     } else {
-      int num_const = d.ConstantPoolSizeAt(pc);
-      if (num_const >= 0) {
-        SNPrintF(
-            decode_buffer, "%08x       constant pool begin (num_const = %d)",
-            base::ReadUnalignedValue<int32_t>(reinterpret_cast<Address>(pc)),
-            num_const);
-        constants = num_const;
-        pc += 4;
-      } else if (!rit.done() &&
-                 rit.rinfo()->pc() == reinterpret_cast<Address>(pc) &&
-                 rit.rinfo()->rmode() == RelocInfo::INTERNAL_REFERENCE) {
-        // A raw pointer embedded in code stream.
-        uint8_t* ptr =
-            base::ReadUnalignedValue<uint8_t*>(reinterpret_cast<Address>(pc));
-        SNPrintF(decode_buffer, "%08" V8PRIxPTR "       jump table entry %4zu",
-                 reinterpret_cast<intptr_t>(ptr),
-                 static_cast<size_t>(ptr - begin));
-        pc += sizeof(ptr);
-      } else {
-        decode_buffer[0] = '\0';
-        pc += d.InstructionDecode(decode_buffer, pc);
-      }
+      decode_buffer[0] = '\0';
+      pc += d.InstructionDecode(decode_buffer, pc);
     }
 
     Address pc_address = reinterpret_cast<Address>(pc);
@@ -333,13 +378,17 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
       if (pc_address <= current_pc - range_limit) continue;
     }
 
-    // Collect RelocInfo for this instruction (prev_pc .. pc-1)
+    // Collect RelocInfo for this instruction (prev_pc .. pc)
     std::vector<const char*> comments;
     std::vector<Address> pcs;
     std::vector<RelocInfo::Mode> rmodes;
     std::vector<intptr_t> datas;
-    while (!rit.done() && rit.rinfo()->pc() < reinterpret_cast<Address>(pc)) {
-      // Collect all data.
+    while (!rit.done() &&
+           (rit.rinfo()->pc() < reinterpret_cast<Address>(pc) ||
+            (rit.rinfo()->pc() == reinterpret_cast<Address>(pc) &&
+             RelocInfo::IsDeoptMode(rit.rinfo()->rmode())))) {
+      // Collect all data. Deopt-related data is associated with the exact pc,
+      // not before the pc.
       pcs.push_back(rit.rinfo()->pc());
       rmodes.push_back(rit.rinfo()->rmode());
       datas.push_back(rit.rinfo()->data());
@@ -357,7 +406,13 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
 
     // Comments.
     for (size_t i = 0; i < comments.size(); i++) {
+      if (v8_flags.log_colour) {
+        out << "\033[34m";
+      }
       out << "                  " << comments[i];
+      if (v8_flags.log_colour) {
+        out << "\033[;m";
+      }
       DumpBuffer(os, out);
     }
 
@@ -368,10 +423,10 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
       out << "\033[33;1m";
     }
     out << static_cast<void*>(prev_pc) << "  " << std::setw(4) << std::hex
-        << prev_pc - begin << "  ";
+        << prev_pc - begin << std::dec << "  ";
 
     // Instruction.
-    out << decode_buffer.begin();
+    out << decode_buffer.data();
 
     // Print all the reloc info for this instruction which are not comments.
     for (size_t i = 0; i < pcs.size(); i++) {
@@ -379,10 +434,7 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
       const CodeReference& host = code;
       Address constant_pool =
           host.is_null() ? kNullAddress : host.constant_pool();
-      Handle<Code> code_handle;
       if (host.is_code()) {
-        code_handle = host.as_code();
-
         RelocInfo relocinfo(pcs[i], rmodes[i], datas[i], constant_pool);
         bool first_reloc_info = (i == 0);
         PrintRelocInfo(out, isolate, ref_encoder, os, code, &relocinfo,
@@ -442,8 +494,15 @@ static int DecodeIt(Isolate* isolate, ExternalReferenceEncoder* ref_encoder,
 int Disassembler::Decode(Isolate* isolate, std::ostream& os, uint8_t* begin,
                          uint8_t* end, CodeReference code, Address current_pc,
                          size_t range_limit) {
-  DCHECK_WITH_MSG(v8_flags.text_is_readable,
-                  "Builtins disassembly requires a readable .text section");
+  // Only the decoded range must be readable, and a non-readable .text section
+  // holds just the embedded blob. On-heap code, and caller-owned buffers
+  // passed without an isolate, decode as usual.
+  if (!v8_flags.text_is_readable && isolate != nullptr &&
+      OffHeapInstructionStream::PcIsOffHeap(isolate,
+                                            reinterpret_cast<Address>(begin))) {
+    os << "<builtins disassembly requires a readable .text section>\n";
+    return 0;
+  }
   V8NameConverter v8NameConverter(isolate, code);
   if (isolate) {
     // We have an isolate, so support external reference names from V8 and

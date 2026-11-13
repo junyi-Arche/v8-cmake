@@ -2,6 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <optional>
 #include <sstream>
 
 #include "debug-helper-internal.h"
@@ -10,32 +11,30 @@
 #include "src/execution/frame-constants.h"
 #include "src/execution/frames.h"
 #include "src/execution/isolate-utils.h"
+#include "src/objects/scope-info.h"
 #include "src/objects/string-inl.h"
+#include "src/roots/roots.h"
 #include "src/sandbox/external-pointer.h"
 #include "src/strings/unicode-inl.h"
 #include "torque-generated/class-debug-readers.h"
 #include "torque-generated/debug-macros.h"
+#include "torque-generated/debug-reader-classes-list.h"
 
 namespace i = v8::internal;
 
-namespace v8 {
-namespace internal {
-namespace debug_helper_internal {
+namespace v8::internal::debug_helper_internal {
 
-constexpr char kObject[] = "v8::internal::Object";
 constexpr char kTaggedValue[] = "v8::internal::TaggedValue";
 constexpr char kSmi[] = "v8::internal::Smi";
 constexpr char kHeapObject[] = "v8::internal::HeapObject";
-#ifdef V8_COMPRESS_POINTERS
-constexpr char kObjectAsStoredInHeap[] = "v8::internal::TaggedValue";
-#else
-constexpr char kObjectAsStoredInHeap[] = "v8::internal::Object";
-#endif
+constexpr char kObjectAsStoredInHeap[] =
+    "v8::internal::TaggedMember<v8::internal::Object>";
 
 std::string AppendAddressAndType(const std::string& brief, uintptr_t address,
                                  const char* type) {
   std::stringstream brief_stream;
-  brief_stream << "0x" << std::hex << address << " <" << type << ">";
+  brief_stream << "0x" << std::hex << address << std::dec << " <" << type
+               << ">";
   return brief.empty() ? brief_stream.str()
                        : brief + " (" + brief_stream.str() + ")";
 }
@@ -69,8 +68,8 @@ TypedObject GetTypedObjectByHint(uintptr_t address,
             std::make_unique<Tq##ClassName>(address)};   \
   }
 
-  TORQUE_INSTANCE_CHECKERS_SINGLE_FULLY_DEFINED(TYPE_NAME_CASE)
-  TORQUE_INSTANCE_CHECKERS_RANGE_FULLY_DEFINED(TYPE_NAME_CASE)
+  TORQUE_DEBUG_READER_CLASSES_SINGLE(TYPE_NAME_CASE)
+  TORQUE_DEBUG_READER_CLASSES_RANGE(TYPE_NAME_CASE)
   STRING_CLASS_TYPES(TYPE_NAME_CASE)
 
 #undef TYPE_NAME_CASE
@@ -97,9 +96,8 @@ TypedObject GetTypedObjectForString(uintptr_t address, i::InstanceType type,
     }
   };
 
-  return i::StringShape(type)
-      .DispatchToSpecificTypeWithoutCast<StringGetDispatcher, TypedObject>(
-          address, type_source);
+  return String::DispatchToSpecificTypeWithoutCast<StringGetDispatcher>(
+      type, address, type_source);
 }
 
 TypedObject GetTypedObjectByInstanceType(uintptr_t address,
@@ -109,8 +107,8 @@ TypedObject GetTypedObjectByInstanceType(uintptr_t address,
 #define INSTANCE_TYPE_CASE(ClassName, INSTANCE_TYPE) \
   case i::INSTANCE_TYPE:                             \
     return {type_source, std::make_unique<Tq##ClassName>(address)};
-    TORQUE_INSTANCE_CHECKERS_SINGLE_FULLY_DEFINED(INSTANCE_TYPE_CASE)
-    TORQUE_INSTANCE_CHECKERS_MULTIPLE_FULLY_DEFINED(INSTANCE_TYPE_CASE)
+    TORQUE_DEBUG_READER_CLASSES_SINGLE(INSTANCE_TYPE_CASE)
+    TORQUE_DEBUG_READER_CLASSES_MULTIPLE(INSTANCE_TYPE_CASE)
 #undef INSTANCE_TYPE_CASE
 
     default:
@@ -126,7 +124,7 @@ TypedObject GetTypedObjectByInstanceType(uintptr_t address,
   if (type >= i::FIRST_TYPE && type <= i::LAST_TYPE) {              \
     return {type_source, std::make_unique<Tq##ClassName>(address)}; \
   }
-      TORQUE_INSTANCE_CHECKERS_RANGE_FULLY_DEFINED(INSTANCE_RANGE_CASE)
+      TORQUE_DEBUG_READER_CLASSES_RANGE(INSTANCE_RANGE_CASE)
 #undef INSTANCE_RANGE_CASE
 
       return {d::TypeCheckResult::kUnknownInstanceType,
@@ -220,7 +218,7 @@ TypedObject GetTypedHeapObject(uintptr_t address, d::MemoryAccessor accessor,
 class ReadStringVisitor : public TqObjectVisitor {
  public:
   struct Result {
-    v8::base::Optional<std::string> maybe_truncated_string;
+    std::optional<std::string> maybe_truncated_string;
     std::unique_ptr<ObjectProperty> maybe_raw_characters_property;
   };
   static Result Visit(d::MemoryAccessor accessor,
@@ -232,7 +230,7 @@ class ReadStringVisitor : public TqObjectVisitor {
   }
 
   // Returns the result as UTF-8 once visiting is complete.
-  v8::base::Optional<std::string> GetString() {
+  std::optional<std::string> GetString() {
     if (failed_) return {};
     std::vector<char> result(
         string_.size() * unibrow::Utf16::kMaxExtraUtf8BytesForOneUtf16CodeUnit);
@@ -255,7 +253,7 @@ class ReadStringVisitor : public TqObjectVisitor {
     DCHECK(size_per_character_ == 1 || size_per_character_ == 2);
     const char* type = size_per_character_ == 1 ? "char" : "char16_t";
     return std::make_unique<ObjectProperty>(
-        "raw_characters", type, type, raw_characters_address_, num_characters_,
+        "raw_characters", type, raw_characters_address_, num_characters_,
         size_per_character_, std::vector<std::unique_ptr<StructProperty>>(),
         d::PropertyKind::kArrayOfKnownSize);
   }
@@ -368,18 +366,42 @@ class ReadStringVisitor : public TqObjectVisitor {
 
   template <typename TChar>
   void ReadExternalString(const TqExternalString* object) {
-    // Cached external strings are easy to read; uncached external strings
-    // require knowledge of the embedder. For now, we only read cached external
-    // strings.
+    // Uncached external strings require knowledge of the embedder. For now, we
+    // only read cached external strings.
     if (IsExternalStringCached(object)) {
       ExternalPointer_t resource_data =
           GetOrFinish(object->GetResourceDataValue(accessor_));
-#ifdef V8_ENABLE_SANDBOX
+#ifdef V8_COMPRESS_POINTERS
       Address memory_chunk =
-          BasicMemoryChunk::BaseAddress(object->GetMapAddress());
+          MemoryChunk::FromAddress(object->GetMapAddress())->address();
+#ifdef V8_ENABLE_SANDBOX
+      uint32_t metadata_index = GetOrFinish(ReadValue<uint32_t>(
+          memory_chunk + MemoryChunk::MetadataIndexOffset()));
+      auto metadata_entry =
+          GetOrFinish(ReadValue<IsolateGroup::BasePageTableEntry>(
+              heap_addresses_.metadata_pointer_table, metadata_index));
+      Address metadata_address =
+          reinterpret_cast<uintptr_t>(metadata_entry.metadata());
+#else
+      Address metadata_address = GetOrFinish(
+          ReadValue<Address>(memory_chunk + MemoryChunk::MetadataOffset()));
+#endif  // V8_ENABLE_SANDBOX
       Address heap = GetOrFinish(
-          ReadValue<Address>(memory_chunk + BasicMemoryChunk::kHeapOffset));
-      Isolate* isolate = Isolate::FromHeap(reinterpret_cast<Heap*>(heap));
+          ReadValue<Address>(metadata_address + BasePage::HeapOffset()));
+      // Get the Isolate pointer from the Heap object. The Heap class has a
+      // field "Isolate* isolate_" that points to the owning Isolate. The offset
+      // of this field is provided by the debugger (from PDB symbols). If the
+      // offset is not available (zero), fall back to using Isolate::FromHeap()
+      // which may fail if the offset differs between builds.
+      Isolate* isolate;
+      if (heap_addresses_.isolate_heap_member_offset != 0) {
+        // Read the Isolate* pointer from Heap::isolate_ field.
+        Address isolate_address = GetOrFinish(ReadValue<Address>(
+            heap + heap_addresses_.isolate_heap_member_offset));
+        isolate = reinterpret_cast<Isolate*>(isolate_address);
+      } else {
+        isolate = Isolate::FromHeap(reinterpret_cast<Heap*>(heap));
+      }
       Address external_pointer_table_address_address =
           isolate->shared_external_pointer_table_address_address();
       Address external_pointer_table_address = GetOrFinish(
@@ -390,10 +412,11 @@ class ReadStringVisitor : public TqObjectVisitor {
           static_cast<int32_t>(resource_data >> kExternalPointerIndexShift);
       Address tagged_data =
           GetOrFinish(ReadValue<Address>(external_pointer_table, index));
-      Address data_address = tagged_data & ~kExternalStringResourceDataTag;
+      // We don't really need to perform the type check here.
+      Address data_address = tagged_data & kExternalPointerPayloadMask;
 #else
       uintptr_t data_address = static_cast<uintptr_t>(resource_data);
-#endif  // V8_ENABLE_SANDBOX
+#endif  // V8_COMPRESS_POINTERS
       if (done_) return;
       ReadStringCharacters<TChar>(object, data_address);
     } else {
@@ -571,7 +594,7 @@ class AddInfoVisitor : public TqObjectVisitor {
     int num_properties = instance_size.value - start_offset.value;
     if (num_properties > 0) {
       properties_.push_back(std::make_unique<ObjectProperty>(
-          "in-object properties", kObjectAsStoredInHeap, kObject,
+          "in-object properties", kObjectAsStoredInHeap,
           object->GetMapAddress() + start_offset.value * i::kTaggedSize,
           num_properties, i::kTaggedSize,
           std::vector<std::unique_ptr<StructProperty>>(),
@@ -644,6 +667,72 @@ std::unique_ptr<ObjectPropertiesResult> GetHeapObjectPropertiesNotCompressed(
       std::move(guessed_types));
 }
 
+// Describes one bitfield of a SmiTagged<...> slot as a struct property. The
+// reported shift includes the Smi encoding, so a consumer can decode the value
+// without untagging:
+//
+//   untagged value: ...|  field  |...
+//                                ^ BitField::kShift
+//
+//   stored format:  ...|  field  |...                |   0 ... 0      |T|
+//                                ^                    kSmiShiftSize kSmiTagSize
+//                                BitField::kShift + kSmiShiftSize + kSmiTagSize
+//
+// kSmiShiftSize is 0 in pointer-compressed builds and 31 otherwise.
+template <typename BitField>
+std::unique_ptr<StructProperty> SmiBitFieldProperty(const char* name,
+                                                    const char* type) {
+  return std::make_unique<StructProperty>(
+      name, type, 0, BitField::kSize,
+      i::kSmiTagSize + i::kSmiShiftSize + BitField::kShift);
+}
+
+// Returns the first page of the given root. If the root cannot be read, or
+// if the generated table at the offset contains a different object, returns
+// zero, and in this case the hint is left as-is.
+uintptr_t FirstPageFromRoot(uintptr_t isolate_address,
+                            d::MemoryAccessor memory_accessor, RootIndex root,
+                            const char* name,
+                            std::string (*lookup)(uintptr_t offset)) {
+  const uintptr_t slot = isolate_address + Internals::kIsolateRootsOffset +
+                         static_cast<uintptr_t>(root) * kSystemPointerSize;
+  uintptr_t address = 0;
+  if (memory_accessor(slot, reinterpret_cast<void*>(&address),
+                      sizeof(address)) != d::MemoryAccessResult::kOk) {
+    return 0;
+  }
+  if (lookup(MemoryChunk::AddressToOffset(address)) != name) return 0;
+  return MemoryChunk::FromAddress(address)->address();
+}
+
+// Fill heap_addresses with info about first pages using the roots table
+// reached from the provided isolate pointer. The page of each space is located
+// through a root object known to live in it.
+//
+//   isolate --+ kIsolateRootsOffset
+//             v
+//   roots table   [kUndefinedValue]  an address in read-only space
+//
+//   |      page base      | offset |     e.g. 0x34ed0bf40000 | 0x11
+//              |
+//              '--> read_only_space_first_page, but only if
+//                   FindKnownObjectInReadOnlySpace(offset) == "UndefinedValue",
+//
+//   kEmptyScript works similarly, but it's known to be in old space.
+void FillHeapAddressesWithIsolate(d::HeapAddresses* heap_addresses,
+                                  d::MemoryAccessor memory_accessor) {
+  if (heap_addresses->read_only_space_first_page == 0) {
+    heap_addresses->read_only_space_first_page = FirstPageFromRoot(
+        heap_addresses->isolate, memory_accessor, RootIndex::kUndefinedValue,
+        "UndefinedValue", FindKnownObjectInReadOnlySpace);
+  }
+  if (heap_addresses->old_space_first_page == 0) {
+    heap_addresses->old_space_first_page = FirstPageFromRoot(
+        heap_addresses->isolate, memory_accessor, RootIndex::kEmptyScript,
+        "EmptyScript", FindKnownObjectInOldSpace);
+  }
+}
+
 std::unique_ptr<ObjectPropertiesResult> GetHeapObjectPropertiesMaybeCompressed(
     uintptr_t address, d::MemoryAccessor memory_accessor,
     d::HeapAddresses heap_addresses, const char* type_hint) {
@@ -651,22 +740,29 @@ std::unique_ptr<ObjectPropertiesResult> GetHeapObjectPropertiesMaybeCompressed(
   // if pointer compression is disabled).
   uintptr_t any_uncompressed_ptr = 0;
   if (!IsPointerCompressed(address)) any_uncompressed_ptr = address;
-  if (any_uncompressed_ptr == 0)
+  if (any_uncompressed_ptr == 0) {
     any_uncompressed_ptr = heap_addresses.any_heap_pointer;
-  if (any_uncompressed_ptr == 0)
+  }
+  if (any_uncompressed_ptr == 0) {
     any_uncompressed_ptr = heap_addresses.map_space_first_page;
-  if (any_uncompressed_ptr == 0)
+  }
+  if (any_uncompressed_ptr == 0) {
     any_uncompressed_ptr = heap_addresses.old_space_first_page;
-  if (any_uncompressed_ptr == 0)
+  }
+  if (any_uncompressed_ptr == 0) {
     any_uncompressed_ptr = heap_addresses.read_only_space_first_page;
-#ifdef V8_COMPRESS_POINTERS_IN_SHARED_CAGE
+  }
+#ifdef V8_COMPRESS_POINTERS
   Address base =
       V8HeapCompressionScheme::GetPtrComprCageBaseAddress(any_uncompressed_ptr);
   if (base != V8HeapCompressionScheme::base()) {
     V8HeapCompressionScheme::InitBase(base);
   }
-#endif
+#endif  // V8_COMPRESS_POINTERS
   FillInUnknownHeapAddresses(&heap_addresses, any_uncompressed_ptr);
+  if (heap_addresses.isolate != 0) {
+    FillHeapAddressesWithIsolate(&heap_addresses, memory_accessor);
+  }
   if (any_uncompressed_ptr == 0) {
     // We can't figure out the heap range. Just check for known objects.
     std::string brief = FindKnownObject(address, heap_addresses);
@@ -706,7 +802,7 @@ std::unique_ptr<ObjectPropertiesResult> GetObjectProperties(
   // untagged value.
   int32_t value = i::PlatformSmiTagging::SmiToInt(address);
   std::stringstream stream;
-  stream << value << " (0x" << std::hex << value << ")";
+  stream << value << " (0x" << std::hex << value << std::dec << ")";
   return std::make_unique<ObjectPropertiesResult>(d::TypeCheckResult::kSmi,
                                                   stream.str(), kSmi);
 }
@@ -725,8 +821,8 @@ std::unique_ptr<StackFrameResult> GetStackFrame(
     if (!StackFrame::IsTypeMarker(context_or_frame_type)) {
       props.push_back(std::make_unique<ObjectProperty>(
           "currently_executing_jsfunction",
-          CheckTypeName<v8::internal::JSFunction>("v8::internal::JSFunction"),
-          CheckTypeName<v8::internal::JSFunction*>("v8::internal::JSFunction"),
+          CheckTypeName<v8::internal::Tagged<v8::internal::JSFunction>>(
+              "v8::internal::Tagged<v8::internal::JSFunction>"),
           frame_pointer + StandardFrameConstants::kFunctionOffset, 1,
           sizeof(v8::internal::JSFunction),
           std::vector<std::unique_ptr<StructProperty>>(),
@@ -746,21 +842,21 @@ std::unique_ptr<StackFrameResult> GetStackFrame(
         if (shared_function_info_ptr.validity == d::MemoryAccessResult::kOk) {
           TqSharedFunctionInfo shared_function_info(
               shared_function_info_ptr.value);
-          auto script_or_debug_info_ptr =
-              shared_function_info.GetScriptOrDebugInfoValue(memory_accessor);
-          if (script_or_debug_info_ptr.validity == d::MemoryAccessResult::kOk) {
-            // Make sure script_or_debug_info_ptr is script.
-            auto address = script_or_debug_info_ptr.value;
+          auto script_ptr =
+              shared_function_info.GetScriptValue(memory_accessor);
+          if (script_ptr.validity == d::MemoryAccessResult::kOk) {
+            // Make sure script_ptr is script.
+            auto address = script_ptr.value;
             if (IsTypedHeapObjectInstanceTypeOf(address, memory_accessor,
                                                 i::InstanceType::SCRIPT_TYPE)) {
-              TqScript script(script_or_debug_info_ptr.value);
+              TqScript script(script_ptr.value);
               props.push_back(std::make_unique<ObjectProperty>(
-                  "script_name", kObjectAsStoredInHeap, kObject,
-                  script.GetNameAddress(), 1, i::kTaggedSize,
+                  "script_name", kObjectAsStoredInHeap, script.GetNameAddress(),
+                  1, i::kTaggedSize,
                   std::vector<std::unique_ptr<StructProperty>>(),
                   d::PropertyKind::kSingle));
               props.push_back(std::make_unique<ObjectProperty>(
-                  "script_source", kObjectAsStoredInHeap, kObject,
+                  "script_source", kObjectAsStoredInHeap,
                   script.GetSourceAddress(), 1, i::kTaggedSize,
                   std::vector<std::unique_ptr<StructProperty>>(),
                   d::PropertyKind::kSingle));
@@ -774,56 +870,151 @@ std::unique_ptr<StackFrameResult> GetStackFrame(
             if (IsTypedHeapObjectInstanceTypeOf(
                     scope_info_address, memory_accessor,
                     i::InstanceType::SCOPE_INFO_TYPE)) {
-              auto indexed_field_slice_function_variable_info =
-                  TqDebugFieldSliceScopeInfoFunctionVariableInfo(
-                      memory_accessor, scope_info_address);
-              if (indexed_field_slice_function_variable_info.validity ==
-                  d::MemoryAccessResult::kOk) {
+              TqScopeInfo scope_info(scope_info_address);
+              // Torque only models the fixed ScopeInfo header; locate the tail
+              // sections by hand, mirroring the offset accessors in
+              // scope-info-inl.h.
+              auto flags = scope_info.GetFlagsValue(memory_accessor);
+              auto context_local_count =
+                  scope_info.GetContextLocalCountValue(memory_accessor);
+              if (flags.validity == d::MemoryAccessResult::kOk &&
+                  context_local_count.validity == d::MemoryAccessResult::kOk) {
+                const int local_count =
+                    i::PlatformSmiTagging::SmiToInt(context_local_count.value);
+                const bool is_module =
+                    i::ScopeInfo::Flags::ScopeTypeBits::decode(flags.value) ==
+                    i::ScopeType::MODULE_SCOPE;
+                const bool has_hashtable =
+                    local_count >= i::kScopeInfoMaxInlinedLocalNamesSize;
+                const bool has_saved_class_variable =
+                    i::ScopeInfo::Flags::HasSavedClassVariableBit::decode(
+                        flags.value);
+                const bool has_function_variable =
+                    i::ScopeInfo::Flags::FunctionVariableBits::decode(
+                        flags.value) != i::VariableAllocationInfo::NONE;
+                const uintptr_t context_local_names_offset =
+                    OFFSET_OF_DATA_START(i::ScopeInfo) +
+                    (is_module ? i::kTaggedSize : 0);
+                const uintptr_t context_local_infos_offset =
+                    context_local_names_offset +
+                    (has_hashtable ? 1 : local_count) * i::kTaggedSize;
+                const uintptr_t function_variable_info_offset =
+                    context_local_infos_offset +
+                    (local_count + (has_saved_class_variable ? 1 : 0)) *
+                        i::kTaggedSize;
                 props.push_back(std::make_unique<ObjectProperty>(
-                    "function_name", kObjectAsStoredInHeap, kObject,
+                    "function_name", kObjectAsStoredInHeap,
                     scope_info_address - i::kHeapObjectTag +
-                        std::get<1>(
-                            indexed_field_slice_function_variable_info.value),
-                    std::get<2>(
-                        indexed_field_slice_function_variable_info.value),
-                    i::kTaggedSize,
+                        function_variable_info_offset,
+                    has_function_variable ? 1 : 0, i::kTaggedSize,
                     std::vector<std::unique_ptr<StructProperty>>(),
                     d::PropertyKind::kSingle));
+
+                // Pass the context local info to consumers to recover the
+                // context-allocated (closure-captured) parameter names.
+                props.push_back(std::make_unique<ObjectProperty>(
+                    "context_local_names",
+                    CheckTypeName<i::TaggedMember<i::String>>(
+                        "v8::internal::TaggedMember<v8::internal::String>"),
+                    scope_info_address - i::kHeapObjectTag +
+                        context_local_names_offset,
+                    has_hashtable ? 0 : local_count, i::kTaggedSize,
+                    std::vector<std::unique_ptr<StructProperty>>(),
+                    d::PropertyKind::kArrayOfKnownSize));
+                std::vector<std::unique_ptr<StructProperty>> info_fields;
+                info_fields.push_back(
+                    SmiBitFieldProperty<i::ScopeInfo::VariableModeBits>(
+                        "variable_mode", "VariableMode"));
+                info_fields.push_back(
+                    SmiBitFieldProperty<i::ScopeInfo::InitFlagBit>(
+                        "init_flag", "InitializationFlag"));
+                info_fields.push_back(
+                    SmiBitFieldProperty<i::ScopeInfo::MaybeAssignedFlagBit>(
+                        "maybe_assigned_flag", "MaybeAssignedFlag"));
+                info_fields.push_back(
+                    SmiBitFieldProperty<i::ScopeInfo::IsParameterBit>(
+                        "is_parameter", "bool"));
+                info_fields.push_back(
+                    SmiBitFieldProperty<
+                        i::ScopeInfo::ParameterNumberOrPositionBits>(
+                        "parameter_number_or_position", "uint32_t"));
+                info_fields.push_back(
+                    SmiBitFieldProperty<i::ScopeInfo::IsStaticFlagBit>(
+                        "is_static_flag", "IsStaticFlag"));
+                props.push_back(std::make_unique<ObjectProperty>(
+                    "context_local_infos", kObjectAsStoredInHeap,
+                    scope_info_address - i::kHeapObjectTag +
+                        context_local_infos_offset,
+                    local_count, i::kTaggedSize, std::move(info_fields),
+                    d::PropertyKind::kArrayOfKnownSize));
               }
               std::vector<std::unique_ptr<StructProperty>>
                   position_info_struct_field_list;
               position_info_struct_field_list.push_back(
                   std::make_unique<StructProperty>(
-                      "start", kObjectAsStoredInHeap, kObject, 0, 0, 0));
+                      "start", kObjectAsStoredInHeap, 0, 0, 0));
               position_info_struct_field_list.push_back(
                   std::make_unique<StructProperty>("end", kObjectAsStoredInHeap,
-                                                   kObject, 4, 0, 0));
-              auto indexed_field_slice_position_info =
-                  TqDebugFieldSliceScopeInfoPositionInfo(memory_accessor,
-                                                         scope_info_address);
-              if (indexed_field_slice_position_info.validity ==
-                  d::MemoryAccessResult::kOk) {
-                props.push_back(std::make_unique<ObjectProperty>(
-                    "function_character_offset", "", "",
-                    scope_info_address - i::kHeapObjectTag +
-                        std::get<1>(indexed_field_slice_position_info.value),
-                    std::get<2>(indexed_field_slice_position_info.value),
-                    i::kTaggedSize, std::move(position_info_struct_field_list),
-                    d::PropertyKind::kSingle));
-              }
+                                                   4, 0, 0));
+              props.push_back(std::make_unique<ObjectProperty>(
+                  "function_character_offset", "",
+                  scope_info.GetPositionInfoAddress(), 1, 2 * i::kTaggedSize,
+                  std::move(position_info_struct_field_list),
+                  d::PropertyKind::kSingle));
             }
           }
         }
       }
+
+      // The receiver and the arguments are the caller's outgoing stack slots
+      // right above the return address. The slots hold uncompressed pointers
+      // even on pointer-compressed builds, so report them as Tagged values
+      // with the system pointer size.
+      props.push_back(std::make_unique<ObjectProperty>(
+          "receiver",
+          CheckTypeName<v8::internal::Tagged<v8::internal::Object>>(
+              "v8::internal::Tagged<v8::internal::Object>"),
+          frame_pointer + StandardFrameConstants::kCallerSPOffset, 1,
+          i::kSystemPointerSize, std::vector<std::unique_ptr<StructProperty>>(),
+          d::PropertyKind::kSingle));
+
+      // The argc slot counts the receiver. Report the user-visible arguments
+      // as an array. If the slot is unreadable or the count is out of range,
+      // report an array of unknown size so debug tools can still show the
+      // base address.
+      intptr_t argc = 0;
+      size_t argument_count = 0;
+      d::PropertyKind arguments_kind =
+          d::PropertyKind::kArrayOfUnknownSizeDueToInvalidMemory;
+      d::MemoryAccessResult argc_validity =
+          memory_accessor(frame_pointer + StandardFrameConstants::kArgCOffset,
+                          reinterpret_cast<void*>(&argc), sizeof(intptr_t));
+      if (argc_validity == d::MemoryAccessResult::kOk) {
+        intptr_t user_argc = argc - i::kJSArgcReceiverSlots;
+        if (user_argc >= 0 && user_argc <= i::Code::kMaxArguments) {
+          argument_count = static_cast<size_t>(user_argc);
+          arguments_kind = d::PropertyKind::kArrayOfKnownSize;
+        }
+      } else if (argc_validity ==
+                 d::MemoryAccessResult::kAddressValidButInaccessible) {
+        arguments_kind =
+            d::PropertyKind::kArrayOfUnknownSizeDueToValidButInaccessibleMemory;
+      }
+      props.push_back(std::make_unique<ObjectProperty>(
+          "arguments",
+          CheckTypeName<v8::internal::Tagged<v8::internal::Object>>(
+              "v8::internal::Tagged<v8::internal::Object>"),
+          frame_pointer + StandardFrameConstants::kCallerSPOffset +
+              i::kSystemPointerSize,
+          argument_count, i::kSystemPointerSize,
+          std::vector<std::unique_ptr<StructProperty>>(), arguments_kind));
     }
   }
 
   return std::make_unique<StackFrameResult>(std::move(props));
 }
 
-}  // namespace debug_helper_internal
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::debug_helper_internal
 
 namespace di = v8::internal::debug_helper_internal;
 

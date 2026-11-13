@@ -8,6 +8,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <algorithm>
+
 #include "include/libplatform/libplatform.h"
 #include "include/v8-context.h"
 #include "include/v8-initialization.h"
@@ -16,16 +18,21 @@
 
 namespace v8_fuzzer {
 
+// Use a lower max old generation size which is consistent across different
+// architectures.
+static constexpr size_t kMaxOldGenerationSize = 512 * i::MB;
+
 FuzzerSupport::FuzzerSupport(int* argc, char*** argv) {
   // Disable hard abort, which generates a trap instead of a proper abortion.
   // Traps by default do not cause libfuzzer to generate a crash file.
-  i::v8_flags.hard_abort = false;
+  i::v8_flags.hard_abort.Set(false);
 
-  i::v8_flags.expose_gc = true;
+  i::v8_flags.expose_gc.Set(true);
+  i::v8_flags.fuzzing.Set(true);
 
   // Allow changing flags in fuzzers.
   // TODO(12887): Refactor fuzzers to not change flags after initialization.
-  i::v8_flags.freeze_flags_after_init = false;
+  i::v8_flags.freeze_flags_after_init.Set(false);
 
 #if V8_ENABLE_WEBASSEMBLY
   if (V8_TRAP_HANDLER_SUPPORTED) {
@@ -33,11 +40,35 @@ FuzzerSupport::FuzzerSupport(int* argc, char*** argv) {
     if (!v8::V8::EnableWebAssemblyTrapHandler(kUseDefaultTrapHandler)) {
       FATAL("Could not register trap handler");
     }
+#if V8_OS_POSIX
+    // The trap handler deliberately handles (and recovers from) the signal
+    // raised by out-of-bounds Wasm memory accesses. Ask FuzzTest to not install
+    // its own crash handler for that signal, which would otherwise report these
+    // as crashes before V8 gets to handle them. Genuine crashes are still
+    // reported by the sanitizer. Existing values are not overwritten.
+#if V8_OS_DARWIN
+    setenv("FUZZTEST_DISABLE_SIGNAL_HANDLERS", "SIGBUS", /*replace=*/0);
+#else
+    setenv("FUZZTEST_DISABLE_SIGNAL_HANDLERS", "SIGSEGV", /*replace=*/0);
+#endif  // V8_OS_DARWIN
+#endif  // V8_OS_POSIX
   }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   v8::V8::SetFlagsFromCommandLine(argc, *argv, true);
-  v8::V8::InitializeICUDefaultLocation((*argv)[0]);
+  for (int arg_idx = 1; arg_idx < *argc; ++arg_idx) {
+    const char* const arg = (*argv)[arg_idx];
+    if (arg[0] != '-' || arg[1] != '-') continue;
+    // Stop processing args at '--'.
+    if (arg[2] == '\0') break;
+    fprintf(stderr, "Unrecognized flag %s\n", arg);
+    // Move remaining flags down.
+    std::move(*argv + arg_idx + 1, *argv + *argc, *argv + arg_idx);
+    --*argc, --arg_idx;
+  }
+  i::FlagList::ResolveContradictionsWhenFuzzing();
+
+  CHECK(v8::V8::InitializeICUDefaultLocation((*argv)[0]));
   v8::V8::InitializeExternalStartupData((*argv)[0]);
   platform_ = v8::platform::NewDefaultPlatform();
   v8::V8::InitializePlatform(platform_.get());
@@ -47,6 +78,8 @@ FuzzerSupport::FuzzerSupport(int* argc, char*** argv) {
   v8::Isolate::CreateParams create_params;
   create_params.array_buffer_allocator = allocator_;
   create_params.allow_atomics_wait = false;
+  create_params.constraints.set_max_old_generation_size_in_bytes(
+      kMaxOldGenerationSize);
   isolate_ = v8::Isolate::New(create_params);
 
   {
@@ -59,15 +92,18 @@ FuzzerSupport::FuzzerSupport(int* argc, char*** argv) {
 FuzzerSupport::~FuzzerSupport() {
   {
     v8::Isolate::Scope isolate_scope(isolate_);
-    while (PumpMessageLoop()) {
-      // empty
+    {
+      while (PumpMessageLoop()) {
+        // empty
+      }
+
+      v8::HandleScope handle_scope(isolate_);
+      context_.Reset();
     }
 
-    v8::HandleScope handle_scope(isolate_);
-    context_.Reset();
+    isolate_->LowMemoryNotification();
   }
-
-  isolate_->LowMemoryNotification();
+  v8::platform::NotifyIsolateShutdown(platform_.get(), isolate_);
   isolate_->Dispose();
   isolate_ = nullptr;
 
@@ -107,15 +143,3 @@ bool FuzzerSupport::PumpMessageLoop(
 }
 
 }  // namespace v8_fuzzer
-
-// Explicitly specify some attributes to avoid issues with the linker dead-
-// stripping the following function on macOS, as it is not called directly
-// by fuzz target. LibFuzzer runtime uses dlsym() to resolve that function.
-#if V8_OS_DARWIN
-__attribute__((used)) __attribute__((visibility("default")))
-#endif  // V8_OS_DARWIN
-extern "C" int
-LLVMFuzzerInitialize(int* argc, char*** argv) {
-  v8_fuzzer::FuzzerSupport::InitializeFuzzerSupport(argc, argv);
-  return 0;
-}

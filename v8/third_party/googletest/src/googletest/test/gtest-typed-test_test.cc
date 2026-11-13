@@ -30,14 +30,13 @@
 #include "test/gtest-typed-test_test.h"
 
 #include <set>
+#include <string>
 #include <type_traits>
 #include <vector>
 
 #include "gtest/gtest.h"
 
-#if _MSC_VER
 GTEST_DISABLE_MSC_WARNINGS_PUSH_(4127 /* conditional expression is constant */)
-#endif  //  _MSC_VER
 
 using testing::Test;
 
@@ -201,12 +200,15 @@ using testing::internal::TypedTestSuitePState;
 class TypedTestSuitePStateTest : public Test {
  protected:
   void SetUp() override {
-    state_.AddTestName("foo.cc", 0, "FooTest", "A");
-    state_.AddTestName("foo.cc", 0, "FooTest", "B");
-    state_.AddTestName("foo.cc", 0, "FooTest", "C");
+    state_.AddTest(&test_a_, "FooTest");
+    state_.AddTest(&test_b_, "FooTest");
+    state_.AddTest(&test_c_, "FooTest");
   }
 
   TypedTestSuitePState state_;
+  TypedTestSuitePState::RegisteredTest test_a_ = {"A", "foo.cc", 0, nullptr};
+  TypedTestSuitePState::RegisteredTest test_b_ = {"B", "foo.cc", 0, nullptr};
+  TypedTestSuitePState::RegisteredTest test_c_ = {"C", "foo.cc", 0, nullptr};
 };
 
 TEST_F(TypedTestSuitePStateTest, SucceedsForMatchingList) {
@@ -247,8 +249,9 @@ TEST_F(TypedTestSuitePStateDeathTest, DetectsMissedTest) {
 // a run-time error if the test case has been registered.
 TEST_F(TypedTestSuitePStateDeathTest, DetectsTestAfterRegistration) {
   state_.VerifyRegisteredTestNames("Suite", "foo.cc", 1, "A, B, C");
+  TypedTestSuitePState::RegisteredTest test_d = {"D", "foo.cc", 2, nullptr};
   EXPECT_DEATH_IF_SUPPORTED(
-      state_.AddTestName("foo.cc", 2, "FooTest", "D"),
+      state_.AddTest(&test_d, "FooTest"),
       "foo\\.cc.2.?: Test D must be defined before REGISTER_TYPED_TEST_SUITE_P"
       "\\(FooTest, \\.\\.\\.\\)\\.");
 }
@@ -420,3 +423,5 @@ typedef Types<int, double, MyPair<int, int> > TrimTypes;
 INSTANTIATE_TYPED_TEST_SUITE_P(My, TrimmedTest, TrimTypes);
 
 }  // namespace library2
+
+GTEST_DISABLE_MSC_WARNINGS_POP_()  // 4127

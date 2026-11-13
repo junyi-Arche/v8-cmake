@@ -2,22 +2,24 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+@cppScope('JSPromise::Flags')
 bitfield struct JSPromiseFlags extends uint31 {
-  status: PromiseState: 2 bit;
+  status: PromisePromiseState: 2 bit;
+  is_native_resolver_invoked: bool: 1 bit;
   has_handler: bool: 1 bit;
-  handled_hint: bool: 1 bit;
   is_silent: bool: 1 bit;
-  async_task_id: int32: 22 bit;
+  async_task_id: uint32: 26 bit;
 }
 
+@cppObjectLayoutDefinition
 extern class JSPromise extends JSObjectWithEmbedderSlots {
-  macro Status(): PromiseState {
+  macro Status(): PromisePromiseState {
     return this.flags.status;
   }
 
-  macro SetStatus(status: constexpr PromiseState): void {
-    dcheck(this.Status() == PromiseState::kPending);
-    dcheck(status != PromiseState::kPending);
+  macro SetStatus(status: constexpr PromisePromiseState): void {
+    dcheck(this.Status() == PromisePromiseState::kPending);
+    dcheck(status != PromisePromiseState::kPending);
 
     this.flags.status = status;
   }
@@ -32,10 +34,10 @@ extern class JSPromise extends JSObjectWithEmbedderSlots {
 
   // Smi 0 terminated list of PromiseReaction objects in case the JSPromise was
   // not settled yet, otherwise the result.
-  reactions_or_result: Zero|PromiseReaction|JSAny;
+  reactions_or_result: PromiseReaction|JSAny;
   flags: SmiTagged<JSPromiseFlags>;
 }
 
 @doNotGenerateCast
-extern class JSPromiseConstructor extends JSFunction
-    generates 'TNode<JSFunction>';
+extern class JSPromiseConstructor extends JSFunctionWithPrototype
+    generates 'JSFunction';

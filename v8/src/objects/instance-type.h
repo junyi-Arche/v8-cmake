@@ -5,16 +5,19 @@
 #ifndef V8_OBJECTS_INSTANCE_TYPE_H_
 #define V8_OBJECTS_INSTANCE_TYPE_H_
 
-#include "src/objects/elements-kind.h"
+#include "include/v8-internal.h"
+#include "src/objects/instance-types-gen.h"
 #include "src/objects/objects-definitions.h"
-#include "src/roots/static-roots.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
-#include "torque-generated/instance-types.h"
 
 namespace v8 {
 namespace internal {
+
+class Map;
+template <typename T>
+class Tagged;
 
 // We use the full 16 bits of the instance_type field to encode heap object
 // instance types. All the high-order bits (bits 7-15) are cleared if the object
@@ -70,13 +73,7 @@ constexpr uint32_t kExternalTwoByteStringTag =
 const uint32_t kUncachedExternalStringMask = 1 << 4;
 const uint32_t kUncachedExternalStringTag = 1 << 4;
 
-// For strings, bit 5 indicates that the string is internalized (if not set) or
-// isn't (if set).
-const uint32_t kIsNotInternalizedMask = 1 << 5;
-const uint32_t kNotInternalizedTag = 1 << 5;
-const uint32_t kInternalizedTag = 0;
-
-// For strings, bit 6 indicates that the string is accessible by more than one
+// For strings, bit 5 indicates that the string is accessible by more than one
 // thread. Note that a string that is allocated in the shared heap is not
 // accessible by more than one thread until it is explicitly shared (e.g. by
 // postMessage).
@@ -90,8 +87,18 @@ const uint32_t kInternalizedTag = 0;
 // are either always shared or always not shared depending on
 // v8_flags.shared_string_table. This will be hardcoded once
 // v8_flags.shared_string_table is removed.
-const uint32_t kSharedStringMask = 1 << 6;
-const uint32_t kSharedStringTag = 1 << 6;
+const uint32_t kSharedStringMask = 1 << 5;
+const uint32_t kSharedStringTag = 1 << 5;
+
+// For strings, bit 6 indicates that the string is internalized (if not set) or
+// isn't (if set). It is the highest string bit so that it forms a contiguous
+// run with kIsNotStringMask: the combined "is not an internalized string" mask
+// is then a logical immediate on arm64.
+const uint32_t kIsNotInternalizedMask = 1 << 6;
+const uint32_t kNotInternalizedTag = 1 << 6;
+const uint32_t kInternalizedTag = 0;
+static_assert((kIsNotStringMask | kIsNotInternalizedMask) ==
+              ~(kIsNotInternalizedMask - 1));
 
 constexpr uint32_t kStringRepresentationEncodingAndSharedMask =
     kStringRepresentationAndEncodingMask | kSharedStringMask;
@@ -101,58 +108,63 @@ constexpr uint32_t kStringRepresentationEncodingAndSharedMask =
 // non-flat internalized strings, so we do not shortcut them thereby
 // avoiding turning internalized strings into strings. The bit-masks
 // below contain the internalized bit as additional safety.
-// See heap.cc, mark-compact.cc and objects-visiting.cc.
+// See heap.cc, mark-compact.cc and heap-visitor.cc.
 const uint32_t kShortcutTypeMask =
     kIsNotStringMask | kIsNotInternalizedMask | kStringRepresentationMask;
 const uint32_t kShortcutTypeTag = kConsStringTag | kNotInternalizedTag;
 
-static inline bool IsShortcutCandidate(int type) {
+inline bool IsShortcutCandidate(int type) {
   return ((type & kShortcutTypeMask) == kShortcutTypeTag);
 }
 
 enum InstanceType : uint16_t {
   // String types.
-  INTERNALIZED_STRING_TYPE =
+  INTERNALIZED_TWO_BYTE_STRING_TYPE =
       kTwoByteStringTag | kSeqStringTag | kInternalizedTag,
-  ONE_BYTE_INTERNALIZED_STRING_TYPE =
+  INTERNALIZED_ONE_BYTE_STRING_TYPE =
       kOneByteStringTag | kSeqStringTag | kInternalizedTag,
-  EXTERNAL_INTERNALIZED_STRING_TYPE =
+  EXTERNAL_INTERNALIZED_TWO_BYTE_STRING_TYPE =
       kTwoByteStringTag | kExternalStringTag | kInternalizedTag,
-  EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE =
+  EXTERNAL_INTERNALIZED_ONE_BYTE_STRING_TYPE =
       kOneByteStringTag | kExternalStringTag | kInternalizedTag,
-  UNCACHED_EXTERNAL_INTERNALIZED_STRING_TYPE =
-      EXTERNAL_INTERNALIZED_STRING_TYPE | kUncachedExternalStringTag |
+  UNCACHED_EXTERNAL_INTERNALIZED_TWO_BYTE_STRING_TYPE =
+      EXTERNAL_INTERNALIZED_TWO_BYTE_STRING_TYPE | kUncachedExternalStringTag |
       kInternalizedTag,
-  UNCACHED_EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE =
-      EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE | kUncachedExternalStringTag |
+  UNCACHED_EXTERNAL_INTERNALIZED_ONE_BYTE_STRING_TYPE =
+      EXTERNAL_INTERNALIZED_ONE_BYTE_STRING_TYPE | kUncachedExternalStringTag |
       kInternalizedTag,
-  STRING_TYPE = INTERNALIZED_STRING_TYPE | kNotInternalizedTag,
-  ONE_BYTE_STRING_TYPE =
-      ONE_BYTE_INTERNALIZED_STRING_TYPE | kNotInternalizedTag,
-  CONS_STRING_TYPE = kTwoByteStringTag | kConsStringTag | kNotInternalizedTag,
+  SEQ_TWO_BYTE_STRING_TYPE =
+      INTERNALIZED_TWO_BYTE_STRING_TYPE | kNotInternalizedTag,
+  SEQ_ONE_BYTE_STRING_TYPE =
+      INTERNALIZED_ONE_BYTE_STRING_TYPE | kNotInternalizedTag,
+  CONS_TWO_BYTE_STRING_TYPE =
+      kTwoByteStringTag | kConsStringTag | kNotInternalizedTag,
   CONS_ONE_BYTE_STRING_TYPE =
       kOneByteStringTag | kConsStringTag | kNotInternalizedTag,
-  SLICED_STRING_TYPE =
+  SLICED_TWO_BYTE_STRING_TYPE =
       kTwoByteStringTag | kSlicedStringTag | kNotInternalizedTag,
   SLICED_ONE_BYTE_STRING_TYPE =
       kOneByteStringTag | kSlicedStringTag | kNotInternalizedTag,
-  EXTERNAL_STRING_TYPE =
-      EXTERNAL_INTERNALIZED_STRING_TYPE | kNotInternalizedTag,
+  EXTERNAL_TWO_BYTE_STRING_TYPE =
+      EXTERNAL_INTERNALIZED_TWO_BYTE_STRING_TYPE | kNotInternalizedTag,
   EXTERNAL_ONE_BYTE_STRING_TYPE =
-      EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE | kNotInternalizedTag,
-  UNCACHED_EXTERNAL_STRING_TYPE =
-      UNCACHED_EXTERNAL_INTERNALIZED_STRING_TYPE | kNotInternalizedTag,
+      EXTERNAL_INTERNALIZED_ONE_BYTE_STRING_TYPE | kNotInternalizedTag,
+  UNCACHED_EXTERNAL_TWO_BYTE_STRING_TYPE =
+      UNCACHED_EXTERNAL_INTERNALIZED_TWO_BYTE_STRING_TYPE | kNotInternalizedTag,
   UNCACHED_EXTERNAL_ONE_BYTE_STRING_TYPE =
-      UNCACHED_EXTERNAL_ONE_BYTE_INTERNALIZED_STRING_TYPE | kNotInternalizedTag,
-  // Mark thin strings as two-byte just to be on the safe side.
-  THIN_STRING_TYPE = kTwoByteStringTag | kThinStringTag | kNotInternalizedTag,
-  SHARED_STRING_TYPE = STRING_TYPE | kSharedStringTag,
-  SHARED_ONE_BYTE_STRING_TYPE = ONE_BYTE_STRING_TYPE | kSharedStringTag,
-  SHARED_EXTERNAL_STRING_TYPE = EXTERNAL_STRING_TYPE | kSharedStringTag,
+      UNCACHED_EXTERNAL_INTERNALIZED_ONE_BYTE_STRING_TYPE | kNotInternalizedTag,
+  THIN_TWO_BYTE_STRING_TYPE =
+      kTwoByteStringTag | kThinStringTag | kNotInternalizedTag,
+  THIN_ONE_BYTE_STRING_TYPE =
+      kOneByteStringTag | kThinStringTag | kNotInternalizedTag,
+  SHARED_SEQ_TWO_BYTE_STRING_TYPE = SEQ_TWO_BYTE_STRING_TYPE | kSharedStringTag,
+  SHARED_SEQ_ONE_BYTE_STRING_TYPE = SEQ_ONE_BYTE_STRING_TYPE | kSharedStringTag,
+  SHARED_EXTERNAL_TWO_BYTE_STRING_TYPE =
+      EXTERNAL_TWO_BYTE_STRING_TYPE | kSharedStringTag,
   SHARED_EXTERNAL_ONE_BYTE_STRING_TYPE =
       EXTERNAL_ONE_BYTE_STRING_TYPE | kSharedStringTag,
-  SHARED_UNCACHED_EXTERNAL_STRING_TYPE =
-      UNCACHED_EXTERNAL_STRING_TYPE | kSharedStringTag,
+  SHARED_UNCACHED_EXTERNAL_TWO_BYTE_STRING_TYPE =
+      UNCACHED_EXTERNAL_TWO_BYTE_STRING_TYPE | kSharedStringTag,
   SHARED_UNCACHED_EXTERNAL_ONE_BYTE_STRING_TYPE =
       UNCACHED_EXTERNAL_ONE_BYTE_STRING_TYPE | kSharedStringTag,
 
@@ -170,10 +182,22 @@ enum InstanceType : uint16_t {
   TORQUE_ASSIGNED_INSTANCE_TYPES(MAKE_TORQUE_INSTANCE_TYPE)
 #undef MAKE_TORQUE_INSTANCE_TYPE
 
+// During the metagen libclang harvest's bootstrap parse, the generated
+// IT symbols (SYMBOL_TYPE, FIRST_JS_FUNCTION_TYPE, ...) do not yet
+// exist -- metagen is parsing this file to produce them. Skip
+// file-scope references to those symbols so the parse succeeds; the
+// harvest only needs class declarations, not IT-value relationships.
+// Function-body uses of the same symbols are unaffected because the
+// harvest uses PARSE_SKIP_FUNCTION_BODIES.
+#ifndef V8_METAGEN_GENERATION_PASS
   // Pseudo-types
-  FIRST_UNIQUE_NAME_TYPE = INTERNALIZED_STRING_TYPE,
+  FIRST_UNIQUE_NAME_TYPE = INTERNALIZED_TWO_BYTE_STRING_TYPE,
   LAST_UNIQUE_NAME_TYPE = SYMBOL_TYPE,
   FIRST_NONSTRING_TYPE = SYMBOL_TYPE,
+  // This is a convenience alias to minimize the code churn from splitting
+  // JSFunction into JSFunctionWithoutPrototype and JSFunctionWithPrototype.
+  // Prefer using it instead of JS_FUNCTION_WITH_PROTOTYPE_TYPE.
+  JS_FUNCTION_TYPE = JS_FUNCTION_WITH_PROTOTYPE_TYPE,
   // Callable JS Functions are all JS Functions except class constructors.
   FIRST_CALLABLE_JS_FUNCTION_TYPE = FIRST_JS_FUNCTION_TYPE,
   LAST_CALLABLE_JS_FUNCTION_TYPE = JS_CLASS_CONSTRUCTOR_TYPE - 1,
@@ -188,8 +212,17 @@ enum InstanceType : uint16_t {
   FIRST_TYPE = FIRST_HEAP_OBJECT_TYPE,
   LAST_TYPE = LAST_HEAP_OBJECT_TYPE,
   BIGINT_TYPE = BIG_INT_BASE_TYPE,
+
+  // TODO(ishell): define a dedicated instance type for DependentCode to
+  // simplify CodeSerializer.
+  DEPENDENT_CODE_TYPE = WEAK_ARRAY_LIST_TYPE,
+#endif  // V8_METAGEN_GENERATION_PASS
 };
 
+// See the comment on the matching guard inside the enum above. Same
+// rationale: file-scope references to symbols the harvest hasn't
+// emitted yet are skipped during metagen's bootstrap parse.
+#ifndef V8_METAGEN_GENERATION_PASS
 // This constant is defined outside of the InstanceType enum because the
 // string instance types are sparse and there's no such string instance type.
 // But it's still useful for range checks to have such a value.
@@ -238,6 +271,7 @@ static_assert(JS_CLASS_CONSTRUCTOR_TYPE < FIRST_CALLABLE_JS_FUNCTION_TYPE ||
                  TYPE == JS_PROXY_TYPE || TYPE == JS_GLOBAL_OBJECT_TYPE || \
                  TYPE == JS_GLOBAL_PROXY_TYPE ||                           \
                  TYPE == JS_MODULE_NAMESPACE_TYPE ||                       \
+                 TYPE == JS_DEFERRED_MODULE_NAMESPACE_TYPE ||              \
                  TYPE == JS_SPECIAL_API_OBJECT_TYPE));                     \
   static_assert((TYPE >= FIRST_JS_RECEIVER_TYPE &&                         \
                  TYPE <= LAST_CUSTOM_ELEMENTS_RECEIVER) ==                 \
@@ -246,6 +280,7 @@ static_assert(JS_CLASS_CONSTRUCTOR_TYPE < FIRST_CALLABLE_JS_FUNCTION_TYPE ||
                  TYPE == JS_PROXY_TYPE || TYPE == JS_GLOBAL_OBJECT_TYPE || \
                  TYPE == JS_GLOBAL_PROXY_TYPE ||                           \
                  TYPE == JS_MODULE_NAMESPACE_TYPE ||                       \
+                 TYPE == JS_DEFERRED_MODULE_NAMESPACE_TYPE ||              \
                  TYPE == JS_SPECIAL_API_OBJECT_TYPE ||                     \
                  TYPE == JS_PRIMITIVE_WRAPPER_TYPE));
 // clang-format on
@@ -255,53 +290,20 @@ TORQUE_ASSIGNED_INSTANCE_TYPE_LIST(CHECK_INSTANCE_TYPE)
 // Make sure it doesn't matter whether we sign-extend or zero-extend these
 // values, because Torque treats InstanceType as signed.
 static_assert(LAST_TYPE < 1 << 15);
+#endif  // V8_METAGEN_GENERATION_PASS
 
 V8_EXPORT_PRIVATE std::ostream& operator<<(std::ostream& os,
                                            InstanceType instance_type);
 
-// List of object types that have a single unique instance type.
-#define INSTANCE_TYPE_CHECKERS_SINGLE(V)           \
-  TORQUE_INSTANCE_CHECKERS_SINGLE_FULLY_DEFINED(V) \
-  TORQUE_INSTANCE_CHECKERS_SINGLE_ONLY_DECLARED(V) \
-  V(BigInt, BIGINT_TYPE)                           \
-  V(FixedArrayExact, FIXED_ARRAY_TYPE)
-
-#define INSTANCE_TYPE_CHECKERS_RANGE(V)           \
-  TORQUE_INSTANCE_CHECKERS_RANGE_FULLY_DEFINED(V) \
-  TORQUE_INSTANCE_CHECKERS_RANGE_ONLY_DECLARED(V)
-
-#define INSTANCE_TYPE_CHECKERS_CUSTOM(V) \
-  V(AbstractCode)                        \
-  V(ExternalString)                      \
-  V(FreeSpaceOrFiller)                   \
-  V(GcSafeCode)                          \
-  V(InternalizedString)
-
-#define INSTANCE_TYPE_CHECKERS(V)  \
-  INSTANCE_TYPE_CHECKERS_SINGLE(V) \
-  INSTANCE_TYPE_CHECKERS_RANGE(V)  \
-  INSTANCE_TYPE_CHECKERS_CUSTOM(V)
-
-namespace InstanceTypeChecker {
-#define IS_TYPE_FUNCTION_DECL(Type, ...)                         \
-  V8_INLINE constexpr bool Is##Type(InstanceType instance_type); \
-  V8_INLINE bool Is##Type(Map map);
-
-INSTANCE_TYPE_CHECKERS(IS_TYPE_FUNCTION_DECL)
-
-#undef IS_TYPE_FUNCTION_DECL
-V8_INLINE constexpr bool IsReferenceComparable(InstanceType instance_type);
-}  // namespace InstanceTypeChecker
+V8_EXPORT_PRIVATE std::string ToString(InstanceType instance_type);
 
 // This list must contain only maps that are shared by all objects of their
 // instance type AND respective object must not represent a parent class for
-// multiple instance types (e.g. DescriptorArray has a unique map, but it has
-// a subclass StrongDescriptorArray which is included into the "DescriptorArray"
-// range of instance types).
+// multiple instance types.
 #define UNIQUE_LEAF_INSTANCE_TYPE_MAP_LIST_GENERATOR(V, _)                     \
   V(_, AccessorInfoMap, accessor_info_map, AccessorInfo)                       \
   V(_, AccessorPairMap, accessor_pair_map, AccessorPair)                       \
-  V(_, AllocationMementoMap, allocation_memento_map, AllocationMemento)        \
+  V(_, AllocationSiteMap, allocation_site_map, AllocationSite)                 \
   V(_, ArrayBoilerplateDescriptionMap, array_boilerplate_description_map,      \
     ArrayBoilerplateDescription)                                               \
   V(_, BreakPointMap, break_point_map, BreakPoint)                             \
@@ -313,13 +315,16 @@ V8_INLINE constexpr bool IsReferenceComparable(InstanceType instance_type);
   V(_, CodeMap, code_map, Code)                                                \
   V(_, CoverageInfoMap, coverage_info_map, CoverageInfo)                       \
   V(_, DebugInfoMap, debug_info_map, DebugInfo)                                \
+  V(_, DictionaryTemplateInfoMap, dictionary_template_info_map,                \
+    DictionaryTemplateInfo)                                                    \
   V(_, FreeSpaceMap, free_space_map, FreeSpace)                                \
   V(_, FeedbackVectorMap, feedback_vector_map, FeedbackVector)                 \
   V(_, FixedDoubleArrayMap, fixed_double_array_map, FixedDoubleArray)          \
   V(_, FunctionTemplateInfoMap, function_template_info_map,                    \
     FunctionTemplateInfo)                                                      \
+  V(_, InterpreterDataMap, interpreter_data_map, InterpreterData)              \
   V(_, MegaDomHandlerMap, mega_dom_handler_map, MegaDomHandler)                \
-  V(_, MetaMap, meta_map, Map)                                                 \
+  V(_, ObjectTemplateInfoMap, object_template_info_map, ObjectTemplateInfo)    \
   V(_, PreparseDataMap, preparse_data_map, PreparseData)                       \
   V(_, PropertyArrayMap, property_array_map, PropertyArray)                    \
   V(_, PrototypeInfoMap, prototype_info_map, PrototypeInfo)                    \
@@ -337,50 +342,69 @@ V8_INLINE constexpr bool IsReferenceComparable(InstanceType instance_type);
 
 // This list must contain only maps that are shared by all objects of their
 // instance type.
-#define UNIQUE_INSTANCE_TYPE_MAP_LIST_GENERATOR(V, _)                 \
-  UNIQUE_LEAF_INSTANCE_TYPE_MAP_LIST_GENERATOR(V, _)                  \
-  V(_, ByteArrayMap, byte_array_map, ByteArray)                       \
-  V(_, NameDictionaryMap, name_dictionary_map, NameDictionary)        \
-  V(_, OrderedNameDictionaryMap, ordered_name_dictionary_map,         \
-    OrderedNameDictionary)                                            \
-  V(_, GlobalDictionaryMap, global_dictionary_map, GlobalDictionary)  \
-  V(_, GlobalPropertyCellMap, global_property_cell_map, PropertyCell) \
-  V(_, HeapNumberMap, heap_number_map, HeapNumber)                    \
-  V(_, WeakFixedArrayMap, weak_fixed_array_map, WeakFixedArray)       \
-  V(_, ScopeInfoMap, scope_info_map, ScopeInfo)                       \
-  V(_, WeakArrayListMap, weak_array_list_map, WeakArrayList)          \
-  TORQUE_DEFINED_MAP_CSA_LIST_GENERATOR(V, _)
+#define UNIQUE_INSTANCE_TYPE_MAP_LIST_GENERATOR(V, _)                          \
+  UNIQUE_LEAF_INSTANCE_TYPE_MAP_LIST_GENERATOR(V, _)                           \
+  V(_, ByteArrayMap, byte_array_map, ByteArray)                                \
+  V(_, ContextCellMap, context_cell_map, ContextCell)                          \
+  V(_, NameDictionaryMap, name_dictionary_map, NameDictionary)                 \
+  V(_, OrderedNameDictionaryMap, ordered_name_dictionary_map,                  \
+    OrderedNameDictionary)                                                     \
+  V(_, GlobalDictionaryMap, global_dictionary_map, GlobalDictionary)           \
+  V(_, GlobalPropertyCellMap, global_property_cell_map, PropertyCell)          \
+  V(_, HeapNumberMap, heap_number_map, HeapNumber)                             \
+  V(_, UninitializedHeapNumberMap, uninitialized_heap_number_map,              \
+    UninitializedHeapNumber)                                                   \
+  V(_, WeakFixedArrayMap, weak_fixed_array_map, WeakFixedArray)                \
+  V(_, WeakHomomorphicFixedArrayMap, weak_homomorphic_fixed_array_map,         \
+    WeakHomomorphicFixedArray)                                                 \
+  V(_, ScopeInfoMap, scope_info_map, ScopeInfo)                                \
+  V(_, SloppyArgumentsElementsMap, sloppy_arguments_elements_map,              \
+    SloppyArgumentsElements)                                                   \
+  V(_, WeakArrayListMap, weak_array_list_map, WeakArrayList)                   \
+  V(_, DescriptorArrayMap, descriptor_array_map, DescriptorArray)              \
+  V(_, OnHeapBasicBlockProfilerDataMap, on_heap_basic_block_profiler_data_map, \
+    OnHeapBasicBlockProfilerData)                                              \
+  V(_, TurbofanBitsetTypeMap, turbofan_bitset_type_map, TurbofanBitsetType)    \
+  V(_, TurbofanUnionTypeMap, turbofan_union_type_map, TurbofanUnionType)       \
+  V(_, TurbofanRangeTypeMap, turbofan_range_type_map, TurbofanRangeType)       \
+  V(_, TurbofanHeapConstantTypeMap, turbofan_heap_constant_type_map,           \
+    TurbofanHeapConstantType)                                                  \
+  V(_, TurbofanOtherNumberConstantTypeMap,                                     \
+    turbofan_other_number_constant_type_map, TurbofanOtherNumberConstantType)  \
+  V(_, TurboshaftWord32RangeTypeMap, turboshaft_word32range_type_map,          \
+    TurboshaftWord32RangeType)                                                 \
+  V(_, TurboshaftWord32SetTypeMap, turboshaft_word32set_type_map,              \
+    TurboshaftWord32SetType)                                                   \
+  V(_, TurboshaftWord64RangeTypeMap, turboshaft_word64range_type_map,          \
+    TurboshaftWord64RangeType)                                                 \
+  V(_, TurboshaftWord64SetTypeMap, turboshaft_word64set_type_map,              \
+    TurboshaftWord64SetType)                                                   \
+  V(_, TurboshaftFloat64RangeTypeMap, turboshaft_float64range_type_map,        \
+    TurboshaftFloat64RangeType)                                                \
+  V(_, TurboshaftFloat64SetTypeMap, turboshaft_float64set_type_map,            \
+    TurboshaftFloat64SetType)                                                  \
+  V(_, SortStateMap, sort_state_map, SortState)                                \
+  IF_WASM(V, _, WasmFastApiCallDataMap, wasm_fast_api_call_data_map,           \
+          WasmFastApiCallData)                                                 \
+  IF_WASM(V, _, WasmStringViewIterMap, wasm_string_view_iter_map,              \
+          WasmStringViewIter)
+
+#ifndef V8_METAGEN_GENERATION_PASS
+#ifdef V8_ENABLE_SWISS_NAME_DICTIONARY
+static constexpr InstanceType PROPERTY_DICTIONARY_TYPE =
+    SWISS_NAME_DICTIONARY_TYPE;
+#else
+static constexpr InstanceType PROPERTY_DICTIONARY_TYPE = NAME_DICTIONARY_TYPE;
+#endif
+#endif  // V8_METAGEN_GENERATION_PASS
 
 namespace InstanceTypeChecker {
-#if V8_STATIC_ROOTS_BOOL
-
-// Maps for primitive objects and a select few JS objects are allocated in r/o
-// space. All JS_RECEIVER maps must come after primitive object maps, i.e. they
-// have a compressed address above the last primitive object map root. If we
-// have a receiver and need to distinguish whether it is either a primitive
-// object or a JS receiver, it suffices to check if its map is allocated above
-// the following limit address.
-constexpr Tagged_t kNonJsReceiverMapLimit =
-    StaticReadOnlyRootsPointerTable[static_cast<size_t>(
-        RootIndex::kFirstJSReceiverMapRoot)] &
-    ~0xFFF;
-
-// For performance, the limit is chosen to be encodable as an Arm64
-// constant. See Assembler::IsImmAddSub in assembler-arm64.cc.
-//
-// If this assert fails, then you have perturbed the allocation pattern in
-// Heap::CreateReadOnlyHeapObjects. Currently this limit is ensured to exist by
-// allocating the first JSReceiver map in RO space a sufficiently large distance
-// away from the last non-JSReceiver map.
-static_assert(kNonJsReceiverMapLimit != 0 &&
-              is_uint12(kNonJsReceiverMapLimit >> 12) &&
-              ((kNonJsReceiverMapLimit & 0xFFF) == 0));
-
-#else
-
-constexpr Tagged_t kNonJsReceiverMapLimit = 0x0;
-
-#endif  // V8_STATIC_ROOTS_BOOL
+V8_INLINE bool IsSeqString(Tagged<Map>);
+V8_INLINE bool IsConsString(Tagged<Map>);
+V8_INLINE bool IsSlicedString(Tagged<Map>);
+V8_INLINE bool IsThinString(Tagged<Map>);
+V8_INLINE bool IsOneByteString(Tagged<Map>);
+V8_INLINE bool IsTwoByteString(Tagged<Map>);
 }  // namespace InstanceTypeChecker
 
 }  // namespace internal

@@ -16,6 +16,7 @@ namespace v8 {
 class AccessorSignature;
 class Array;
 class ArrayBuffer;
+class ArrayBufferBase;
 class ArrayBufferView;
 class BigInt;
 class BigInt64Array;
@@ -27,6 +28,7 @@ class Context;
 class DataView;
 class Data;
 class Date;
+class DictionaryTemplate;
 class Extension;
 class External;
 class FixedArray;

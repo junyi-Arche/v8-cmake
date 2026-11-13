@@ -6,11 +6,11 @@
 
 namespace proxy {
 
-// ES #sec-proxy-object-internal-methods-and-internal-slots-setprototypeof-v
 // https://tc39.es/ecma262/#sec-proxy-object-internal-methods-and-internal-slots-setprototypeof-v
-transitioning builtin
-ProxySetPrototypeOf(implicit context: Context)(
-    proxy: JSProxy, proto: Null|JSReceiver, doThrow: Boolean): JSAny {
+// https://tc39.es/ecma262/#sec-proxy-object-internal-methods-and-internal-slots-setprototypeof-v
+transitioning builtin ProxySetPrototypeOf(
+    implicit context: Context)(proxy: JSProxy, proto: Null|JSReceiver,
+    doThrow: Boolean): JSAny {
   PerformStackCheck();
   const kTrapName: constexpr string = 'setPrototypeOf';
   try {
@@ -39,8 +39,7 @@ ProxySetPrototypeOf(implicit context: Context)(
     // 9. If booleanTrapResult is false, return false.
     if (!ToBoolean(trapResult)) {
       if (doThrow == True) {
-        ThrowTypeError(
-            MessageTemplate::kProxyTrapReturnedFalsishFor, kTrapName);
+        ThrowTypeError(MessageTemplate::kProxyTrapReturnedFalsish, kTrapName);
       }
       return False;
     }

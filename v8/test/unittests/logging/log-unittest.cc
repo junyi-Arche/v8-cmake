@@ -29,12 +29,14 @@
 
 #include "src/logging/log.h"
 
+#include <array>
 #include <unordered_set>
 #include <vector>
 
 #include "include/v8-function.h"
 #include "src/api/api-inl.h"
 #include "src/base/strings.h"
+#include "src/base/unique-array.h"
 #include "src/builtins/builtins.h"
 #include "src/codegen/compilation-cache.h"
 #include "src/execution/vm-state-inl.h"
@@ -47,7 +49,6 @@
 #include "test/unittests/test-utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
-using v8::base::EmbeddedVector;
 using v8::internal::Address;
 using v8::internal::V8FileLogger;
 
@@ -57,11 +58,11 @@ namespace {
 class LogTest : public TestWithIsolate {
  public:
   static void SetUpTestSuite() {
-    i::v8_flags.log = true;
-    i::v8_flags.prof = true;
-    i::v8_flags.log_code = true;
-    i::v8_flags.logfile = i::LogFile::kLogToTemporaryFile;
-    i::v8_flags.logfile_per_isolate = false;
+    i::v8_flags.log.Set(true);
+    i::v8_flags.prof.Set(true);
+    i::v8_flags.log_code.Set(true);
+    i::v8_flags.logfile.Set(i::LogFile::kLogToTemporaryFile);
+    i::v8_flags.logfile_per_isolate.Set(false);
     TestWithIsolate::SetUpTestSuite();
   }
 };
@@ -83,15 +84,13 @@ class V8_NODISCARD ScopedLoggerInitializer {
         isolate_(isolate),
         isolate_scope_(isolate),
         scope_(isolate),
-        env_(v8::Context::New(isolate)),
-        v8_file_logger_(
-            reinterpret_cast<i::Isolate*>(isolate)->v8_file_logger()) {
+        env_(v8::Context::New(isolate)) {
     env_->Enter();
   }
 
   ~ScopedLoggerInitializer() {
     env_->Exit();
-    FILE* log_file = v8_file_logger_->TearDownAndGetLogFile();
+    FILE* log_file = v8_file_logger()->TearDownAndGetLogFile();
     if (log_file != nullptr) fclose(log_file);
   }
 
@@ -104,7 +103,9 @@ class V8_NODISCARD ScopedLoggerInitializer {
 
   i::Isolate* i_isolate() { return reinterpret_cast<i::Isolate*>(isolate()); }
 
-  V8FileLogger* v8_file_logger() { return v8_file_logger_; }
+  V8FileLogger* v8_file_logger() { return i_isolate()->v8_file_logger(); }
+
+  i::Logger* logger() { return i_isolate()->logger(); }
 
   v8::Local<v8::String> GetLogString() {
     int length = static_cast<int>(raw_log_.size());
@@ -153,9 +154,19 @@ class V8_NODISCARD ScopedLoggerInitializer {
       size_t start = 0) {
     CHECK_GT(log_.size(), 0);
     for (auto& search_terms : all_line_search_terms) {
-      start = IndexOfLine(search_terms, start);
-      if (start == std::string::npos) return false;
-      ++start;  // Skip the found line.
+      size_t next = IndexOfLine(search_terms, start);
+      if (next == std::string::npos) {
+        for (size_t i = 0; i < search_terms.size(); ++i) {
+          printf("%s ", search_terms[i].c_str());
+        }
+        printf(" -- mismatch\n");
+        printf("Log contents:\n");
+        for (size_t i = start; i < log_.size(); ++i) {
+          printf("%s\n", log_.at(start).c_str());
+        }
+        return false;
+      }
+      start = next + 1;  // Skip the found line.
     }
     return true;
   }
@@ -203,16 +214,16 @@ class V8_NODISCARD ScopedLoggerInitializer {
     return result;
   }
 
-  void LogCodeObjects() { v8_file_logger_->LogCodeObjects(); }
-  void LogCompiledFunctions() { v8_file_logger_->LogCompiledFunctions(); }
+  void LogCodeObjects() { v8_file_logger()->LogCodeObjects(); }
+  void LogCompiledFunctions() { v8_file_logger()->LogCompiledFunctions(); }
 
   void StringEvent(const char* name, const char* value) {
-    v8_file_logger_->StringEvent(name, value);
+    v8_file_logger()->StringEvent(name, value);
   }
 
  private:
   FILE* StopLoggingGetTempFile() {
-    temp_file_ = v8_file_logger_->TearDownAndGetLogFile();
+    temp_file_ = v8_file_logger()->TearDownAndGetLogFile();
     CHECK(temp_file_);
     rewind(temp_file_);
     return temp_file_;
@@ -223,7 +234,6 @@ class V8_NODISCARD ScopedLoggerInitializer {
   v8::Isolate::Scope isolate_scope_;
   v8::HandleScope scope_;
   v8::Local<v8::Context> env_;
-  V8FileLogger* v8_file_logger_;
 
   std::string raw_log_;
   std::vector<std::string> log_;
@@ -264,9 +274,10 @@ class TestCodeEventHandler : public v8::CodeEventHandler {
     std::string name = std::string(code_event->GetComment());
     if (name.empty()) {
       v8::Local<v8::String> functionName = code_event->GetFunctionName();
-      std::string buffer(functionName->Utf8Length(isolate_) + 1, 0);
-      functionName->WriteUtf8(isolate_, &buffer[0],
-                              functionName->Utf8Length(isolate_) + 1);
+      size_t buffer_size = functionName->Utf8Length(isolate_) + 1;
+      std::string buffer(buffer_size, 0);
+      functionName->WriteUtf8(isolate_, &buffer[0], buffer_size,
+                              String::WriteFlags::kNullTerminate);
       // Sanitize name, removing unwanted \0 resulted from WriteUtf8
       name = std::string(buffer.c_str());
     }
@@ -287,16 +298,17 @@ namespace {
 
 class SimpleExternalString : public v8::String::ExternalStringResource {
  public:
-  explicit SimpleExternalString(const char* source)
-      : utf_source_(
-            v8::base::OwnedVector<uint16_t>::Of(v8::base::CStrVector(source))) {
+  explicit SimpleExternalString(const char* source) {
+    size_t len = strlen(source);
+    utf_source_ = base::UniqueArray<uint16_t>::NewForOverwrite(len);
+    std::copy(source, source + len, utf_source_.data());
   }
   ~SimpleExternalString() override = default;
   size_t length() const override { return utf_source_.size(); }
   const uint16_t* data() const override { return utf_source_.begin(); }
 
  private:
-  v8::base::OwnedVector<uint16_t> utf_source_;
+  v8::base::UniqueArray<uint16_t> utf_source_;
 };
 
 }  // namespace
@@ -316,12 +328,12 @@ TEST_F(TestWithIsolate, Issue23768) {
   v8::Local<v8::Script> evil_script = CompileWithOrigin(source, origin, false);
   CHECK(!evil_script.IsEmpty());
   CHECK(!evil_script->Run(env).IsEmpty());
-  i::Handle<i::ExternalTwoByteString> i_source(
-      i::ExternalTwoByteString::cast(*v8::Utils::OpenHandle(*source)),
+  i::DirectHandle<i::ExternalTwoByteString> i_source(
+      i::Cast<i::ExternalTwoByteString>(*v8::Utils::OpenDirectHandle(*source)),
       i_isolate());
   // This situation can happen if source was an external string disposed
   // by its owner.
-  i_source->SetResource(i_isolate(), nullptr);
+  i_source->ReleaseResourceForTesting(i_isolate());
 
   // Must not crash.
   i_isolate()->v8_file_logger()->LogCompiledFunctions();
@@ -359,22 +371,22 @@ TEST_F(LogTest, LogCallbacks) {
 #if USES_FUNCTION_DESCRIPTORS
     ObjMethod1_entry = *FUNCTION_ENTRYPOINT_ADDRESS(ObjMethod1_entry);
 #endif
-    v8::base::EmbeddedVector<char, 100> suffix_buffer;
+    std::array<char, 100> suffix_buffer;
     v8::base::SNPrintF(suffix_buffer, ",0x%" V8PRIxPTR ",1,method1",
                        ObjMethod1_entry);
     CHECK(logger.ContainsLine(
-        {"code-creation,Callback,-2,", std::string(suffix_buffer.begin())}));
+        {"code-creation,Callback,-2,", std::string(suffix_buffer.data())}));
   }
 }
 
-static void Prop1Getter(v8::Local<v8::String> property,
+static void Prop1Getter(v8::Local<v8::Name> property,
                         const v8::PropertyCallbackInfo<v8::Value>& info) {}
 
-static void Prop1Setter(v8::Local<v8::String> property,
+static void Prop1Setter(v8::Local<v8::Name> property,
                         v8::Local<v8::Value> value,
-                        const v8::PropertyCallbackInfo<void>& info) {}
+                        const v8::PropertyCallbackInfo<v8::Boolean>& info) {}
 
-static void Prop2Getter(v8::Local<v8::String> property,
+static void Prop2Getter(v8::Local<v8::Name> property,
                         const v8::PropertyCallbackInfo<v8::Value>& info) {}
 
 TEST_F(LogTest, LogAccessorCallbacks) {
@@ -385,8 +397,8 @@ TEST_F(LogTest, LogAccessorCallbacks) {
         isolate(), v8::FunctionTemplate::New(isolate()));
     obj->SetClassName(NewString("Obj"));
     v8::Local<v8::ObjectTemplate> inst = obj->InstanceTemplate();
-    inst->SetAccessor(NewString("prop1"), Prop1Getter, Prop1Setter);
-    inst->SetAccessor(NewString("prop2"), Prop2Getter);
+    inst->SetNativeDataProperty(NewString("prop1"), Prop1Getter, Prop1Setter);
+    inst->SetNativeDataProperty(NewString("prop2"), Prop2Getter);
 
     logger.v8_file_logger()->LogAccessorCallbacks();
 
@@ -396,31 +408,31 @@ TEST_F(LogTest, LogAccessorCallbacks) {
 #if USES_FUNCTION_DESCRIPTORS
     Prop1Getter_entry = *FUNCTION_ENTRYPOINT_ADDRESS(Prop1Getter_entry);
 #endif
-    v8::base::EmbeddedVector<char, 100> prop1_getter_record;
+    std::array<char, 100> prop1_getter_record;
     v8::base::SNPrintF(prop1_getter_record, ",0x%" V8PRIxPTR ",1,get prop1",
                        Prop1Getter_entry);
     CHECK(logger.ContainsLine({"code-creation,Callback,-2,",
-                               std::string(prop1_getter_record.begin())}));
+                               std::string(prop1_getter_record.data())}));
 
     Address Prop1Setter_entry = reinterpret_cast<Address>(Prop1Setter);
 #if USES_FUNCTION_DESCRIPTORS
     Prop1Setter_entry = *FUNCTION_ENTRYPOINT_ADDRESS(Prop1Setter_entry);
 #endif
-    v8::base::EmbeddedVector<char, 100> prop1_setter_record;
+    std::array<char, 100> prop1_setter_record;
     v8::base::SNPrintF(prop1_setter_record, ",0x%" V8PRIxPTR ",1,set prop1",
                        Prop1Setter_entry);
     CHECK(logger.ContainsLine({"code-creation,Callback,-2,",
-                               std::string(prop1_setter_record.begin())}));
+                               std::string(prop1_setter_record.data())}));
 
     Address Prop2Getter_entry = reinterpret_cast<Address>(Prop2Getter);
 #if USES_FUNCTION_DESCRIPTORS
     Prop2Getter_entry = *FUNCTION_ENTRYPOINT_ADDRESS(Prop2Getter_entry);
 #endif
-    v8::base::EmbeddedVector<char, 100> prop2_getter_record;
+    std::array<char, 100> prop2_getter_record;
     v8::base::SNPrintF(prop2_getter_record, ",0x%" V8PRIxPTR ",1,get prop2",
                        Prop2Getter_entry);
     CHECK(logger.ContainsLine({"code-creation,Callback,-2,",
-                               std::string(prop2_getter_record.begin())}));
+                               std::string(prop2_getter_record.data())}));
   }
 }
 
@@ -429,46 +441,23 @@ TEST_F(LogTest, LogVersion) {
     ScopedLoggerInitializer logger(isolate());
     logger.StopLogging();
 
-    v8::base::EmbeddedVector<char, 100> line_buffer;
+    std::array<char, 100> line_buffer;
     v8::base::SNPrintF(line_buffer, "%d,%d,%d,%d,%d", i::Version::GetMajor(),
                        i::Version::GetMinor(), i::Version::GetBuild(),
                        i::Version::GetPatch(), i::Version::IsCandidate());
     CHECK(
-        logger.ContainsLine({"v8-version,", std::string(line_buffer.begin())}));
+        logger.ContainsLine({"v8-version,", std::string(line_buffer.data())}));
   }
 }
 
 // https://crbug.com/539892
 // CodeCreateEvents with really large names should not crash.
 TEST_F(LogTest, Issue539892) {
-  class FakeCodeEventLogger : public i::CodeEventLogger {
-   public:
-    explicit FakeCodeEventLogger(i::Isolate* isolate)
-        : CodeEventLogger(isolate) {}
-
-    void CodeMoveEvent(i::InstructionStream from,
-                       i::InstructionStream to) override {}
-    void BytecodeMoveEvent(i::BytecodeArray from,
-                           i::BytecodeArray to) override {}
-    void CodeDisableOptEvent(i::Handle<i::AbstractCode> code,
-                             i::Handle<i::SharedFunctionInfo> shared) override {
-    }
-
-   private:
-    void LogRecordedBuffer(i::AbstractCode code,
-                           i::MaybeHandle<i::SharedFunctionInfo> maybe_shared,
-                           const char* name, int length) override {}
-#if V8_ENABLE_WEBASSEMBLY
-    void LogRecordedBuffer(const i::wasm::WasmCode* code, const char* name,
-                           int length) override {}
-#endif  // V8_ENABLE_WEBASSEMBLY
-  };
-
-  FakeCodeEventLogger code_event_logger(i_isolate());
+  i::FakeCodeEventLogger code_event_logger(i_isolate());
 
   {
     ScopedLoggerInitializer logger(isolate());
-    logger.v8_file_logger()->AddLogEventListener(&code_event_logger);
+    logger.logger()->AddListener(&code_event_logger);
 
     // Function with a really large name.
     const char* source_text =
@@ -496,18 +485,18 @@ TEST_F(LogTest, Issue539892) {
 
     // Must not crash.
     logger.LogCompiledFunctions();
-    logger.v8_file_logger()->RemoveLogEventListener(&code_event_logger);
+    logger.logger()->RemoveListener(&code_event_logger);
   }
 }
 
 class LogAllTest : public LogTest {
  public:
   static void SetUpTestSuite() {
-    i::v8_flags.log_all = true;
-    i::v8_flags.log_deopt = true;
-    i::v8_flags.turbo_inlining = false;
-    i::v8_flags.log_internal_timer_events = true;
-    i::v8_flags.allow_natives_syntax = true;
+    i::v8_flags.log_all.Set(true);
+    i::v8_flags.log_deopt.Set(true);
+    i::v8_flags.turbo_inlining.Set(false);
+    i::v8_flags.log_timer_events.Set(true);
+    i::v8_flags.allow_natives_syntax.Set(true);
     LogTest::SetUpTestSuite();
   }
 };
@@ -548,7 +537,7 @@ TEST_F(LogAllTest, LogAll) {
     CHECK(logger.ContainsLine({"code-creation,Script", ":1:1"}));
     CHECK(logger.ContainsLine({"code-creation,JS,", "testAddFn"}));
 
-    if (i::v8_flags.turbofan && !i::v8_flags.always_turbofan) {
+    if (i::v8_flags.turbofan) {
       CHECK(logger.ContainsLine({"code-deopt,", "not a Smi"}));
       CHECK(logger.ContainsLine({"timer-event-start", "V8.DeoptimizeCode"}));
       CHECK(logger.ContainsLine({"timer-event-end", "V8.DeoptimizeCode"}));
@@ -559,7 +548,7 @@ TEST_F(LogAllTest, LogAll) {
 class LogInterpretedFramesNativeStackTest : public LogTest {
  public:
   static void SetUpTestSuite() {
-    i::v8_flags.interpreted_frames_native_stack = true;
+    i::v8_flags.interpreted_frames_native_stack.Set(true);
     LogTest::SetUpTestSuite();
   }
 };
@@ -588,13 +577,12 @@ class LogInterpretedFramesNativeStackWithSerializationTest
       : array_buffer_allocator_(
             v8::ArrayBuffer::Allocator::NewDefaultAllocator()) {}
   static void SetUpTestSuite() {
-    i::v8_flags.log = true;
-    i::v8_flags.prof = true;
-    i::v8_flags.log_code = true;
-    i::v8_flags.logfile = i::LogFile::kLogToTemporaryFile;
-    i::v8_flags.logfile_per_isolate = false;
-    i::v8_flags.interpreted_frames_native_stack = true;
-    i::v8_flags.always_turbofan = false;
+    i::v8_flags.log.Set(true);
+    i::v8_flags.prof.Set(true);
+    i::v8_flags.log_code.Set(true);
+    i::v8_flags.logfile.Set(i::LogFile::kLogToTemporaryFile);
+    i::v8_flags.logfile_per_isolate.Set(false);
+    i::v8_flags.interpreted_frames_native_stack.Set(true);
     TestWithPlatform::SetUpTestSuite();
   }
 
@@ -641,7 +629,7 @@ TEST_F(LogInterpretedFramesNativeStackWithSerializationTest,
       v8::Local<v8::String> source = NewString(
           "function eyecatcher() { return a * a; } return eyecatcher();");
       v8::Local<v8::String> arg_str = NewString("a");
-      v8::ScriptOrigin origin(isolate, NewString("filename"));
+      v8::ScriptOrigin origin(NewString("filename"));
 
       i::DisallowCompilation* no_compile_expected =
           has_cache ? new i::DisallowCompilation(
@@ -678,8 +666,8 @@ TEST_F(LogInterpretedFramesNativeStackWithSerializationTest,
 class LogExternalLogEventListenerTest : public TestWithIsolate {
  public:
   static void SetUpTestSuite() {
-    i::v8_flags.log = false;
-    i::v8_flags.prof = false;
+    i::v8_flags.log.Set(false);
+    i::v8_flags.prof.Set(false);
     TestWithIsolate::SetUpTestSuite();
   }
 };
@@ -733,8 +721,8 @@ class LogExternalLogEventListenerInnerFunctionTest : public TestWithPlatform {
       : array_buffer_allocator_(
             v8::ArrayBuffer::Allocator::NewDefaultAllocator()) {}
   static void SetUpTestSuite() {
-    i::v8_flags.log = false;
-    i::v8_flags.prof = false;
+    i::v8_flags.log.Set(false);
+    i::v8_flags.prof.Set(false);
     TestWithPlatform::SetUpTestSuite();
   }
 
@@ -770,7 +758,7 @@ TEST_F(LogExternalLogEventListenerInnerFunctionTest,
     code_event_handler.Enable();
 
     v8::Local<v8::String> source_string = NewString(source_cstring);
-    v8::ScriptOrigin origin(isolate1, NewString("test"));
+    v8::ScriptOrigin origin(NewString("test"));
     v8::ScriptCompiler::Source source(source_string, origin);
     v8::Local<v8::UnboundScript> script =
         v8::ScriptCompiler::CompileUnboundScript(isolate1, &source)
@@ -796,7 +784,7 @@ TEST_F(LogExternalLogEventListenerInnerFunctionTest,
     code_event_handler.Enable();
 
     v8::Local<v8::String> source_string = NewString(source_cstring);
-    v8::ScriptOrigin origin(isolate2, NewString("test"));
+    v8::ScriptOrigin origin(NewString("test"));
     v8::ScriptCompiler::Source source(source_string, origin, cache);
     {
       i::DisallowCompilation no_compile_expected(
@@ -816,9 +804,9 @@ TEST_F(LogExternalLogEventListenerInnerFunctionTest,
 class LogExternalInterpretedFramesNativeStackTest : public TestWithIsolate {
  public:
   static void SetUpTestSuite() {
-    i::v8_flags.log = false;
-    i::v8_flags.prof = false;
-    i::v8_flags.interpreted_frames_native_stack = true;
+    i::v8_flags.log.Set(false);
+    i::v8_flags.prof.Set(false);
+    i::v8_flags.interpreted_frames_native_stack.Set(true);
     TestWithIsolate::SetUpTestSuite();
   }
 };
@@ -829,6 +817,9 @@ TEST_F(LogExternalInterpretedFramesNativeStackTest,
     v8::Isolate::Scope isolate_scope(isolate());
     v8::Local<v8::Context> context = v8::Context::New(isolate());
     context->Enter();
+
+    i::FakeCodeEventLogger code_event_logger(i_isolate());
+    CHECK(i_isolate()->logger()->AddListener(&code_event_logger));
 
     TestCodeEventHandler code_event_handler(isolate());
 
@@ -861,6 +852,7 @@ TEST_F(LogExternalInterpretedFramesNativeStackTest,
         1);
 
     context->Exit();
+    CHECK(i_isolate()->logger()->RemoveListener(&code_event_logger));
   }
 }
 #endif  // V8_TARGET_ARCH_ARM
@@ -868,7 +860,7 @@ TEST_F(LogExternalInterpretedFramesNativeStackTest,
 class LogMapsTest : public LogTest {
  public:
   static void SetUpTestSuite() {
-    i::v8_flags.log_maps = true;
+    i::v8_flags.log_maps.Set(true);
     LogTest::SetUpTestSuite();
   }
 };
@@ -922,14 +914,14 @@ void ValidateMapDetailsLogging(v8::Isolate* isolate,
   i::HeapObjectIterator iterator(heap);
   i::DisallowGarbageCollection no_gc;
   size_t i = 0;
-  for (i::HeapObject obj = iterator.Next(); !obj.is_null();
+  for (i::Tagged<i::HeapObject> obj = iterator.Next(); !obj.is_null();
        obj = iterator.Next()) {
-    if (!obj.IsMap()) continue;
+    if (!IsMap(obj)) continue;
     i++;
     uintptr_t address = obj.ptr();
     if (map_create_addresses.find(address) == map_create_addresses.end()) {
       // logger->PrintLog();
-      i::Map::cast(obj).Print();
+      i::Print(i::Cast<i::Map>(obj));
       FATAL(
           "Map (%p, #%zu) creation not logged during startup with "
           "--log-maps!"
@@ -939,7 +931,7 @@ void ValidateMapDetailsLogging(v8::Isolate* isolate,
     } else if (map_details_addresses.find(address) ==
                map_details_addresses.end()) {
       // logger->PrintLog();
-      i::Map::cast(obj).Print();
+      i::Print(i::Cast<i::Map>(obj));
       FATAL(
           "Map (%p, #%zu) details not logged during startup with "
           "--log-maps!"
@@ -955,8 +947,7 @@ void ValidateMapDetailsLogging(v8::Isolate* isolate,
 TEST_F(LogMapsTest, LogMapsDetailsStartup) {
   // Reusing map addresses might cause these tests to fail.
   if (i::v8_flags.gc_global || i::v8_flags.stress_compaction ||
-      i::v8_flags.stress_incremental_marking ||
-      i::v8_flags.enable_third_party_heap) {
+      i::v8_flags.stress_incremental_marking) {
     return;
   }
   // Test that all Map details from Maps in the snapshot are logged properly.
@@ -970,8 +961,8 @@ TEST_F(LogMapsTest, LogMapsDetailsStartup) {
 class LogMapsCodeTest : public LogTest {
  public:
   static void SetUpTestSuite() {
-    i::v8_flags.retain_maps_for_n_gc = 0xFFFFFFF;
-    i::v8_flags.log_maps = true;
+    i::v8_flags.retain_maps_for_n_gc.Set(0xFFFFFFF);
+    i::v8_flags.log_maps.Set(true);
     LogTest::SetUpTestSuite();
   }
 };
@@ -979,8 +970,7 @@ class LogMapsCodeTest : public LogTest {
 TEST_F(LogMapsCodeTest, LogMapsDetailsCode) {
   // Reusing map addresses might cause these tests to fail.
   if (i::v8_flags.gc_global || i::v8_flags.stress_compaction ||
-      i::v8_flags.stress_incremental_marking ||
-      i::v8_flags.enable_third_party_heap) {
+      i::v8_flags.stress_incremental_marking) {
     return;
   }
 
@@ -1069,8 +1059,7 @@ TEST_F(LogMapsCodeTest, LogMapsDetailsCode) {
 TEST_F(LogMapsTest, LogMapsDetailsContexts) {
   // Reusing map addresses might cause these tests to fail.
   if (i::v8_flags.gc_global || i::v8_flags.stress_compaction ||
-      i::v8_flags.stress_incremental_marking ||
-      i::v8_flags.enable_third_party_heap) {
+      i::v8_flags.stress_incremental_marking) {
     return;
   }
   // Test that all Map details from Maps in the snapshot are logged properly.
@@ -1094,7 +1083,15 @@ TEST_F(LogMapsTest, LogMapsDetailsContexts) {
   }
 }
 
-TEST_F(LogTest, ConsoleTimeEvents) {
+class LogTimerTest : public LogTest {
+ public:
+  static void SetUpTestSuite() {
+    i::v8_flags.log_timer_events.Set(true);
+    LogTest::SetUpTestSuite();
+  }
+};
+
+TEST_F(LogTimerTest, ConsoleTimeEvents) {
   {
     ScopedLoggerInitializer logger(isolate());
     {
@@ -1112,11 +1109,11 @@ TEST_F(LogTest, ConsoleTimeEvents) {
     const char* source_text =
         "console.time();"
         "console.timeEnd();"
-        "console.timeStamp();"
+        "console.timeLog();"
         "console.time('timerEvent1');"
         "console.timeEnd('timerEvent1');"
-        "console.timeStamp('timerEvent2');"
-        "console.timeStamp('timerEvent3');";
+        "console.timeLog('timerEvent2');"
+        "console.timeLog('timerEvent3');";
     RunJS(source_text);
 
     logger.StopLogging();
@@ -1133,15 +1130,12 @@ TEST_F(LogTest, ConsoleTimeEvents) {
 class LogFunctionEventsTest : public LogTest {
  public:
   static void SetUpTestSuite() {
-    i::v8_flags.log_function_events = true;
+    i::v8_flags.log_function_events.Set(true);
     LogTest::SetUpTestSuite();
   }
 };
 
 TEST_F(LogFunctionEventsTest, LogFunctionEvents) {
-  // --always-turbofan will break the fine-grained log order.
-  if (i::v8_flags.always_turbofan) return;
-
   {
     ScopedLoggerInitializer logger(isolate());
 
@@ -1219,21 +1213,24 @@ TEST_F(LogTest, BuiltinsNotLoggedAsLazyCompile) {
     logger.StopLogging();
 
     i::Isolate* i_isolate = logger.i_isolate();
-    i::Handle<i::Code> builtin = BUILTIN_CODE(i_isolate, BooleanConstructor);
-    v8::base::EmbeddedVector<char, 100> buffer;
+    i::DirectHandle<i::Code> builtin =
+        BUILTIN_CODE(i_isolate, BooleanConstructor);
+    std::array<char, 100> buffer;
 
     // Should only be logged as "Builtin" with a name, never as "Function".
     v8::base::SNPrintF(buffer, ",0x%" V8PRIxPTR ",%d,BooleanConstructor",
                        builtin->instruction_start(),
                        builtin->instruction_size());
+    static_assert(static_cast<int>(i::CodeKind::BUILTIN) == 3,
+                  "Update ',3,' below to proper value");
     CHECK(logger.ContainsLine(
-        {"code-creation,Builtin,2,", std::string(buffer.begin())}));
+        {"code-creation,Builtin,3,", std::string(buffer.data())}));
 
     v8::base::SNPrintF(buffer, ",0x%" V8PRIxPTR ",%d,",
                        builtin->instruction_start(),
                        builtin->instruction_size());
     CHECK(!logger.ContainsLine(
-        {"code-creation,JS,2,", std::string(buffer.begin())}));
+        {"code-creation,JS,3,", std::string(buffer.data())}));
   }
 }
 }  // namespace v8

@@ -1,6 +1,7 @@
 // Copyright 2020 the V8 project authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
+
 #ifndef V8_OBJECTS_JS_SEGMENTS_H_
 #define V8_OBJECTS_JS_SEGMENTS_H_
 
@@ -11,6 +12,8 @@
 #include "src/base/bit-field.h"
 #include "src/execution/isolate.h"
 #include "src/heap/factory.h"
+#include "src/objects/bit-field-group.h"
+#include "src/objects/intl-objects.h"
 #include "src/objects/js-segmenter.h"
 #include "src/objects/managed.h"
 #include "src/objects/objects.h"
@@ -21,50 +24,77 @@
 
 namespace U_ICU_NAMESPACE {
 class BreakIterator;
-class UnicodeString;
 }  // namespace U_ICU_NAMESPACE
 
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/js-segments-tq.inc"
-
-class JSSegments : public TorqueGeneratedJSSegments<JSSegments, JSObject> {
+V8_OBJECT class JSSegments : public JSObject {
  public:
-  // ecma402 #sec-createsegmentsobject
-  V8_WARN_UNUSED_RESULT static MaybeHandle<JSSegments> Create(
-      Isolate* isolate, Handle<JSSegmenter> segmenter, Handle<String> string);
+  // https://tc39.es/ecma402/#sec-createsegmentsobject
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSSegments> Create(
+      Isolate* isolate, DirectHandle<JSSegmenter> segmenter,
+      DirectHandle<String> string);
 
-  // ecma402 #sec-%segmentsprototype%.containing
-  V8_WARN_UNUSED_RESULT static MaybeHandle<Object> Containing(
-      Isolate* isolate, Handle<JSSegments> segments_holder, double n);
+  // https://tc39.es/ecma402/#sec-%segmentsprototype%.containing
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<Object> Containing(
+      Isolate* isolate, DirectHandle<JSSegments> segments_holder, double n);
 
-  // ecma402 #sec-createsegmentdataobject
-  V8_WARN_UNUSED_RESULT static MaybeHandle<Object> CreateSegmentDataObject(
-      Isolate* isolate, JSSegmenter::Granularity granularity,
-      icu::BreakIterator* break_iterator, const icu::UnicodeString& string,
-      int32_t start_index, int32_t end_index);
+  // https://tc39.es/ecma402/#sec-createsegmentdataobject
+  V8_WARN_UNUSED_RESULT static MaybeDirectHandle<JSSegmentDataObject>
+  CreateSegmentDataObject(Isolate* isolate,
+                          JSSegmenter::Granularity granularity,
+                          icu::BreakIterator* break_iterator,
+                          DirectHandle<String> input_string,
+                          const icu::UnicodeString& unicode_string,
+                          int32_t start_index, int32_t end_index);
 
   Handle<String> GranularityAsString(Isolate* isolate) const;
 
   // SegmentIterator accessors.
-  DECL_ACCESSORS(icu_break_iterator, Managed<icu::BreakIterator>)
-  DECL_ACCESSORS(unicode_string, Managed<icu::UnicodeString>)
+  inline Tagged<CppGCManaged<IcuBreakIteratorWithText>> icu_iterator_with_text()
+      const;
+  inline void set_icu_iterator_with_text(
+      Tagged<CppGCManaged<IcuBreakIteratorWithText>> value,
+      WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  inline Tagged<String> raw_string() const;
+  inline void set_raw_string(Tagged<String> value,
+                             WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
+
+  struct Flags : BitFieldGroup<Flags, uint32_t> {
+    using BitFieldGroup::BitFieldGroup;
+
+    using GranularityBits = First<JSSegmenter::Granularity, 2>;
+
+    BIT_FIELD_GROUP_ACCESSORS(granularity, GranularityBits)
+  };
+
+  inline Flags flags() const;
+  inline void set_flags(Flags value);
 
   DECL_PRINTER(JSSegments)
+  DECL_VERIFIER(JSSegments)
 
   inline void set_granularity(JSSegmenter::Granularity granularity);
   inline JSSegmenter::Granularity granularity() const;
 
-  // Bit positions in |flags|.
-  DEFINE_TORQUE_GENERATED_JS_SEGMENT_ITERATOR_FLAGS()
+  static_assert(
+      Flags::GranularityBits::is_valid(JSSegmenter::Granularity::GRAPHEME));
+  static_assert(
+      Flags::GranularityBits::is_valid(JSSegmenter::Granularity::WORD));
+  static_assert(
+      Flags::GranularityBits::is_valid(JSSegmenter::Granularity::SENTENCE));
 
-  static_assert(JSSegmenter::Granularity::GRAPHEME <= GranularityBits::kMax);
-  static_assert(JSSegmenter::Granularity::WORD <= GranularityBits::kMax);
-  static_assert(JSSegmenter::Granularity::SENTENCE <= GranularityBits::kMax);
+  static const int kHeaderSize;
 
-  TQ_OBJECT_CONSTRUCTORS(JSSegments)
-};
+ public:
+  TaggedMember<CppGCManaged<IcuBreakIteratorWithText>> icu_iterator_with_text_;
+  TaggedMember<String> raw_string_;
+  SmiBitFieldMember<Flags> flags_;
+} V8_OBJECT_END;
+
+inline constexpr int JSSegments::kHeaderSize = sizeof(JSSegments);
 
 }  // namespace internal
 }  // namespace v8

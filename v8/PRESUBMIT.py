@@ -31,10 +31,14 @@ See http://dev.chromium.org/developers/how-tos/depottools/presubmit-scripts
 for more details about the presubmit API built into gcl.
 """
 
+import ast
 import json
 import os
+import platform
 import re
+import subprocess
 import sys
+import traceback
 
 # This line is 'magic' in that git-cl looks for it to decide whether to
 # use Python3 instead of Python2 when running the code in this file.
@@ -51,10 +55,14 @@ _LICENSE_FILE = (
     r"LICENSE"
 )
 
+# Checked-in generated files. The build compares them against the generator
+# output, so editing them to satisfy a source check does not work; the
+# generator would have to change. See src/gen/README.md.
+_GENERATED_CHECKED_IN_PATHS = (r'src[\\\/]gen[\\\/].+',)
+
 # Regular expression that matches code which should not be run through cpplint.
 _NO_LINT_PATHS = (
-    r'src[\\\/]base[\\\/]export-template\.h',
-)
+    r'src[\\\/]base[\\\/]export-template\.h',) + _GENERATED_CHECKED_IN_PATHS
 
 
 # Regular expression that matches code only used for test binaries
@@ -107,6 +115,10 @@ def _V8PresubmitChecks(input_api, output_api):
       affected_file,
       files_to_check=(r'.+\.m?js'))
 
+  def FilterGeneratedFile(affected_file):
+    return input_api.FilterSourceFile(
+        affected_file, files_to_skip=_GENERATED_CHECKED_IN_PATHS)
+
   results = []
   if not CppLintProcessor().RunOnFiles(
       input_api.AffectedFiles(file_filter=FilterFile, include_deletes=False)):
@@ -120,7 +132,8 @@ def _V8PresubmitChecks(input_api, output_api):
                               include_deletes=False)):
     results.append(output_api.PresubmitError("JS format check failed"))
   if not SourceProcessor().RunOnFiles(
-      input_api.AffectedFiles(include_deletes=False)):
+      input_api.AffectedFiles(
+          file_filter=FilterGeneratedFile, include_deletes=False)):
     results.append(output_api.PresubmitError(
         "Copyright header, trailing whitespaces and two empty lines " \
         "between declarations check failed"))
@@ -130,11 +143,38 @@ def _V8PresubmitChecks(input_api, output_api):
   if not GCMoleProcessor().RunOnFiles(
       input_api.AffectedFiles(include_deletes=False)):
     results.append(output_api.PresubmitError("GCMole pattern check failed"))
-  results.extend(input_api.canned_checks.CheckAuthorizedAuthor(
-      input_api, output_api, bot_allowlist=[
-        'v8-ci-autoroll-builder@chops-service-accounts.iam.gserviceaccount.com'
-      ]))
+  results.extend(
+      input_api.canned_checks.CheckAuthorizedAuthor(
+          input_api,
+          output_api,
+          bot_allowlist=[
+              'chrome-cherry-picker@chops-service-accounts.iam.gserviceaccount.com',
+              'chromium-autoroll@skia-public.iam.gserviceaccount.com',
+              'v8-ci-autoroll-builder@chops-service-accounts.iam.gserviceaccount.com',
+              'v8-ci-test262-import-export@chops-service-accounts.iam.gserviceaccount.com',
+          ]))
   return results
+
+
+def _CheckPythonLiterals(input_api, output_api):
+  """Checks that all .pyl files are valid python literals."""
+  affected_files = [
+      af for af in input_api.AffectedFiles()
+      if af.LocalPath().endswith('.pyl')
+  ]
+
+  results = []
+  for af in affected_files:
+    try:
+      ast.literal_eval('\n'.join(af.NewContents()))
+    except SyntaxError as e:
+      results.append(output_api.PresubmitError(
+          f'Failed to parse python literal {af.LocalPath()}:\n' +
+          traceback.format_exc(0)
+      ))
+
+  return results
+
 
 
 def _CheckUnwantedDependencies(input_api, output_api):
@@ -147,8 +187,15 @@ def _CheckUnwantedDependencies(input_api, output_api):
   # eval-ed and thus doesn't have __file__.
   original_sys_path = sys.path
   try:
-    sys.path = sys.path + [input_api.os_path.join(
-        input_api.PresubmitLocalPath(), 'buildtools', 'checkdeps')]
+    root = input_api.PresubmitLocalPath()
+    if not os.path.exists(os.path.join(root, 'buildtools')):
+      root = os.path.dirname(root)
+      if not os.path.exists(os.path.join(root, 'buildtools')):
+        raise RuntimeError(
+            "Failed to find //buildtools directory for checkdeps")
+    sys.path = sys.path + [
+        input_api.os_path.join(root, 'buildtools', 'checkdeps')
+    ]
     import checkdeps
     from cpp_checker import CppChecker
     from rules import Rule
@@ -255,7 +302,9 @@ def _CheckHeadersHaveIncludeGuards(input_api, output_api):
   file_inclusion_pattern = r'src/.+\.h'
 
   def FilterFile(affected_file):
-    files_to_skip = _EXCLUDED_PATHS + input_api.DEFAULT_FILES_TO_SKIP
+    files_to_skip = (
+        _EXCLUDED_PATHS + input_api.DEFAULT_FILES_TO_SKIP +
+        _GENERATED_CHECKED_IN_PATHS)
     return input_api.FilterSourceFile(
       affected_file,
       files_to_check=(file_inclusion_pattern, ),
@@ -337,6 +386,51 @@ def _CheckNoInlineHeaderIncludesInNormalHeaders(input_api, output_api):
     return []
 
 
+def _CheckInlineHeadersIncludeNonInlineHeadersFirst(input_api, output_api):
+  """Checks that the first include in each inline header ("*-inl.h") is the
+  non-inl counterpart of that header, if that file exists."""
+  file_inclusion_pattern = r'.+-inl\.h'
+  include_error = (
+      'The first include of an -inl.h header should be the non-inl counterpart.'
+  )
+
+  def FilterFile(affected_file):
+    files_to_skip = _EXCLUDED_PATHS + input_api.DEFAULT_FILES_TO_SKIP + (
+        # Exclude macro-assembler-<ARCH>-inl.h headers because they have special
+        # include rules (arch-specific macro assembler headers must be included
+        # via the general macro-assembler.h).
+        r'src[\\\/]codegen[\\\/].*[\\\/]macro-assembler-.*-inl\.h',)
+    return input_api.FilterSourceFile(
+        affected_file,
+        files_to_check=(file_inclusion_pattern,),
+        files_to_skip=files_to_skip)
+
+  to_non_inl = lambda filename: filename[:-len("-inl.h")] + ".h"
+  problems = []
+  for f in input_api.AffectedSourceFiles(FilterFile):
+    if not os.path.isfile(to_non_inl(f.AbsoluteLocalPath())):
+      continue
+    non_inl_header = to_non_inl(f.LocalPath()).replace(os.sep, '/')
+    first_include = None
+    for line in f.NewContents():
+      if line.startswith('#include '):
+        first_include = line
+        break
+    expected_include = f'#include "{non_inl_header}"'
+    if first_include is None:
+      problems.append(f'{f.LocalPath()}: should include {non_inl_header}\n'
+                      '    found no includes in the file.')
+    elif not first_include.startswith(expected_include):
+      problems.append(
+          f'{f.LocalPath()}: should include {non_inl_header} first\n'
+          f'    found: {first_include}')
+
+  if problems:
+    return [output_api.PresubmitError(include_error, problems)]
+  else:
+    return []
+
+
 def _CheckNoProductionCodeUsingTestOnlyFunctions(input_api, output_api):
   """Attempts to prevent use of functions intended only for testing in
   non-testing code. For now this is just a best-effort implementation
@@ -355,7 +449,7 @@ def _CheckNoProductionCodeUsingTestOnlyFunctions(input_api, output_api):
       r'//.*({})'.format(base_function_pattern))
   exclusion_pattern = input_api.re.compile(
       r'::[A-Za-z0-9_]+({})|({})[^;]+'.format(base_function_pattern,
-                                              base_function_pattern) + '\{')
+                                              base_function_pattern) + r'\{')
 
   def FilterFile(affected_file):
     files_to_skip = (_EXCLUDED_PATHS +
@@ -396,25 +490,220 @@ def _RunTestsWithVPythonSpec(input_api, output_api):
     input_api.canned_checks.CheckVPythonSpec(input_api, output_api))
 
 
+def _CheckMultiLineIfBraces(input_api, output_api):
+  """Checks that multi-line if statements are enclosed in curly braces."""
+
+  def FilterFile(affected_file):
+    files_to_skip = _EXCLUDED_PATHS + input_api.DEFAULT_FILES_TO_SKIP
+    return input_api.FilterSourceFile(
+        affected_file,
+        files_to_check=(r'src[\\\/].*\.cc', r'src[\\\/].*\.h',
+                        r'test[\\\/].*\.cc', r'test[\\\/].*\.h'),
+        files_to_skip=files_to_skip)
+
+  # Strip C++ comments, preprocessor directives, and string/char literals,
+  # replacing them with whitespace while preserving newlines so line numbers remain exact.
+  clean_pattern = input_api.re.compile(
+      r'//[^\n]*|/\*[\s\S]*?\*\/|#(?:[^\n\\]|\\[\s\S])*|"(?:\\.|[^"\\])*"|(?<!\d)\'(?:\\.|[^\'\\])*\''
+  )
+
+  def replacer(m):
+    return ''.join('\n' if c == '\n' else ' ' for c in m.group(0))
+
+  errors = []
+  for f in input_api.AffectedSourceFiles(FilterFile):
+    original_text = '\n'.join(f.NewContents())
+    changed_line_nums = set(line_num for line_num, _ in f.ChangedContents())
+
+    text = clean_pattern.sub(replacer, original_text)
+
+    # Find all occurrences of 'if'
+    for match in input_api.re.finditer(r'(?<!#)\bif\s*(?:constexpr\s*)?\(',
+                                       text):
+      start_idx = match.end() - 1
+      # Find matching closing ')'
+      paren_count = 0
+      end_idx = -1
+      for i in range(start_idx, len(text)):
+        if text[i] == '(':
+          paren_count += 1
+        elif text[i] == ')':
+          paren_count -= 1
+          if paren_count == 0:
+            end_idx = i
+            break
+
+      if end_idx != -1:
+        # Match intervening whitespace and C++20 attributes (like [[likely]])
+        after_paren = text[end_idx + 1:]
+        gap_match = input_api.re.match(r'^(?:[ \t\r\n]|\[\[[\s\S]*?\]\])*',
+                                       after_paren)
+        j = end_idx + 1 + gap_match.end()
+        newline_seen = '\n' in gap_match.group(0)
+
+        # It is a multi-line if statement if either the condition spanned multiple lines
+        # or there was a newline before the body.
+        cond_text = text[match.start():end_idx + 1]
+        is_multiline = ('\n' in cond_text) or newline_seen
+
+        if is_multiline and j < len(text) and text[j] != '{':
+          # Compute line numbers
+          start_line = text.count('\n', 0, match.start()) + 1
+          body_line = text.count('\n', 0, j) + 1
+          # Find the statement text on body_line
+          line_end = original_text.find('\n', j)
+          if line_end == -1:
+            line_end = len(original_text)
+          stmt_text = original_text[j:line_end].strip()
+
+          if start_line in changed_line_nums or body_line in changed_line_nums:
+            errors.append(f'  {f.LocalPath()}:{body_line} {stmt_text}')
+
+  if errors:
+    return [
+        output_api.PresubmitPromptOrNotify(
+            'V8 C++ style requires curly braces around the body of multi-line if statements.\n'
+            'Please add braces around the following statements:', errors)
+    ]
+  return []
+
+
+def _CheckClusterfuzzTest262Fallbacks(input_api, output_api):
+  """Checks that all test262 harness files are listed in BUILD.gn."""
+  affected_files = [f.LocalPath() for f in input_api.AffectedFiles()]
+  if {"DEPS", "BUILD.gn"}.isdisjoint(affected_files):
+    return []
+
+  import shutil
+  import subprocess
+  import os
+
+  presubmit_out_dir = input_api.os_path.join(input_api.PresubmitLocalPath(),
+                                             "out", "presubmit_clusterfuzz_gn")
+  harness_dir = input_api.os_path.join(input_api.PresubmitLocalPath(), "test",
+                                       "test262", "data", "harness")
+
+  if not input_api.os_path.exists(harness_dir):
+    return []
+
+  if sys.platform == "win32":
+    gn_bin = "gn.exe"
+    gn_dir = "win"
+  elif sys.platform == "darwin":
+    gn_bin = "gn"
+    gn_dir = "mac"
+  else:
+    gn_bin = "gn"
+    gn_dir = "linux64"
+
+  gn_exe = input_api.os_path.join(input_api.PresubmitLocalPath(), "buildtools",
+                                  gn_dir, gn_bin)
+
+  try:
+    if input_api.os_path.exists(presubmit_out_dir):
+      shutil.rmtree(presubmit_out_dir)
+
+    # Need to run GN gen to populate args for gn desc
+    subprocess.check_call([gn_exe, "gen", presubmit_out_dir],
+                          cwd=input_api.PresubmitLocalPath(),
+                          stdout=subprocess.DEVNULL,
+                          stderr=subprocess.DEVNULL)
+
+    # Run GN desc and pull the statically evaluated sources list
+    output = subprocess.check_output([
+        gn_exe, "desc", presubmit_out_dir,
+        "//:v8_clusterfuzz_test262_fallbacks", "sources"
+    ],
+                                     cwd=input_api.PresubmitLocalPath(),
+                                     text=True)
+
+    gn_files = set()
+    for line in output.splitlines():
+      line = line.strip()
+      if line.startswith("//test/test262/data/harness/"):
+        gn_files.add(line[len("//test/test262/data/harness/"):])
+
+  except subprocess.CalledProcessError as e:
+    return [output_api.PresubmitError(f"Failed to run gn desc: {e}")]
+  finally:
+    if input_api.os_path.exists(presubmit_out_dir):
+      shutil.rmtree(presubmit_out_dir)
+
+  # List the actual JS files in the directory recursively.
+  actual_files = set()
+  for root, _, files in os.walk(harness_dir):
+    for filename in files:
+      if filename.endswith(".js"):
+        rel_path = input_api.os_path.relpath(
+            input_api.os_path.join(root, filename), harness_dir)
+        actual_files.add(rel_path.replace(input_api.os_path.sep, "/"))
+
+  if gn_files != actual_files:
+    missing_in_gn = actual_files - gn_files
+    stale_in_gn = gn_files - actual_files
+    error_msg = [
+        "v8_clusterfuzz_test262_fallbacks in BUILD.gn is out of sync with test/test262/data/harness."
+    ]
+    if missing_in_gn:
+      error_msg.append("Missing in BUILD.gn: " + ", ".join(missing_in_gn))
+    if stale_in_gn:
+      error_msg.append("Stale in BUILD.gn: " + ", ".join(stale_in_gn))
+    return [output_api.PresubmitError("\n".join(error_msg))]
+
+  return []
+
+
+
+def _CheckDepsGitignored(input_api, output_api):
+  """Checks that all dependencies in DEPS are gitignored."""
+  affected_files = [f.LocalPath() for f in input_api.AffectedFiles()]
+  if {"DEPS", ".gitignore"}.isdisjoint(affected_files):
+    return []
+
+  script_path = input_api.os_path.join(input_api.PresubmitLocalPath(), "tools",
+                                       "dev", "verify_deps_ignored.py")
+
+  return input_api.RunTests([
+      input_api.Command(
+          name="verify_deps_ignored",
+          cmd=[input_api.python3_executable, script_path],
+          kwargs={"cwd": input_api.PresubmitLocalPath()},
+          message=output_api.PresubmitError)
+  ])
+
+
 def _CommonChecks(input_api, output_api):
   """Checks common to both upload and commit."""
   # TODO(machenbach): Replace some of those checks, e.g. owners and copyright,
   # with the canned PanProjectChecks. Need to make sure that the checks all
   # pass on all existing files.
   checks = [
-    input_api.canned_checks.CheckOwnersFormat,
-    input_api.canned_checks.CheckOwners,
-    _CheckCommitMessageBugEntry,
-    input_api.canned_checks.CheckPatchFormatted,
-    _CheckGenderNeutralInLicenses,
-    _V8PresubmitChecks,
-    _CheckUnwantedDependencies,
-    _CheckNoProductionCodeUsingTestOnlyFunctions,
-    _CheckHeadersHaveIncludeGuards,
-    _CheckNoInlineHeaderIncludesInNormalHeaders,
-    _CheckJSONFiles,
-    _CheckNoexceptAnnotations,
-    _RunTestsWithVPythonSpec,
+      _CheckClusterfuzzTest262Fallbacks,
+      input_api.canned_checks.CheckOwnersFormat,
+      input_api.canned_checks.CheckOwners,
+      _CheckCommitMessageBugEntry,
+      _CheckNoLocalPathsInDescription,
+      _CheckDescriptionFooters,
+      _CheckRegressionTest,
+      _CheckLandOnChromiumBranch,
+      input_api.canned_checks.CheckPatchFormatted,
+      _CheckGenderNeutralInLicenses,
+      _V8PresubmitChecks,
+      _CheckUnwantedDependencies,
+      _CheckNoProductionCodeUsingTestOnlyFunctions,
+      _CheckHeadersHaveIncludeGuards,
+      _CheckNoInlineHeaderIncludesInNormalHeaders,
+      _CheckInlineHeadersIncludeNonInlineHeadersFirst,
+      _CheckJSONFiles,
+      _CheckMetagenHeaders,
+      _CheckNoexceptAnnotations,
+      _CheckBannedCpp,
+      _CheckPublicApiHeaders,
+      _RunTestsWithVPythonSpec,
+      _CheckPythonLiterals,
+      _CheckMultiLineIfBraces,
+      _CheckDepsGitignored,
+      _CheckMarkdown,
   ]
 
   return sum([check(input_api, output_api) for check in checks], [])
@@ -432,6 +721,8 @@ def _SkipTreeCheck(input_api, output_api):
 
 def _CheckCommitMessageBugEntry(input_api, output_api):
   """Check that bug entries are well-formed in commit message."""
+  if not _HasUpstreamDescription(input_api):
+    return []
   bogus_bug_msg = (
       'Bogus BUG entry: {}. Please specify prefix:number for v8 or chromium '
       '(e.g. chromium:12345) or b/number for buganizer.')
@@ -442,10 +733,7 @@ def _CheckCommitMessageBugEntry(input_api, output_api):
       continue
     if ':' not in bug and not bug.startswith('b/'):
       try:
-        if int(bug) > 10000000:
-          results.append(
-            'Buganizer entry requires issue tracker prefix b/{}'.format(bug))
-        else:
+        if int(bug) < 10000000:
           if int(bug) > 200000:
             prefix_guess = 'chromium'
           else:
@@ -458,6 +746,46 @@ def _CheckCommitMessageBugEntry(input_api, output_api):
     elif not re.match(r'\w+[:\/]\d+', bug):
       results.append(bogus_bug_msg.format(bug))
   return [output_api.PresubmitError(r) for r in results]
+
+
+def _CheckLandOnChromiumBranch(input_api, output_api):
+  """Check that CLs landing on chromium branches have a reason."""
+  if not input_api.gerrit:
+    return []
+
+  try:
+    if input_api.change.issue and hasattr(input_api.gerrit, 'GetDestRef'):
+      target_branch = input_api.gerrit.GetDestRef(input_api.change.issue)
+    else:
+      target_branch = input_api.gerrit.branch
+  except Exception:
+    return []
+
+  if not target_branch:
+    return []
+  if not target_branch.startswith('refs/'):
+    target_branch = 'refs/heads/%s' % target_branch
+  if not target_branch.startswith('refs/heads/chromium/'):
+    return []
+  if '_' in target_branch:  # Allow merges to mini branches.
+    return []
+
+  description = input_api.change.FullDescriptionText()
+  if input_api.re.search(r'^LAND_ON_CHROMIUM_BRANCH=.+', description,
+                         input_api.re.MULTILINE):
+    return []
+
+  return [
+      output_api.PresubmitError(
+          'You are about to land a commit on a chromium branch. Note this is '
+          'valid for cherry-picks on Canary, Dev or Mini branches only. If your '
+          'cherry-pick targets such a branch, you can bypass this warning by '
+          'adding LAND_ON_CHROMIUM_BRANCH=<reason> to the CL description. If your '
+          'commit is intended for a release channel (Beta, Stable or Extended), '
+          'please use the appropriate branch named refs/branch-heads/XX.X. The '
+          'branch number follows the Chromium milestone name divided by 10, '
+          'e.g. M123 -> refs/branch-heads/12.3')
+  ]
 
 
 def _CheckJSONFiles(input_api, output_api):
@@ -538,15 +866,585 @@ def _CheckNoexceptAnnotations(input_api, output_api):
   return []
 
 
+def _CheckMetagenHeaders(input_api, output_api):
+  """Check that src/objects/all-objects.h includes every heap object header.
+
+  tools/metagen/metagen.py harvests the InstanceType enum from the class
+  declarations included by all-objects.h. A header with a V8_OBJECT /
+  V8_IT_ class that all-objects.h does not include is skipped without
+  error and its class gets no instance type, so check at upload time.
+
+  The check requires direct inclusion because BUILD.gn declares only
+  all-objects.h as an input of the harvest. A header included through an
+  intermediate header is still harvested, but the intermediate is in
+  neither the action's inputs nor the depfile, so an incremental build
+  keeps a stale instance-types.h.
+
+  Includes are read textually, not by preprocessing, and conditional ones
+  count regardless of their guard: the harvest runs per build
+  configuration, so a header included only under V8_INTL_SUPPORT is
+  harvested in the configurations that enable it.
+  """
+  import subprocess
+  v8_root = input_api.PresubmitLocalPath()
+  join = input_api.os_path.join
+
+  # A header takes part in the harvest if it declares a V8_OBJECT /
+  # V8_ABSTRACT_OBJECT class or carries a `V8_IT_<name>` marker, which is
+  # a member of the class body. Leading whitespace is allowed for both;
+  # requiring the marker at the start of its line is what keeps a
+  # comment that mentions a marker out. object-macros.h matches
+  # structurally because it defines the markers themselves; exclude it.
+  marker_regex = (
+      r"^[[:space:]]*V8_(ABSTRACT_)?OBJECT|^[[:space:]]*V8_IT_[A-Z_]+")
+  try:
+    res = subprocess.run([
+        "git", "grep", "-lE", marker_regex, "--", "src/**/*.h",
+        ":!src/objects/object-macros.h"
+    ],
+                         cwd=v8_root,
+                         capture_output=True,
+                         text=True,
+                         check=True)
+  except (subprocess.CalledProcessError, FileNotFoundError) as e:
+    return [
+        output_api.PresubmitNotifyResult(
+            f"_CheckMetagenHeaders: skipping (git grep failed: {e})")
+    ]
+  live = set(res.stdout.split())
+
+  aggregate = join("src", "objects", "all-objects.h")
+  try:
+    with open(join(v8_root, aggregate)) as f:
+      body = f.read()
+  except OSError as e:
+    return [
+        output_api.PresubmitNotifyResult(
+            f"_CheckMetagenHeaders: skipping ({aggregate}: {e})")
+    ]
+  included = set(re.findall(r'^\s*#\s*include\s+"([^"]+)"', body, re.MULTILINE))
+
+  missing = sorted(live - included)
+  if not missing:
+    return []
+  return [
+      output_api.PresubmitError("\n".join([
+          f"{aggregate} no longer includes every heap object header.",
+          "These headers carry a V8_OBJECT/V8_IT_ marker but are not "
+          "included there, so metagen either misses their classes or "
+          "harvests them through a header the build does not depend on:",
+      ] + [f"    {h}" for h in missing] + [
+          f"Add them to {aggregate}.",
+      ]))
+  ]
+
+
+def _CheckBannedCpp(input_api, output_api):
+  # Each entry is (regex_pattern, message, optional_files_to_skip_tuple).
+  bad_cpp = [
+      (
+          r'\bstd::bit_cast\b',
+          'Use base::bit_cast instead, which has additional checks',
+          (
+              # The implementation of base::bit_cast uses std::bit_cast.
+              r'src[\\\/]base[\\\/]macros\.h',
+              # src/base/numerics is a dependency-free header-only library,
+              # hence uses std::bit_cast directly.
+              r'src[\\\/]base[\\\/]numerics[\\\/].*',
+          ),
+      ),
+      (
+          r'\bstd::vector<\s*(?:v8::)?Local<',
+          'Use v8::LocalVector<T> instead of std::vector<v8::Local<T>> for GC '
+          'stack-scanning safety.',
+          (),
+      ),
+      (
+          r'\bfor\s*\(\s*(?:uint(?:8|16|32|64)_t|size_t|unsigned)\s+(\w+)\s*='
+          r'[^;]+;\s*\1\s*>=\s*0\s*;',
+          'Unsigned loop index with ">= 0" termination condition is an '
+          'infinite loop; use "for (uint32_t i = n; i-- > 0;)".',
+          (),
+      ),
+      (
+          r'\b__u?int128(?:_t)?\b',
+          'Use absl::int128 or absl::uint128 instead of compiler-specific '
+          '__int128 types.',
+          (
+              r'src[\\\/]bigint[\\\/].*',
+              r'src[\\\/]base[\\\/].*',
+              r'src[\\\/].*[\\\/](?:arm|arm64|ia32|loong64|mips64|ppc|riscv|s390|x64)[\\\/].*',
+          ),
+      ),
+  ]
+
+  compiled_bad_cpp = [(
+      pattern,
+      input_api.re.compile(pattern),
+      message,
+      [input_api.re.compile(skip) for skip in skips],
+  ) for pattern, message, skips in bad_cpp]
+
+  def file_filter(x):
+    return input_api.FilterSourceFile(
+        x,
+        files_to_skip=_EXCLUDED_PATHS,
+        files_to_check=[r'.*\.h$', r'.*\.cc$'])
+
+  errors = []
+  for f in input_api.AffectedSourceFiles(file_filter):
+    local_path = f.LocalPath()
+    for line_number, line in f.ChangedContents():
+      # Strip trailing single-line comments before matching.
+      code_line = line.split('//', 1)[0]
+      if not code_line.strip():
+        continue
+      for raw_pattern, compiled_regex, message, skip_regexes in compiled_bad_cpp:
+        if any(skip_re.search(local_path) for skip_re in skip_regexes):
+          continue
+        if not compiled_regex.search(code_line):
+          continue
+
+        errors.append(
+            output_api.PresubmitError('Banned pattern ({}):\n  {}:{} {}'.format(
+                raw_pattern, local_path, line_number, message)))
+  return errors
+
+
+def _CheckPublicApiHeaders(input_api, output_api):
+  """Checks public API headers under include/ for banned patterns."""
+  bad_public_api = [
+      (
+          r'^\s*#\s*(?:ifdef\s+DEBUG\b|if\s+defined\s*\(\s*DEBUG\s*\))',
+          'Use #ifdef V8_ENABLE_CHECKS instead of #ifdef DEBUG in public API '
+          'headers.',
+      ),
+  ]
+
+  compiled_checks = [(pattern, input_api.re.compile(pattern), message)
+                     for pattern, message in bad_public_api]
+
+  def file_filter(x):
+    return input_api.FilterSourceFile(
+        x,
+        files_to_skip=_EXCLUDED_PATHS + (r'^include[\\\/]v8config\.h$',),
+        files_to_check=[r'^include[\\\/].*\.h$'])
+
+  errors = []
+  for f in input_api.AffectedSourceFiles(file_filter):
+    local_path = f.LocalPath()
+    for line_number, line in f.ChangedContents():
+      code_line = line.split('//', 1)[0]
+      if not code_line.strip():
+        continue
+      for raw_pattern, compiled_regex, message in compiled_checks:
+        if compiled_regex.search(code_line):
+          errors.append(
+              output_api.PresubmitError(
+                  'Banned public API header pattern ({}):\n  {}:{} {}'.format(
+                      raw_pattern, local_path, line_number, message)))
+  return errors
+
+
+def _CheckMarkdown(input_api, output_api):
+  # Check only modified markdown files
+  affected_md_files = [
+      f.LocalPath()
+      for f in input_api.AffectedFiles(include_deletes=False)
+      if f.LocalPath().endswith('.md')
+  ]
+  if not affected_md_files:
+    return []
+
+  script_path = input_api.os_path.join(input_api.PresubmitLocalPath(), 'tools',
+                                       'dev', 'markdown_checker.py')
+  cmd = [input_api.python3_executable, script_path] + affected_md_files
+
+  return input_api.RunTests([
+      input_api.Command(
+          name='CheckMarkdown',
+          cmd=cmd,
+          kwargs={'cwd': input_api.PresubmitLocalPath()},
+          message=output_api.PresubmitError)
+  ])
+
+
+_AI_AGENT_ENV_VARS = (
+    'AI_AGENT',
+    'ANTIGRAVITY_AGENT',
+    'CLAUDECODE',
+    'CODEX_SANDBOX',
+    'COPILOT_CLI',
+    'CURSOR_AGENT',
+    'GEMINI_CLI',
+)
+
+_MAX_COMMIT_LINE_LENGTH = 72
+
+_PRIORITY_PREFIX_RE = re.compile(r'^\[P([0-4])\]\s*')
+
+_COMMIT_FOOTER_RE = re.compile(
+    r'^(?:[A-Z][A-Za-z0-9]*-[A-Za-z0-9-]+:|(?:Bug|Fixed|Test):|[A-Z][A-Z0-9_]*=\S+$)'
+)
+
+_LOCAL_PATH_RE = re.compile(
+    r'file://\S+'
+    r'|/usr/local/(?:google/home|btrfs_mount)/\S+'
+    r'|/google/(?:src|cog)/\S+'
+    r'|(?<![\w/])(?:/home/[\w-]+|/Users/[\w-]+|/tmp|~)/\S+'
+    r'|\.gemini/\S+'
+    r'|\bworktrees/task-\S+')
+
+
+def _IsAiAgent(input_api):
+  """Returns True if the presubmit is running in an AI agent environment."""
+  if any(
+      str(input_api.environ.get(var, '')).lower() not in ('', '0', 'false')
+      for var in _AI_AGENT_ENV_VARS):
+    return True
+  return False
+
+
+def _HasUpstreamDescription(input_api):
+  """Returns True when FullDescriptionText() is the upstream CL description.
+
+  On initial human uploads (`not input_api.change.issue`), `git cl upload` runs
+  presubmit hooks on the raw local commit log before opening the interactive
+  editor for the user to write the CL description.
+  """
+  return bool(
+      input_api.change.issue or getattr(input_api, 'is_committing', False) or
+      _IsAiAgent(input_api))
+
+
+def _IsPriorityPrefixEnabled(input_api):
+  """Returns True if the CL priority prefix workflow is enabled."""
+  env_val = str(input_api.environ.get('V8_PRESUBMIT_PRIORITY_PREFIX',
+                                      '')).lower()
+  if env_val in ('0', 'false'):
+    return False
+  if env_val in ('1', 'true'):
+    return True
+  cfg = subprocess.run(
+      ['git', 'config', '--bool', 'v8.presubmit-priority-prefix'],
+      cwd=input_api.PresubmitLocalPath(),
+      capture_output=True,
+      text=True,
+      check=False)
+  return cfg.returncode == 0 and cfg.stdout.strip().lower() == 'true'
+
+
+def _CheckPriorityPrefix(input_api, output_api):
+  """Requires a [P0]-[P4] title prefix on upload and strips it before commit."""
+  if getattr(input_api, 'no_diffs',
+             False) or not _HasUpstreamDescription(input_api):
+    return []
+  desc = input_api.change.FullDescriptionText() or ''
+  lines = [
+      line.strip()
+      for line in desc.splitlines()
+      if line.strip() and not line.lstrip().startswith('#')
+  ]
+  if not lines:
+    return []
+  title = lines[0]
+  m = _PRIORITY_PREFIX_RE.match(title)
+
+  if getattr(input_api, 'is_committing', False):
+    if getattr(input_api, 'dry_run', False):
+      return []
+    if m:
+      return [
+          output_api.PresubmitError(
+              f'Commit title still has priority prefix "[P{m.group(1)}]"; '
+              f'strip the priority prefix before merging: "{title}"')
+      ]
+    return []
+
+  if not _IsPriorityPrefixEnabled(input_api):
+    return []
+
+  if not m:
+    return [
+        output_api.PresubmitError(
+            'Commit title must start with a priority prefix "[P0]"-"[P4]" on '
+            f'upload (e.g. "[P1][component] Title"): "{title}"')
+    ]
+
+  rest = title[m.end():]
+  if not rest or _PRIORITY_PREFIX_RE.match(rest):
+    return [
+        output_api.PresubmitError(
+            'Commit title must include a subject after the "[P0]"-"[P4]" '
+            f'priority prefix: "{title}"')
+    ]
+
+  return []
+
+
+def _CheckNoLocalPathsInDescription(input_api, output_api):
+  """Rejects local workstation paths in the CL description."""
+  if not _HasUpstreamDescription(input_api):
+    return []
+  desc = input_api.change.FullDescriptionText() or ''
+  hits = [
+      f'  Line {i}: "{m.group(0)}"'
+      for i, line in enumerate(desc.splitlines(), start=1)
+      if not line.lstrip().startswith('#')
+      for m in _LOCAL_PATH_RE.finditer(line)
+  ]
+  if not hits:
+    return []
+  return [
+      output_api.PresubmitError(
+          'CL description contains local machine/workspace paths '
+          '(use repo-relative paths instead):\n' + '\n'.join(hits))
+  ]
+
+
+def _CheckDescriptionFooters(input_api, output_api):
+  """Checks footer placement and single Change-Id for all CLs."""
+  if not _HasUpstreamDescription(input_api):
+    return []
+  desc = input_api.change.FullDescriptionText() or ''
+  lines = [
+      l.strip()
+      for l in desc.splitlines()
+      if l.strip() and not l.lstrip().startswith('#')
+  ]
+  errors = []
+  in_tags = False
+  for line in lines[1:]:
+    if input_api.re.match(r'^(?:TAG|CONV)=\S+$', line):
+      in_tags = True
+    elif in_tags and not _COMMIT_FOOTER_RE.match(line):
+      errors.append(
+          'TAG= and CONV= lines must be placed at the bottom of the commit '
+          'description.')
+      break
+  if sum(1 for l in lines if l.startswith('Change-Id:')) > 1:
+    errors.append('Multiple Change-Id lines detected in commit description.')
+  return [output_api.PresubmitError(e) for e in errors]
+
+
+def _CheckAgentDescription(input_api, output_api):
+  """Validates commit message formatting and footers for AI agent CLs."""
+  desc = input_api.change.FullDescriptionText() or ''
+  lines = [(i, line)
+           for i, line in enumerate(desc.splitlines(), start=1)
+           if not line.lstrip().startswith('#')]
+  while lines and not lines[0][1].strip():
+    lines.pop(0)
+  if not lines:
+    return [output_api.PresubmitError('Commit description is empty.')]
+
+  errors = []
+  _, title = lines[0]
+  if _IsPriorityPrefixEnabled(input_api):
+    title = _PRIORITY_PREFIX_RE.sub('', title, count=1)
+  if not input_api.re.match(r'^(?:\[[^\[\]]+\])+\s+\S', title):
+    errors.append(
+        f'Commit title must follow "[component] Title" format: "{title}"')
+  if len(title) > _MAX_COMMIT_LINE_LENGTH:
+    errors.append(
+        f'Commit title is {len(title)} chars (max {_MAX_COMMIT_LINE_LENGTH}): '
+        f'"{title}"')
+  if len(lines) > 1 and lines[1][1].strip():
+    errors.append('Second line of commit description must be blank.')
+
+  long_lines = []
+  for line_num, line in lines[1:]:
+    stripped = line.strip()
+    if not stripped:
+      continue
+
+    is_url = any(u in line for u in ('://', 'go/', 'goto.google.com/'))
+    if (len(line) > _MAX_COMMIT_LINE_LENGTH and not is_url and
+        not _COMMIT_FOOTER_RE.match(stripped) and ' ' in stripped):
+      long_lines.append(
+          f'  Line {line_num} ({len(line)} chars): {line[:45]}...')
+
+    m_bug = input_api.re.match(r'^(bug|fixed)\s*([:=])\s*(.*)$', stripped,
+                               input_api.re.IGNORECASE)
+    if m_bug:
+      tag, sep, val = m_bug.groups()
+      if tag not in ('Bug', 'Fixed') or sep != ':':
+        errors.append(
+            f'Line {line_num}: Use "Bug:" or "Fixed:" instead of "{tag}{sep}".')
+      bugs = [b.strip() for b in val.split(',')]
+      if not val or not all(
+          input_api.re.match(r'^(?:b:)?\d+$', b) for b in bugs):
+        errors.append(
+            f'Line {line_num}: Invalid bug ID(s) in "{stripped}" (use '
+            '"<number>" for public bugs or "b:<number>" for Buganizer).')
+      elif len(bugs) > 5:
+        errors.append(
+            f'Line {line_num}: Too many bug IDs on a single "{tag}:" line '
+            f'({len(bugs)} found, max 5).')
+
+  if long_lines:
+    errors.append(
+        f'Commit description has lines exceeding {_MAX_COMMIT_LINE_LENGTH} '
+        'chars:\n' + '\n'.join(long_lines))
+
+  return [output_api.PresubmitError(e) for e in errors]
+
+
+def _CheckRegressionTest(input_api, output_api):
+  """Requires a test/ modification when Fixed: is present and src/ is modified."""
+  if not _HasUpstreamDescription(input_api):
+    return []
+  desc = input_api.change.FullDescriptionText() or ''
+  if not input_api.re.search(r'^Fixed:[ \t]*\S+', desc, input_api.re.MULTILINE):
+    return []
+  if input_api.re.search(r'^No-Regression-Test:[ \t]*\S+', desc,
+                         input_api.re.MULTILINE):
+    return []
+
+  paths = [
+      f.UnixLocalPath() for f in input_api.AffectedFiles(include_deletes=False)
+  ]
+  if any(p.startswith('src/')
+         for p in paths) and not any(p.startswith('test/') for p in paths):
+    return [
+        output_api.PresubmitError(
+            'CL has a "Fixed:" footer and modifies files under src/ without '
+            'modifying any files under test/. Every bug fix in V8 must '
+            'include a regression test, or include a '
+            '"No-Regression-Test: <reason>" footer in the CL description.')
+    ]
+  return []
+
+
+def _CheckAgentNoDuplicateCL(input_api, output_api):
+  """When creating a new CL, checks that no duplicate CL is already open."""
+  if input_api.change.issue or (
+      input_api.environ.get('PRESUBMIT_ALLOW_DUPLICATE_CL') == '1'):
+    return []
+
+  desc = (input_api.change.FullDescriptionText() or '').strip()
+  if not desc:
+    return []
+
+  local_title = desc.splitlines()[0].strip()
+  change_ids = input_api.re.findall(r'^Change-Id:\s*(I[0-9a-fA-F]+)', desc,
+                                    input_api.re.MULTILINE)
+  local_change_id = change_ids[-1] if change_ids else None
+  local_files = {
+      f.UnixLocalPath(): len(f.ChangedContents())
+      for f in input_api.AffectedFiles()
+  }
+
+  try:
+    import gerrit_util
+    open_changes = gerrit_util.QueryChanges(
+        'chromium-review.googlesource.com',
+        [('owner', 'self'), ('status', 'open'), ('project', 'v8/v8')],
+        o_params=['CURRENT_REVISION', 'CURRENT_FILES'],
+        limit=50,
+    )
+  except Exception:
+    return []
+
+  duplicates = []
+  for ch in open_changes or []:
+    cl_num = ch.get('_number')
+    if not cl_num:
+      continue
+    remote_subject = (ch.get('subject') or '').strip()
+    rev_info = (ch.get('revisions') or
+                {}).get(ch.get('current_revision', ''), {})
+    remote_files = {
+        path: int(info.get('lines_inserted', 0))
+        for path, info in (rev_info.get('files') or {}).items()
+        if path != '/COMMIT_MSG'
+    }
+
+    reasons = []
+    if local_change_id and ch.get('change_id') == local_change_id:
+      reasons.append(f'same Change-Id ({local_change_id})')
+    norm_remote = _PRIORITY_PREFIX_RE.sub('', remote_subject, count=1).lower()
+    norm_local = _PRIORITY_PREFIX_RE.sub('', local_title, count=1).lower()
+    if norm_local and norm_remote == norm_local:
+      reasons.append(f'identical title ("{remote_subject}")')
+    if local_files and remote_files == local_files:
+      reasons.append('identical diff footprint')
+    if reasons:
+      duplicates.append(
+          f'  - https://crrev.com/c/{cl_num} ("{remote_subject}"): ' +
+          ', '.join(reasons))
+
+  if not duplicates:
+    return []
+  return [
+      output_api.PresubmitError(
+          'Potential duplicate CL(s) already open on Gerrit:\n' +
+          '\n'.join(duplicates) +
+          '\nAssociate this branch via `git cl issue <cl_number>`, or set '
+          '`PRESUBMIT_ALLOW_DUPLICATE_CL=1` if intentional.')
+  ]
+
+
+def _CheckReleaseMjsunit(input_api, output_api):
+  """Runs opt-in gm.py release mjsunit check."""
+  if input_api.environ.get('UPLOAD_CL_NOCHECK') == '1':
+    return []
+  root = input_api.PresubmitLocalPath()
+  if input_api.environ.get('V8_PRESUBMIT_RELEASE_MJSUNIT') != '1':
+    cfg = subprocess.run(
+        ['git', 'config', '--bool', 'v8.presubmit-release-mjsunit'],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        check=False)
+    if cfg.returncode != 0 or cfg.stdout.strip().lower() != 'true':
+      return []
+
+  code_prefixes = ('src/', 'include/', 'test/', 'gni/')
+  build_files = ('BUILD.gn', 'BUILD.bazel', 'DEPS')
+  if not any(
+      p.startswith(code_prefixes) or p in build_files
+      for p in input_api.UnixLocalPaths()):
+    return []
+
+  gm_py = input_api.os_path.join(root, 'tools', 'dev', 'gm.py')
+  if not input_api.os_path.isfile(gm_py):
+    return []
+
+  v8_arch = {
+      'aarch64': 'arm64',
+      'arm64': 'arm64',
+      'i686': 'ia32',
+      'i386': 'ia32',
+  }.get(platform.machine(), 'x64')
+  return input_api.RunTests([
+      input_api.Command(
+          name=f'gm.py {v8_arch}.release mjsunit',
+          cmd=[
+              input_api.python3_executable, gm_py, 'quiet',
+              f'{v8_arch}.release', 'mjsunit'
+          ],
+          kwargs={'cwd': root},
+          message=output_api.PresubmitError)
+  ])
+
+
 def CheckChangeOnUpload(input_api, output_api):
   results = []
   results.extend(_CommonChecks(input_api, output_api))
+  results.extend(_CheckPriorityPrefix(input_api, output_api))
+  if _IsAiAgent(input_api):
+    results.extend(_CheckAgentDescription(input_api, output_api))
+    results.extend(_CheckAgentNoDuplicateCL(input_api, output_api))
+  if not any(r.fatal for r in results):
+    results.extend(_CheckReleaseMjsunit(input_api, output_api))
   return results
 
 
 def CheckChangeOnCommit(input_api, output_api):
   results = []
   results.extend(_CommonChecks(input_api, output_api))
+  results.extend(_CheckPriorityPrefix(input_api, output_api))
   results.extend(input_api.canned_checks.CheckChangeHasDescription(
       input_api, output_api))
   if not _SkipTreeCheck(input_api, output_api):

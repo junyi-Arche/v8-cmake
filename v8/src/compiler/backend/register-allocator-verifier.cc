@@ -4,13 +4,12 @@
 
 #include "src/compiler/backend/register-allocator-verifier.h"
 
+#include <optional>
+
 #include "src/compiler/backend/instruction.h"
-#include "src/utils/bit-vector.h"
 #include "src/utils/ostreams.h"
 
-namespace v8 {
-namespace internal {
-namespace compiler {
+namespace v8::internal::compiler {
 
 namespace {
 
@@ -54,21 +53,22 @@ int GetValue(const ImmediateOperand* imm) {
     case ImmediateOperand::INDEXED_IMM:
       return imm->indexed_value();
   }
+  UNREACHABLE();
 }
 
 }  // namespace
 
 RegisterAllocatorVerifier::RegisterAllocatorVerifier(
-    Zone* zone, const RegisterConfiguration* config,
-    const InstructionSequence* sequence, const Frame* frame)
+    Zone* zone, const InstructionSequence* sequence, const Frame* frame)
     : zone_(zone),
-      config_(config),
       sequence_(sequence),
       constraints_(zone),
       assessments_(zone),
       outstanding_assessments_(zone),
       spill_slot_delta_(frame->GetTotalFrameSlotCount() -
-                        frame->GetSpillSlotCount()) {
+                        frame->GetSpillSlotCount()),
+      pending_worklist_(zone),
+      pending_seen_epoch_(sequence->InstructionBlockCount(), 0, zone) {
   constraints_.reserve(sequence->instructions().size());
   // TODO(dcarney): model unique constraints.
   // Construct OperandConstraints for all InstructionOperands, eliminating
@@ -78,7 +78,7 @@ RegisterAllocatorVerifier::RegisterAllocatorVerifier(
     VerifyEmptyGaps(instr);
     const size_t operand_count = OperandCount(instr);
     OperandConstraint* op_constraints =
-        zone->NewArray<OperandConstraint>(operand_count);
+        zone->AllocateArray<OperandConstraint>(operand_count);
     size_t count = 0;
     for (size_t i = 0; i < instr->InputCount(); ++i, ++count) {
       BuildConstraint(instr->InputAt(i), &op_constraints[count]);
@@ -275,6 +275,7 @@ void RegisterAllocatorVerifier::CheckConstraint(
       CHECK_WITH_MSG(false, caller_info_);
       return;
   }
+  UNREACHABLE();
 }
 
 void BlockAssessments::PerformMoves(const Instruction* instruction) {
@@ -352,8 +353,10 @@ void BlockAssessments::CheckReferenceMap(const ReferenceMap* reference_map) {
   }
 }
 
-bool BlockAssessments::IsStaleReferenceStackSlot(InstructionOperand op) {
+bool BlockAssessments::IsStaleReferenceStackSlot(InstructionOperand op,
+                                                 std::optional<int> vreg) {
   if (!op.IsStackSlot()) return false;
+  if (vreg.has_value() && !sequence_->IsReference(*vreg)) return false;
 
   const LocationOperand* loc_op = LocationOperand::cast(&op);
   return CanBeTaggedOrCompressedPointer(loc_op->representation()) &&
@@ -386,7 +389,7 @@ BlockAssessments* RegisterAllocatorVerifier::CreateForBlock(
   RpoNumber current_block_id = block->rpo_number();
 
   BlockAssessments* ret =
-      zone()->New<BlockAssessments>(zone(), spill_slot_delta());
+      zone()->New<BlockAssessments>(zone(), spill_slot_delta(), sequence_);
   if (block->PredecessorCount() == 0) {
     // TODO(mtrofin): the following check should hold, however, in certain
     // unit tests it is invalidated by the last block. Investigate and
@@ -394,7 +397,7 @@ BlockAssessments* RegisterAllocatorVerifier::CreateForBlock(
     // CHECK_EQ(0, current_block_id.ToInt());
     // The phi size test below is because we can, technically, have phi
     // instructions with one argument. Some tests expose that, too.
-  } else if (block->PredecessorCount() == 1 && block->phis().size() == 0) {
+  } else if (block->PredecessorCount() == 1 && block->phis().empty()) {
     const BlockAssessments* prev_block = assessments_[block->predecessors()[0]];
     ret->CopyFrom(prev_block);
   } else {
@@ -431,31 +434,30 @@ BlockAssessments* RegisterAllocatorVerifier::CreateForBlock(
   return ret;
 }
 
+V8_CLANG_NO_SANITIZE("coverage")
 void RegisterAllocatorVerifier::ValidatePendingAssessment(
-    RpoNumber block_id, InstructionOperand op,
-    const BlockAssessments* current_assessments,
-    PendingAssessment* const assessment, int virtual_register) {
+    RpoNumber block_id, PendingAssessment* const assessment,
+    int virtual_register) {
   if (assessment->IsAliasOf(virtual_register)) return;
 
   // When validating a pending assessment, it is possible some of the
   // assessments for the original operand (the one where the assessment was
   // created for first) are also pending. To avoid recursion, we use a work
-  // list. To deal with cycles, we keep a set of seen nodes.
-  Zone local_zone(zone()->allocator(), ZONE_NAME);
-  ZoneQueue<std::pair<const PendingAssessment*, int>> worklist(&local_zone);
-  ZoneSet<RpoNumber> seen(&local_zone);
-  worklist.push(std::make_pair(assessment, virtual_register));
-  seen.insert(block_id);
+  // list. To deal with cycles, we mark seen blocks in pending_seen_epoch_.
+  pending_worklist_.clear();
+  ++pending_current_epoch_;
+  DCHECK_NE(pending_current_epoch_, 0);
+  pending_worklist_.push_back({assessment, virtual_register});
+  pending_seen_epoch_[block_id.ToSize()] = pending_current_epoch_;
 
-  while (!worklist.empty()) {
-    auto work = worklist.front();
-    const PendingAssessment* current_assessment = work.first;
-    int current_virtual_register = work.second;
+  for (size_t head = 0; head < pending_worklist_.size(); ++head) {
+    // Copy by value, as push_back below may reallocate pending_worklist_.
+    auto [current_assessment, current_virtual_register] =
+        pending_worklist_[head];
     InstructionOperand current_operand = current_assessment->operand();
-    worklist.pop();
 
     const InstructionBlock* origin = current_assessment->origin();
-    CHECK(origin->PredecessorCount() > 1 || origin->phis().size() > 0);
+    CHECK(origin->PredecessorCount() > 1 || !origin->phis().empty());
 
     // Check if the virtual register is a phi first, instead of relying on
     // the incoming assessments. In particular, this handles the case
@@ -479,13 +481,10 @@ void RegisterAllocatorVerifier::ValidatePendingAssessment(
       auto pred_assignment = assessments_.find(pred);
       if (pred_assignment == assessments_.end()) {
         CHECK(origin->IsLoopHeader());
-        auto todo_iter = outstanding_assessments_.find(pred);
-        DelayedAssessments* set = nullptr;
-        if (todo_iter == outstanding_assessments_.end()) {
+        auto [todo_iter, inserted] = outstanding_assessments_.try_emplace(pred);
+        DelayedAssessments*& set = todo_iter->second;
+        if (inserted) {
           set = zone()->New<DelayedAssessments>(zone());
-          outstanding_assessments_.insert(std::make_pair(pred, set));
-        } else {
-          set = todo_iter->second;
         }
         set->AddDelayedAssessment(current_operand, expected);
         continue;
@@ -505,9 +504,9 @@ void RegisterAllocatorVerifier::ValidatePendingAssessment(
           // This happens if we have a diamond feeding into another one, and
           // the inner one never being used - other than for carrying the value.
           const PendingAssessment* next = PendingAssessment::cast(contribution);
-          if (seen.find(pred) == seen.end()) {
-            worklist.push({next, expected});
-            seen.insert(pred);
+          if (pending_seen_epoch_[pred.ToSize()] != pending_current_epoch_) {
+            pending_seen_epoch_[pred.ToSize()] = pending_current_epoch_;
+            pending_worklist_.push_back({next, expected});
           }
           // Note that we do not want to finalize pending assessments at the
           // beginning of a block - which is the information we'd have
@@ -521,6 +520,7 @@ void RegisterAllocatorVerifier::ValidatePendingAssessment(
   assessment->AddAlias(virtual_register);
 }
 
+V8_CLANG_NO_SANITIZE("coverage")
 void RegisterAllocatorVerifier::ValidateUse(
     RpoNumber block_id, BlockAssessments* current_assessments,
     InstructionOperand op, int virtual_register) {
@@ -530,7 +530,7 @@ void RegisterAllocatorVerifier::ValidateUse(
   Assessment* assessment = iterator->second;
 
   // The operand shouldn't be a stale reference stack slot.
-  CHECK(!current_assessments->IsStaleReferenceStackSlot(op));
+  CHECK(!current_assessments->IsStaleReferenceStackSlot(op, virtual_register));
 
   switch (assessment->kind()) {
     case Final:
@@ -539,13 +539,16 @@ void RegisterAllocatorVerifier::ValidateUse(
       break;
     case Pending: {
       PendingAssessment* pending = PendingAssessment::cast(assessment);
-      ValidatePendingAssessment(block_id, op, current_assessments, pending,
-                                virtual_register);
+      ValidatePendingAssessment(block_id, pending, virtual_register);
       break;
     }
   }
 }
 
+// Disable coverage tracing for `VerifyGapMoves` and methods called from this.
+// This speeds up many large fuzzer test cases, and coverage of these
+// verification methods is not helpful for covering the code better.
+V8_CLANG_NO_SANITIZE("coverage")
 void RegisterAllocatorVerifier::VerifyGapMoves() {
   CHECK(assessments_.empty());
   CHECK(outstanding_assessments_.empty());
@@ -610,14 +613,14 @@ void RegisterAllocatorVerifier::VerifyGapMoves() {
       CHECK(found_op != block_assessments->map().end());
       // This block is a jump back to the loop header, ensure that the op hasn't
       // become a stale reference during the blocks in the loop.
-      CHECK(!block_assessments->IsStaleReferenceStackSlot(op));
+      CHECK(!block_assessments->IsStaleReferenceStackSlot(op, vreg));
       switch (found_op->second->kind()) {
         case Final:
           CHECK_EQ(FinalAssessment::cast(found_op->second)->virtual_register(),
                    vreg);
           break;
         case Pending:
-          ValidatePendingAssessment(block->rpo_number(), op, block_assessments,
+          ValidatePendingAssessment(block->rpo_number(),
                                     PendingAssessment::cast(found_op->second),
                                     vreg);
           break;
@@ -626,6 +629,4 @@ void RegisterAllocatorVerifier::VerifyGapMoves() {
   }
 }
 
-}  // namespace compiler
-}  // namespace internal
-}  // namespace v8
+}  // namespace v8::internal::compiler

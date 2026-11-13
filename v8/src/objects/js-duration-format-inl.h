@@ -2,14 +2,16 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#ifndef V8_OBJECTS_JS_DURATION_FORMAT_INL_H_
+#define V8_OBJECTS_JS_DURATION_FORMAT_INL_H_
+
 #ifndef V8_INTL_SUPPORT
 #error Internationalization is expected to be enabled.
 #endif  // V8_INTL_SUPPORT
 
-#ifndef V8_OBJECTS_JS_DURATION_FORMAT_INL_H_
-#define V8_OBJECTS_JS_DURATION_FORMAT_INL_H_
-
 #include "src/objects/js-duration-format.h"
+// Include the non-inl header before the rest of the headers.
+
 #include "src/objects/objects-inl.h"
 
 // Has to be the last include (doesn't have include guards):
@@ -18,37 +20,51 @@
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/js-duration-format-tq-inl.inc"
+JSDurationFormat::StyleFlags JSDurationFormat::style_flags() const {
+  return style_flags_.load();
+}
+void JSDurationFormat::set_style_flags(StyleFlags value) {
+  style_flags_.store(value);
+}
 
-TQ_OBJECT_CONSTRUCTORS_IMPL(JSDurationFormat)
+JSDurationFormat::DisplayFlags JSDurationFormat::display_flags() const {
+  return display_flags_.load();
+}
+void JSDurationFormat::set_display_flags(DisplayFlags value) {
+  display_flags_.store(value);
+}
 
-ACCESSORS(JSDurationFormat, icu_locale, Managed<icu::Locale>, kIcuLocaleOffset)
+Tagged<Managed<icu::Locale>> JSDurationFormat::icu_locale() const {
+  return Cast<Managed<icu::Locale>>(icu_locale_.load());
+}
+void JSDurationFormat::set_icu_locale(Tagged<Managed<icu::Locale>> value,
+                                      WriteBarrierMode mode) {
+  icu_locale_.store(this, value, mode);
+}
 
-#define IMPL_INLINE_SETTER_GETTER(T, n, B, f, M)           \
-  inline void JSDurationFormat::set_##n(T value) {         \
-    DCHECK_GE(B::kMax, value);                             \
-    DCHECK_GE(T::M, value);                                \
-    set_##f(B::update(f(), value));                        \
-  }                                                        \
-  inline JSDurationFormat::T JSDurationFormat::n() const { \
-    return B::decode(f());                                 \
-  }
+#define IMPL_INLINE_SETTER_GETTER(T, n, B, f, M)   \
+  inline void JSDurationFormat::set_##n(T value) { \
+    DCHECK(B::is_valid(value));                    \
+    DCHECK_GE(T::M, value);                        \
+    set_##f(f().with_##n(value));                  \
+  }                                                \
+  inline JSDurationFormat::T JSDurationFormat::n() const { return f().n(); }
 
-#define IMPL_INLINE_DISPLAY_SETTER_GETTER(f, R)                  \
-  IMPL_INLINE_SETTER_GETTER(Display, f##_display, R##DisplayBit, \
+#define IMPL_INLINE_DISPLAY_SETTER_GETTER(f, R)                                \
+  IMPL_INLINE_SETTER_GETTER(Display, f##_display, DisplayFlags::R##DisplayBit, \
                             display_flags, kAlways)
 
-#define IMPL_INLINE_FIELD_STYLE3_SETTER_GETTER(f, R)                          \
-  IMPL_INLINE_SETTER_GETTER(FieldStyle, f##_style, R##StyleBits, style_flags, \
-                            kNarrow)
+#define IMPL_INLINE_FIELD_STYLE3_SETTER_GETTER(f, R)                         \
+  IMPL_INLINE_SETTER_GETTER(FieldStyle, f##_style, StyleFlags::R##StyleBits, \
+                            style_flags, kStyle3Max)
 
-#define IMPL_INLINE_FIELD_STYLE4_SETTER_GETTER(f, R)                          \
-  IMPL_INLINE_SETTER_GETTER(FieldStyle, f##_style, R##StyleBits, style_flags, \
-                            kNumeric)
+#define IMPL_INLINE_FIELD_STYLE4_SETTER_GETTER(f, R)                         \
+  IMPL_INLINE_SETTER_GETTER(FieldStyle, f##_style, StyleFlags::R##StyleBits, \
+                            style_flags, kStyle4Max)
 
-#define IMPL_INLINE_FIELD_STYLE5_SETTER_GETTER(f, R)                          \
-  IMPL_INLINE_SETTER_GETTER(FieldStyle, f##_style, R##StyleBits, style_flags, \
-                            k2Digit)
+#define IMPL_INLINE_FIELD_STYLE5_SETTER_GETTER(f, R)                         \
+  IMPL_INLINE_SETTER_GETTER(FieldStyle, f##_style, StyleFlags::R##StyleBits, \
+                            style_flags, kStyle5Max)
 
 IMPL_INLINE_DISPLAY_SETTER_GETTER(years, Years)
 IMPL_INLINE_DISPLAY_SETTER_GETTER(months, Months)
@@ -61,7 +77,10 @@ IMPL_INLINE_DISPLAY_SETTER_GETTER(milliseconds, Milliseconds)
 IMPL_INLINE_DISPLAY_SETTER_GETTER(microseconds, Microseconds)
 IMPL_INLINE_DISPLAY_SETTER_GETTER(nanoseconds, Nanoseconds)
 
-IMPL_INLINE_SETTER_GETTER(Style, style, StyleBits, style_flags, kDigital)
+IMPL_INLINE_SETTER_GETTER(Style, style, StyleFlags::StyleBits, style_flags,
+                          kDigital)
+IMPL_INLINE_SETTER_GETTER(Separator, separator, StyleFlags::SeparatorBits,
+                          style_flags, kMax)
 
 IMPL_INLINE_FIELD_STYLE3_SETTER_GETTER(years, Years)
 IMPL_INLINE_FIELD_STYLE3_SETTER_GETTER(months, Months)
@@ -80,22 +99,25 @@ IMPL_INLINE_FIELD_STYLE4_SETTER_GETTER(nanoseconds, Nanoseconds)
 #undef IMPL_INLINE_FIELD_STYLE5_SETTER_GETTER
 
 inline void JSDurationFormat::set_fractional_digits(int32_t digits) {
-  DCHECK_GE(9, digits);
-  DCHECK_LE(0, digits);
-  int hints = display_flags();
-  hints = FractionalDigitsBits::update(hints, digits);
-  set_display_flags(hints);
+  DCHECK((0 <= digits && digits <= 9) || digits == kUndefinedFractionalDigits);
+  set_display_flags(display_flags().with_fractional_digits(digits));
 }
 inline int32_t JSDurationFormat::fractional_digits() const {
-  int32_t v = FractionalDigitsBits::decode(display_flags());
-  DCHECK_GE(9, v);
-  DCHECK_LE(0, v);
+  int32_t v = display_flags().fractional_digits();
+  DCHECK((0 <= v && v <= 9) || v == kUndefinedFractionalDigits);
   return v;
 }
 
-ACCESSORS(JSDurationFormat, icu_number_formatter,
-          Managed<icu::number::LocalizedNumberFormatter>,
-          kIcuNumberFormatterOffset)
+Tagged<Managed<icu::number::LocalizedNumberFormatter>>
+JSDurationFormat::icu_number_formatter() const {
+  return Cast<Managed<icu::number::LocalizedNumberFormatter>>(
+      icu_number_formatter_.load());
+}
+void JSDurationFormat::set_icu_number_formatter(
+    Tagged<Managed<icu::number::LocalizedNumberFormatter>> value,
+    WriteBarrierMode mode) {
+  icu_number_formatter_.store(this, value, mode);
+}
 }  // namespace internal
 }  // namespace v8
 

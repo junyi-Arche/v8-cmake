@@ -1,57 +1,116 @@
-// Copyright 2015 the V8 project authors. All rights reserved.
+// Copyright 2026 the V8 project authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
 #include <stdlib.h>
 
 #include <sstream>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "src/api/api-inl.h"
-#include "src/init/v8.h"
+#include "src/heap/heap-inl.h"
 #include "src/objects/heap-number-inl.h"
+#include "src/objects/object-conversions-inl.h"
 #include "src/objects/objects-inl.h"
+#include "test/common/flag-utils.h"
 #include "test/unittests/test-utils.h"
-#include "testing/gtest/include/gtest/gtest.h"
 
 namespace v8 {
 namespace internal {
-namespace test_inobject_slack_tracking {
+namespace inobject_slack_tracking_unittest {
 
 static const int kMaxInobjectProperties = JSObject::kMaxInObjectProperties;
 
-class InObjectSlackTrackingTest : public TestWithContext {
- public:
-  template <typename T = Object>
-  Handle<T> GetLexical(const char* name) {
-    Factory* factory = i_isolate()->factory();
+template <typename T>
+static Handle<T> OpenHandle(v8::Local<v8::Value> value) {
+  Handle<Object> obj = v8::Utils::OpenHandle(*value);
+  return Cast<T>(obj);
+}
 
-    Handle<String> str_name = factory->InternalizeUtf8String(name);
-    Handle<ScriptContextTable> script_contexts(
-        i_isolate()->native_context()->script_context_table(), i_isolate());
+static Tagged<Object> GetFieldValue(Tagged<JSObject> obj, int property_index) {
+  FieldIndex index = FieldIndex::ForPropertyIndex(obj->map(), property_index);
+  return obj->RawFastPropertyAt(index);
+}
+
+static double GetDoubleFieldValue(Tagged<JSObject> obj,
+                                  FieldIndex field_index) {
+  Tagged<Object> value = obj->RawFastPropertyAt(field_index);
+  if (IsHeapNumber(value)) {
+    return Cast<HeapNumber>(value)->value();
+  } else {
+    return Object::NumberValue(value);
+  }
+}
+
+static double GetDoubleFieldValue(Tagged<JSObject> obj, int property_index) {
+  FieldIndex index = FieldIndex::ForPropertyIndex(obj->map(), property_index);
+  return GetDoubleFieldValue(obj, index);
+}
+
+static std::string GetClassName(int class_index) {
+  std::ostringstream os;
+  os << "A" << class_index;
+  return os.str();
+}
+
+class InObjectSlackTrackingTest : public TestWithNativeContext {
+ protected:
+  v8::Local<v8::Script> v8_compile(const char* source) {
+    return v8::Script::Compile(v8_context(), NewString(source))
+        .ToLocalChecked();
+  }
+
+  v8::Local<v8::Value> Run(v8::Local<v8::Script> script) {
+    v8::Local<v8::Value> result;
+    if (script->Run(v8_context()).ToLocal(&result)) {
+      return result;
+    }
+    return v8::Local<v8::Value>();
+  }
+
+  template <typename T = Object>
+  DirectHandle<T> GetLexical(const char* name) {
+    Isolate* isolate = i_isolate();
+    Factory* factory = isolate->factory();
+
+    DirectHandle<String> str_name = factory->InternalizeUtf8String(name);
+    DirectHandle<ScriptContextTable> script_contexts(
+        isolate->native_context()->script_context_table(), isolate);
 
     VariableLookupResult lookup_result;
     if (script_contexts->Lookup(str_name, &lookup_result)) {
-      Handle<Context> script_context = ScriptContextTable::GetContext(
-          i_isolate(), script_contexts, lookup_result.context_index);
-
-      Handle<Object> result(script_context->get(lookup_result.slot_index),
-                            i_isolate());
-      return Handle<T>::cast(result);
+      DirectHandle<Context> script_context =
+          handle(script_contexts->get(lookup_result.context_index), isolate);
+      DirectHandle<Object> result =
+          Context::Get(script_context, lookup_result.slot_index, isolate);
+      return Cast<T>(result);
     }
-    return Handle<T>();
+    return DirectHandle<T>();
   }
 
   template <typename T = Object>
-  Handle<T> GetLexical(const std::string& name) {
+  DirectHandle<T> GetLexical(const std::string& name) {
     return GetLexical<T>(name.c_str());
   }
 
-  bool IsObjectShrinkable(JSObject obj) {
-    Handle<Map> filler_map = i_isolate()->factory()->one_pointer_filler_map();
+  template <typename T>
+  Handle<T> RunI(v8::Local<v8::Script> script) {
+    return OpenHandle<T>(Run(script));
+  }
 
-    int inobject_properties = obj.map().GetInObjectProperties();
-    int unused = obj.map().UnusedPropertyFields();
+  template <typename T>
+  DirectHandle<T> CompileRunI(const char* script) {
+    return RunJS<T>(script);
+  }
+
+  bool IsObjectShrinkable(Tagged<JSObject> obj) {
+    DirectHandle<Map> filler_map =
+        i_isolate()->factory()->one_pointer_filler_map();
+
+    int inobject_properties = obj->map()->GetInObjectProperties();
+    int unused = obj->map()->UnusedPropertyFields();
     if (unused == 0) return false;
 
     Address packed_filler = MapWord::FromMap(*filler_map).ptr();
@@ -61,145 +120,6 @@ class InObjectSlackTrackingTest : public TestWithContext {
       }
     }
     return true;
-  }
-
-  template <typename T>
-  Handle<T> GetGlobal(const char* name) {
-    Handle<String> str_name =
-        i_isolate()->factory()->InternalizeUtf8String(name);
-
-    Handle<Object> value =
-        Object::GetProperty(i_isolate(), i_isolate()->global_object(), str_name)
-            .ToHandleChecked();
-    return Handle<T>::cast(value);
-  }
-
-  static Object GetFieldValue(JSObject obj, int property_index) {
-    FieldIndex index = FieldIndex::ForPropertyIndex(obj.map(), property_index);
-    return obj.RawFastPropertyAt(index);
-  }
-
-  static double GetDoubleFieldValue(JSObject obj, FieldIndex field_index) {
-    Object value = obj.RawFastPropertyAt(field_index);
-    if (value.IsHeapNumber()) {
-      return HeapNumber::cast(value).value();
-    } else {
-      return value.Number();
-    }
-  }
-
-  static double GetDoubleFieldValue(JSObject obj, int property_index) {
-    FieldIndex index = FieldIndex::ForPropertyIndex(obj.map(), property_index);
-    return GetDoubleFieldValue(obj, index);
-  }
-
-  Local<Value> CompileRun(const char* source) {
-    Local<v8::String> source_string =
-        v8::String::NewFromUtf8(isolate(), source).ToLocalChecked();
-    Local<v8::Script> script =
-        v8::Script::Compile(context(), source_string).ToLocalChecked();
-    return script->Run(context()).ToLocalChecked();
-  }
-
-  v8::Local<v8::Script> Compile(const char* source) {
-    v8::Local<v8::Script> result;
-    CHECK(v8::Script::Compile(
-              context(),
-              v8::String::NewFromUtf8(isolate(), source).ToLocalChecked())
-              .ToLocal(&result));
-    return result;
-  }
-
-  template <typename T>
-  static Handle<T> OpenHandle(v8::Local<v8::Value> value) {
-    Handle<Object> obj = v8::Utils::OpenHandle(*value);
-    return Handle<T>::cast(obj);
-  }
-
-  inline v8::Local<v8::Value> Run(v8::Local<v8::Script> script) {
-    v8::Local<v8::Value> result;
-    if (script->Run(context()).ToLocal(&result)) {
-      return result;
-    }
-    return v8::Local<v8::Value>();
-  }
-
-  template <typename T>
-  inline Handle<T> RunI(v8::Local<v8::Script> script) {
-    return OpenHandle<T>(Run(script));
-  }
-
-  template <typename T>
-  inline Handle<T> CompileRunI(const char* script) {
-    return OpenHandle<T>(CompileRun(script));
-  }
-
-  static std::string GetClassName(int class_index) {
-    std::ostringstream os;
-    os << "A" << class_index;
-    return os.str();
-  }
-
-  v8::Local<v8::Script> GetNewObjectScript(const std::string& class_name) {
-    std::ostringstream os;
-    os << "new " << class_name << "();";
-    return Compile(os.str().c_str());
-  }
-
-  // Test that in-object slack tracking works as expected for first |n| classes
-  // in the hierarchy.
-  // This test works only for if the total property count is less than maximum
-  // in-object properties count.
-  void TestClassHierarchy(const std::vector<int>& hierarchy_desc, int n) {
-    int fields_count = 0;
-    for (int cur_class = 0; cur_class < n; cur_class++) {
-      std::string class_name = GetClassName(cur_class);
-      int fields_count_at_current_level = hierarchy_desc[cur_class];
-      fields_count += fields_count_at_current_level;
-
-      // This test is not suitable for in-object properties count overflow case.
-      CHECK_LT(fields_count, kMaxInobjectProperties);
-
-      // Create |class_name| objects and check slack tracking.
-      v8::Local<v8::Script> new_script = GetNewObjectScript(class_name);
-
-      Handle<JSFunction> func = GetLexical<JSFunction>(class_name);
-
-      Handle<JSObject> obj = RunI<JSObject>(new_script);
-
-      CHECK(func->has_initial_map());
-      Handle<Map> initial_map(func->initial_map(), func->GetIsolate());
-
-      // If the object is slow-mode already, bail out.
-      if (obj->map().is_dictionary_map()) continue;
-
-      // There must be at least some slack.
-      CHECK_LT(fields_count, obj->map().GetInObjectProperties());
-
-      // One instance was created.
-      CHECK_EQ(Map::kSlackTrackingCounterStart - 1,
-               initial_map->construction_counter());
-      CHECK(initial_map->IsInobjectSlackTrackingInProgress());
-
-      // Create several instances to complete the tracking.
-      for (int i = 1; i < Map::kGenerousAllocationCount; i++) {
-        CHECK(initial_map->IsInobjectSlackTrackingInProgress());
-        Handle<JSObject> tmp = RunI<JSObject>(new_script);
-        CHECK_EQ(initial_map->IsInobjectSlackTrackingInProgress(),
-                 IsObjectShrinkable(*tmp));
-        if (!initial_map->IsInobjectSlackTrackingInProgress()) {
-          // Turbofan can force completion of in-object slack tracking.
-          break;
-        }
-        CHECK_EQ(Map::kSlackTrackingCounterStart - i - 1,
-                 initial_map->construction_counter());
-      }
-      CHECK(!initial_map->IsInobjectSlackTrackingInProgress());
-      CHECK(!IsObjectShrinkable(*obj));
-
-      // No slack left.
-      CHECK_EQ(fields_count, obj->map().GetInObjectProperties());
-    }
   }
 
   // Creates class hierarchy of length matching the |hierarchy_desc| length and
@@ -226,13 +146,76 @@ class InObjectSlackTrackingTest : public TestWithContext {
       os << "  }\n"
             "};\n\n";
     }
-    CompileRun(os.str().c_str());
+    RunJS(os.str().c_str());
+  }
+
+  v8::Local<v8::Script> GetNewObjectScript(const std::string& class_name) {
+    std::ostringstream os;
+    os << "new " << class_name << "();";
+    return v8_compile(os.str().c_str());
+  }
+
+  // Test that in-object slack tracking works as expected for first |n| classes
+  // in the hierarchy.
+  // This test works only for if the total property count is less than maximum
+  // in-object properties count.
+  void TestClassHierarchy(const std::vector<int>& hierarchy_desc, int n) {
+    int fields_count = 0;
+    for (int cur_class = 0; cur_class < n; cur_class++) {
+      std::string class_name = GetClassName(cur_class);
+      int fields_count_at_current_level = hierarchy_desc[cur_class];
+      fields_count += fields_count_at_current_level;
+
+      // This test is not suitable for in-object properties count overflow case.
+      CHECK_LT(fields_count, kMaxInobjectProperties);
+
+      // Create |class_name| objects and check slack tracking.
+      v8::Local<v8::Script> new_script = GetNewObjectScript(class_name);
+
+      DirectHandle<JSFunction> func = GetLexical<JSFunction>(class_name);
+
+      DirectHandle<JSObject> obj = RunI<JSObject>(new_script);
+
+      CHECK(func->has_initial_map());
+      DirectHandle<Map> initial_map(func->initial_map(), i_isolate());
+
+      // There must be at least some slack.
+      CHECK_LT(fields_count, obj->map()->GetInObjectProperties());
+
+      // One instance was created.
+      CHECK_EQ(Map::kSlackTrackingCounterStart - 1,
+               initial_map->construction_counter());
+      CHECK(initial_map->IsInobjectSlackTrackingInProgress());
+
+      // Create several instances to complete the tracking.
+      for (int i = 1; i < Map::kGenerousAllocationCount; i++) {
+        CHECK(initial_map->IsInobjectSlackTrackingInProgress());
+        DirectHandle<JSObject> tmp = RunI<JSObject>(new_script);
+        CHECK_EQ(initial_map->IsInobjectSlackTrackingInProgress(),
+                 IsObjectShrinkable(*tmp));
+        if (!initial_map->IsInobjectSlackTrackingInProgress()) {
+          // Turbofan can force completion of in-object slack tracking.
+          break;
+        }
+        CHECK_EQ(Map::kSlackTrackingCounterStart - i - 1,
+                 initial_map->construction_counter());
+      }
+      CHECK(!initial_map->IsInobjectSlackTrackingInProgress());
+      CHECK(!IsObjectShrinkable(*obj));
+
+      // No slack left.
+      CHECK_EQ(fields_count, obj->map()->GetInObjectProperties());
+    }
+  }
+
+  void TestSubclassChain(const std::vector<int>& hierarchy_desc) {
+    CreateClassHierarchy(hierarchy_desc);
+    TestClassHierarchy(hierarchy_desc, static_cast<int>(hierarchy_desc.size()));
   }
 
   void CheckExpectedProperties(int expected, std::ostringstream& os) {
-    Handle<HeapObject> obj = Handle<HeapObject>::cast(
-        v8::Utils::OpenHandle(*CompileRun(os.str().c_str())));
-    CHECK_EQ(expected, obj->map().GetInObjectProperties());
+    DirectHandle<HeapObject> obj = RunJS<HeapObject>(os.str().c_str());
+    CHECK_EQ(expected, obj->map()->GetInObjectProperties());
   }
 
   void TestSubclassBuiltin(const char* subclass_name,
@@ -252,10 +235,10 @@ class InObjectSlackTrackingTest : public TestWithContext {
             "    this.o = this;\n"
             "  }\n"
             "};\n";
-      CompileRun(os.str().c_str());
+      RunJS(os.str().c_str());
     }
 
-    Handle<JSFunction> func = GetLexical<JSFunction>(subclass_name);
+    DirectHandle<JSFunction> func = GetLexical<JSFunction>(subclass_name);
 
     // Zero instances were created so far.
     CHECK(!func->has_initial_map());
@@ -264,13 +247,13 @@ class InObjectSlackTrackingTest : public TestWithContext {
     {
       std::ostringstream os;
       os << "new " << subclass_name << "(" << ctor_arguments << ");";
-      new_script = Compile(os.str().c_str());
+      new_script = v8_compile(os.str().c_str());
     }
 
     RunI<JSObject>(new_script);
 
     CHECK(func->has_initial_map());
-    Handle<Map> initial_map(func->initial_map(), func->GetIsolate());
+    DirectHandle<Map> initial_map(func->initial_map(), i_isolate());
 
     CHECK_EQ(instance_type, initial_map->instance_type());
 
@@ -281,7 +264,7 @@ class InObjectSlackTrackingTest : public TestWithContext {
 
     // Create two instances in order to ensure that |obj|.o is a data field
     // in case of Function subclassing.
-    Handle<JSObject> obj = RunI<JSObject>(new_script);
+    DirectHandle<JSObject> obj = RunI<JSObject>(new_script);
 
     // Two instances of a subclass created.
     CHECK_EQ(Map::kSlackTrackingCounterStart - 2,
@@ -289,7 +272,7 @@ class InObjectSlackTrackingTest : public TestWithContext {
     CHECK(initial_map->IsInobjectSlackTrackingInProgress());
 
     // There must be at least some slack.
-    CHECK_LT(builtin_properties_count + 5, obj->map().GetInObjectProperties());
+    CHECK_LT(builtin_properties_count + 5, obj->map()->GetInObjectProperties());
     CHECK_EQ(Smi::FromInt(42),
              GetFieldValue(*obj, builtin_properties_count + 0));
     CHECK_EQ(4.2, GetDoubleFieldValue(*obj, builtin_properties_count + 1));
@@ -299,7 +282,7 @@ class InObjectSlackTrackingTest : public TestWithContext {
     // Create several subclass instances to complete the tracking.
     for (int i = 2; i < Map::kGenerousAllocationCount; i++) {
       CHECK(initial_map->IsInobjectSlackTrackingInProgress());
-      Handle<JSObject> tmp = RunI<JSObject>(new_script);
+      DirectHandle<JSObject> tmp = RunI<JSObject>(new_script);
       CHECK_EQ(initial_map->IsInobjectSlackTrackingInProgress(),
                IsObjectShrinkable(*tmp));
     }
@@ -307,399 +290,479 @@ class InObjectSlackTrackingTest : public TestWithContext {
     CHECK(!IsObjectShrinkable(*obj));
 
     // No slack left.
-    CHECK_EQ(builtin_properties_count + 3, obj->map().GetInObjectProperties());
+    CHECK_EQ(builtin_properties_count + 3, obj->map()->GetInObjectProperties());
 
-    CHECK_EQ(instance_type, obj->map().instance_type());
+    CHECK_EQ(instance_type, obj->map()->instance_type());
   }
 
-  void TestSubclassChain(const std::vector<int>& hierarchy_desc) {
-    // Avoid eventual completion of in-object slack tracking.
-    v8_flags.always_turbofan = false;
+  void TestJSObjectBasic() {
+    const char* source =
+        "function A() {"
+        "  this.a = 42;"
+        "  this.d = 4.2;"
+        "  this.o = this;"
+        "}";
+    RunJS(source);
 
-    CreateClassHierarchy(hierarchy_desc);
-    TestClassHierarchy(hierarchy_desc, static_cast<int>(hierarchy_desc.size()));
+    DirectHandle<JSFunction> func = GetGlobal<JSFunction>("A");
+
+    // Zero instances were created so far.
+    CHECK(!func->has_initial_map());
+
+    v8::Local<v8::Script> new_A_script = v8_compile("new A();");
+
+    DirectHandle<JSObject> obj = RunI<JSObject>(new_A_script);
+
+    CHECK(func->has_initial_map());
+    DirectHandle<Map> initial_map(func->initial_map(), i_isolate());
+
+    // One instance created.
+    CHECK_EQ(Map::kSlackTrackingCounterStart - 1,
+             initial_map->construction_counter());
+    CHECK(initial_map->IsInobjectSlackTrackingInProgress());
+
+    // There must be at least some slack.
+    CHECK_LT(5, obj->map()->GetInObjectProperties());
+    CHECK_EQ(Smi::FromInt(42), GetFieldValue(*obj, 0));
+    CHECK_EQ(4.2, GetDoubleFieldValue(*obj, 1));
+    CHECK_EQ(*obj, GetFieldValue(*obj, 2));
+    CHECK(IsObjectShrinkable(*obj));
+
+    // Create several objects to complete the tracking.
+    for (int i = 1; i < Map::kGenerousAllocationCount; i++) {
+      CHECK(initial_map->IsInobjectSlackTrackingInProgress());
+      DirectHandle<JSObject> tmp = RunI<JSObject>(new_A_script);
+      CHECK_EQ(initial_map->IsInobjectSlackTrackingInProgress(),
+               IsObjectShrinkable(*tmp));
+    }
+    CHECK(!initial_map->IsInobjectSlackTrackingInProgress());
+    CHECK(!IsObjectShrinkable(*obj));
+
+    // No slack left.
+    CHECK_EQ(3, obj->map()->GetInObjectProperties());
   }
 
-  void TestSubclassBasicNoBaseClassInstances() {}
+  void TestJSObjectComplex() {
+    const char* source =
+        "function A(n) {"
+        "  if (n > 0) this.a = 42;"
+        "  if (n > 1) this.d = 4.2;"
+        "  if (n > 2) this.o1 = this;"
+        "  if (n > 3) this.o2 = this;"
+        "  if (n > 4) this.o3 = this;"
+        "  if (n > 5) this.o4 = this;"
+        "}";
+    RunJS(source);
+
+    DirectHandle<JSFunction> func = GetGlobal<JSFunction>("A");
+
+    // Zero instances were created so far.
+    CHECK(!func->has_initial_map());
+
+    DirectHandle<JSObject> obj1 = CompileRunI<JSObject>("new A(1);");
+    DirectHandle<JSObject> obj3 = CompileRunI<JSObject>("new A(3);");
+    DirectHandle<JSObject> obj5 = CompileRunI<JSObject>("new A(5);");
+
+    CHECK(func->has_initial_map());
+    DirectHandle<Map> initial_map(func->initial_map(), i_isolate());
+
+    // Three instances created.
+    CHECK_EQ(Map::kSlackTrackingCounterStart - 3,
+             initial_map->construction_counter());
+    CHECK(initial_map->IsInobjectSlackTrackingInProgress());
+
+    // There must be at least some slack.
+    CHECK_LT(5, obj3->map()->GetInObjectProperties());
+    CHECK_EQ(Smi::FromInt(42), GetFieldValue(*obj3, 0));
+    CHECK_EQ(4.2, GetDoubleFieldValue(*obj3, 1));
+    CHECK_EQ(*obj3, GetFieldValue(*obj3, 2));
+    CHECK(IsObjectShrinkable(*obj1));
+    CHECK(IsObjectShrinkable(*obj3));
+    CHECK(IsObjectShrinkable(*obj5));
+
+    // Create several objects to complete the tracking.
+    for (int i = 3; i < Map::kGenerousAllocationCount; i++) {
+      CHECK(initial_map->IsInobjectSlackTrackingInProgress());
+      RunJS("new A(3);");
+    }
+    CHECK(!initial_map->IsInobjectSlackTrackingInProgress());
+
+    // obj1 and obj2 stays shrinkable because we don't clear unused fields.
+    CHECK(IsObjectShrinkable(*obj1));
+    CHECK(IsObjectShrinkable(*obj3));
+    CHECK(!IsObjectShrinkable(*obj5));
+
+    CHECK_EQ(5, obj1->map()->GetInObjectProperties());
+    CHECK_EQ(4, obj1->map()->UnusedPropertyFields());
+
+    CHECK_EQ(5, obj3->map()->GetInObjectProperties());
+    CHECK_EQ(2, obj3->map()->UnusedPropertyFields());
+
+    CHECK_EQ(5, obj5->map()->GetInObjectProperties());
+    CHECK_EQ(0, obj5->map()->UnusedPropertyFields());
+
+    // Since slack tracking is complete, the new objects should not be
+    // shrinkable.
+    obj1 = CompileRunI<JSObject>("new A(1);");
+    obj3 = CompileRunI<JSObject>("new A(3);");
+    obj5 = CompileRunI<JSObject>("new A(5);");
+
+    CHECK(!IsObjectShrinkable(*obj1));
+    CHECK(!IsObjectShrinkable(*obj3));
+    CHECK(!IsObjectShrinkable(*obj5));
+  }
+
+  void TestJSGeneratorObjectBasic() {
+    const char* source =
+        "function* A() {"
+        "  var i = 0;"
+        "  while(true) {"
+        "    yield i++;"
+        "  }"
+        "};"
+        "function CreateGenerator() {"
+        "  var o = A();"
+        "  o.a = 42;"
+        "  o.d = 4.2;"
+        "  o.o = o;"
+        "  return o;"
+        "}";
+    RunJS(source);
+
+    DirectHandle<JSFunction> func = GetGlobal<JSFunction>("A");
+
+    // Zero instances were created so far.
+    CHECK(!func->has_initial_map());
+
+    v8::Local<v8::Script> new_A_script = v8_compile("CreateGenerator();");
+
+    DirectHandle<JSObject> obj = RunI<JSObject>(new_A_script);
+
+    CHECK(func->has_initial_map());
+    DirectHandle<Map> initial_map(func->initial_map(), i_isolate());
+
+    // One instance created.
+    CHECK_EQ(Map::kSlackTrackingCounterStart - 1,
+             initial_map->construction_counter());
+    CHECK(initial_map->IsInobjectSlackTrackingInProgress());
+
+    // There must be at least some slack.
+    CHECK_LT(5, obj->map()->GetInObjectProperties());
+    CHECK_EQ(Smi::FromInt(42), GetFieldValue(*obj, 0));
+    CHECK_EQ(4.2, GetDoubleFieldValue(*obj, 1));
+    CHECK_EQ(*obj, GetFieldValue(*obj, 2));
+    CHECK(IsObjectShrinkable(*obj));
+
+    // Create several objects to complete the tracking.
+    for (int i = 1; i < Map::kGenerousAllocationCount; i++) {
+      CHECK(initial_map->IsInobjectSlackTrackingInProgress());
+      DirectHandle<JSObject> tmp = RunI<JSObject>(new_A_script);
+      CHECK_EQ(initial_map->IsInobjectSlackTrackingInProgress(),
+               IsObjectShrinkable(*tmp));
+    }
+    CHECK(!initial_map->IsInobjectSlackTrackingInProgress());
+    CHECK(!IsObjectShrinkable(*obj));
+
+    // No slack left.
+    CHECK_EQ(3, obj->map()->GetInObjectProperties());
+  }
+
+  void TestSubclassBasicNoBaseClassInstances() {
+    // Check that base class' and subclass' slack tracking do not interfere with
+    // each other.
+    // In this test we never create base class instances.
+
+    const char* source =
+        "'use strict';"
+        "class A {"
+        "  constructor(...args) {"
+        "    this.aa = 42;"
+        "    this.ad = 4.2;"
+        "    this.ao = this;"
+        "  }"
+        "};"
+        "class B extends A {"
+        "  constructor(...args) {"
+        "    super(...args);"
+        "    this.ba = 142;"
+        "    this.bd = 14.2;"
+        "    this.bo = this;"
+        "  }"
+        "};";
+    RunJS(source);
+
+    DirectHandle<JSFunction> a_func = GetLexical<JSFunction>("A");
+    DirectHandle<JSFunction> b_func = GetLexical<JSFunction>("B");
+
+    // Zero instances were created so far.
+    CHECK(!a_func->has_initial_map());
+    CHECK(!b_func->has_initial_map());
+
+    v8::Local<v8::Script> new_B_script = v8_compile("new B();");
+
+    DirectHandle<JSObject> obj = RunI<JSObject>(new_B_script);
+
+    CHECK(a_func->has_initial_map());
+    DirectHandle<Map> a_initial_map(a_func->initial_map(), i_isolate());
+
+    CHECK(b_func->has_initial_map());
+    DirectHandle<Map> b_initial_map(b_func->initial_map(), i_isolate());
+
+    // Zero instances of A created.
+    CHECK_EQ(Map::kSlackTrackingCounterStart,
+             a_initial_map->construction_counter());
+    CHECK(a_initial_map->IsInobjectSlackTrackingInProgress());
+
+    // One instance of B created.
+    CHECK_EQ(Map::kSlackTrackingCounterStart - 1,
+             b_initial_map->construction_counter());
+    CHECK(b_initial_map->IsInobjectSlackTrackingInProgress());
+
+    // There must be at least some slack.
+    CHECK_LT(10, obj->map()->GetInObjectProperties());
+    CHECK_EQ(Smi::FromInt(42), GetFieldValue(*obj, 0));
+    CHECK_EQ(4.2, GetDoubleFieldValue(*obj, 1));
+    CHECK_EQ(*obj, GetFieldValue(*obj, 2));
+    CHECK_EQ(Smi::FromInt(142), GetFieldValue(*obj, 3));
+    CHECK_EQ(14.2, GetDoubleFieldValue(*obj, 4));
+    CHECK_EQ(*obj, GetFieldValue(*obj, 5));
+    CHECK(IsObjectShrinkable(*obj));
+
+    // Create several subclass instances to complete the tracking.
+    for (int i = 1; i < Map::kGenerousAllocationCount; i++) {
+      CHECK(b_initial_map->IsInobjectSlackTrackingInProgress());
+      DirectHandle<JSObject> tmp = RunI<JSObject>(new_B_script);
+      CHECK_EQ(b_initial_map->IsInobjectSlackTrackingInProgress(),
+               IsObjectShrinkable(*tmp));
+    }
+    CHECK(!b_initial_map->IsInobjectSlackTrackingInProgress());
+    CHECK(!IsObjectShrinkable(*obj));
+
+    // Zero instances of A created.
+    CHECK_EQ(Map::kSlackTrackingCounterStart,
+             a_initial_map->construction_counter());
+    CHECK(a_initial_map->IsInobjectSlackTrackingInProgress());
+
+    // No slack left.
+    CHECK_EQ(6, obj->map()->GetInObjectProperties());
+  }
+
+  void TestSubclassBasic() {
+    // Check that base class' and subclass' slack tracking do not interfere with
+    // each other.
+    // In this test we first create enough base class instances to complete
+    // the slack tracking and then proceed creating subclass instances.
+
+    const char* source =
+        "'use strict';"
+        "class A {"
+        "  constructor(...args) {"
+        "    this.aa = 42;"
+        "    this.ad = 4.2;"
+        "    this.ao = this;"
+        "  }"
+        "};"
+        "class B extends A {"
+        "  constructor(...args) {"
+        "    super(...args);"
+        "    this.ba = 142;"
+        "    this.bd = 14.2;"
+        "    this.bo = this;"
+        "  }"
+        "};";
+    RunJS(source);
+
+    DirectHandle<JSFunction> a_func = GetLexical<JSFunction>("A");
+    DirectHandle<JSFunction> b_func = GetLexical<JSFunction>("B");
+
+    // Zero instances were created so far.
+    CHECK(!a_func->has_initial_map());
+    CHECK(!b_func->has_initial_map());
+
+    v8::Local<v8::Script> new_A_script = v8_compile("new A();");
+    v8::Local<v8::Script> new_B_script = v8_compile("new B();");
+
+    DirectHandle<JSObject> a_obj = RunI<JSObject>(new_A_script);
+    DirectHandle<JSObject> b_obj = RunI<JSObject>(new_B_script);
+
+    CHECK(a_func->has_initial_map());
+    DirectHandle<Map> a_initial_map(a_func->initial_map(), i_isolate());
+
+    CHECK(b_func->has_initial_map());
+    DirectHandle<Map> b_initial_map(b_func->initial_map(), i_isolate());
+
+    // One instance of a base class created.
+    CHECK_EQ(Map::kSlackTrackingCounterStart - 1,
+             a_initial_map->construction_counter());
+    CHECK(a_initial_map->IsInobjectSlackTrackingInProgress());
+
+    // One instance of a subclass created.
+    CHECK_EQ(Map::kSlackTrackingCounterStart - 1,
+             b_initial_map->construction_counter());
+    CHECK(b_initial_map->IsInobjectSlackTrackingInProgress());
+
+    // Create several base class instances to complete the tracking.
+    for (int i = 1; i < Map::kGenerousAllocationCount; i++) {
+      CHECK(a_initial_map->IsInobjectSlackTrackingInProgress());
+      DirectHandle<JSObject> tmp = RunI<JSObject>(new_A_script);
+      CHECK_EQ(a_initial_map->IsInobjectSlackTrackingInProgress(),
+               IsObjectShrinkable(*tmp));
+    }
+    CHECK(!a_initial_map->IsInobjectSlackTrackingInProgress());
+    CHECK(!IsObjectShrinkable(*a_obj));
+
+    // No slack left.
+    CHECK_EQ(3, a_obj->map()->GetInObjectProperties());
+
+    // There must be at least some slack.
+    CHECK_LT(10, b_obj->map()->GetInObjectProperties());
+    CHECK_EQ(Smi::FromInt(42), GetFieldValue(*b_obj, 0));
+    CHECK_EQ(4.2, GetDoubleFieldValue(*b_obj, 1));
+    CHECK_EQ(*b_obj, GetFieldValue(*b_obj, 2));
+    CHECK_EQ(Smi::FromInt(142), GetFieldValue(*b_obj, 3));
+    CHECK_EQ(14.2, GetDoubleFieldValue(*b_obj, 4));
+    CHECK_EQ(*b_obj, GetFieldValue(*b_obj, 5));
+    CHECK(IsObjectShrinkable(*b_obj));
+
+    // Create several subclass instances to complete the tracking.
+    for (int i = 1; i < Map::kGenerousAllocationCount; i++) {
+      CHECK(b_initial_map->IsInobjectSlackTrackingInProgress());
+      DirectHandle<JSObject> tmp = RunI<JSObject>(new_B_script);
+      CHECK_EQ(b_initial_map->IsInobjectSlackTrackingInProgress(),
+               IsObjectShrinkable(*tmp));
+    }
+    CHECK(!b_initial_map->IsInobjectSlackTrackingInProgress());
+    CHECK(!IsObjectShrinkable(*b_obj));
+
+    // No slack left.
+    CHECK_EQ(6, b_obj->map()->GetInObjectProperties());
+  }
+
+  void TestSubclassObjectBuiltin() {
+    TestSubclassBuiltin("A1", JS_OBJECT_TYPE, "Object", "true");
+    TestSubclassBuiltin("A2", JS_OBJECT_TYPE, "Object", "42");
+    TestSubclassBuiltin("A3", JS_OBJECT_TYPE, "Object", "'some string'");
+  }
+
+  void TestSubclassFunctionBuiltin() {
+    TestSubclassBuiltin("A1", JS_FUNCTION_TYPE, "Function", "'return 153;'");
+    TestSubclassBuiltin("A2", JS_FUNCTION_TYPE, "Function", "'this.a = 44;'");
+  }
+
+  void TestSubclassBooleanBuiltin() {
+    TestSubclassBuiltin("A1", JS_PRIMITIVE_WRAPPER_TYPE, "Boolean", "true");
+    TestSubclassBuiltin("A2", JS_PRIMITIVE_WRAPPER_TYPE, "Boolean", "false");
+  }
+
+  void TestSubclassErrorBuiltin() {
+    const int first_field = 3;
+    TestSubclassBuiltin("A1", JS_ERROR_TYPE, "Error", "'err'", first_field);
+    TestSubclassBuiltin("A2", JS_ERROR_TYPE, "EvalError", "'err'", first_field);
+    TestSubclassBuiltin("A3", JS_ERROR_TYPE, "RangeError", "'err'",
+                        first_field);
+    TestSubclassBuiltin("A4", JS_ERROR_TYPE, "ReferenceError", "'err'",
+                        first_field);
+    TestSubclassBuiltin("A5", JS_ERROR_TYPE, "SyntaxError", "'err'",
+                        first_field);
+    TestSubclassBuiltin("A6", JS_ERROR_TYPE, "TypeError", "'err'", first_field);
+    TestSubclassBuiltin("A7", JS_ERROR_TYPE, "URIError", "'err'", first_field);
+  }
+
+  void TestSubclassNumberBuiltin() {
+    TestSubclassBuiltin("A1", JS_PRIMITIVE_WRAPPER_TYPE, "Number", "42");
+    TestSubclassBuiltin("A2", JS_PRIMITIVE_WRAPPER_TYPE, "Number", "4.2");
+  }
+
+  void TestSubclassDateBuiltin() {
+    TestSubclassBuiltin("A1", JS_DATE_TYPE, "Date", "123456789");
+  }
+
+  void TestSubclassStringBuiltin() {
+    TestSubclassBuiltin("A1", JS_PRIMITIVE_WRAPPER_TYPE, "String",
+                        "'some string'");
+    TestSubclassBuiltin("A2", JS_PRIMITIVE_WRAPPER_TYPE, "String", "");
+  }
+
+  void TestSubclassRegExpBuiltin() {
+    const int first_field = 1;
+    TestSubclassBuiltin("A1", JS_REG_EXP_TYPE, "RegExp", "'o(..)h', 'g'",
+                        first_field);
+  }
+
+  void TestSubclassArrayBuiltin() {
+    TestSubclassBuiltin("A1", JS_ARRAY_TYPE, "Array", "42");
+  }
+
+  void TestSubclassTypedArrayBuiltin() {
+#define TYPED_ARRAY_TEST(Type, type, TYPE, elementType) \
+  TestSubclassBuiltin("A" #Type, JS_TYPED_ARRAY_TYPE, #Type "Array", "42");
+
+    TYPED_ARRAYS(TYPED_ARRAY_TEST)
+
+#undef TYPED_ARRAY_TEST
+  }
+
+  void TestSubclassCollectionBuiltin() {
+    TestSubclassBuiltin("A1", JS_SET_TYPE, "Set", "");
+    TestSubclassBuiltin("A2", JS_MAP_TYPE, "Map", "");
+    TestSubclassBuiltin("A3", JS_WEAK_SET_TYPE, "WeakSet", "");
+    TestSubclassBuiltin("A4", JS_WEAK_MAP_TYPE, "WeakMap", "");
+  }
+
+  void TestSubclassArrayBufferBuiltin() {
+    TestSubclassBuiltin("A1", JS_ARRAY_BUFFER_TYPE, "ArrayBuffer", "42");
+    TestSubclassBuiltin("A2", JS_DATA_VIEW_TYPE, "DataView",
+                        "new ArrayBuffer(42)");
+  }
+
+  void TestSubclassPromiseBuiltin() {
+    TestSubclassBuiltin("A1", JS_PROMISE_TYPE, "Promise",
+                        "function(resolve, reject) { resolve('ok'); }");
+  }
 };
 
-TEST_F(InObjectSlackTrackingTest, JSObjectBasic) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-  const char* source =
-      "function A() {"
-      "  this.a = 42;"
-      "  this.d = 4.2;"
-      "  this.o = this;"
-      "}";
-  CompileRun(source);
-
-  Handle<JSFunction> func = GetGlobal<JSFunction>("A");
-
-  // Zero instances were created so far.
-  CHECK(!func->has_initial_map());
-
-  v8::Local<v8::Script> new_A_script = Compile("new A();");
-
-  Handle<JSObject> obj = RunI<JSObject>(new_A_script);
-
-  CHECK(func->has_initial_map());
-  Handle<Map> initial_map(func->initial_map(), func->GetIsolate());
-
-  // One instance created.
-  CHECK_EQ(Map::kSlackTrackingCounterStart - 1,
-           initial_map->construction_counter());
-  CHECK(initial_map->IsInobjectSlackTrackingInProgress());
-
-  // There must be at least some slack.
-  CHECK_LT(5, obj->map().GetInObjectProperties());
-  CHECK_EQ(Smi::FromInt(42), GetFieldValue(*obj, 0));
-  CHECK_EQ(4.2, GetDoubleFieldValue(*obj, 1));
-  CHECK_EQ(*obj, GetFieldValue(*obj, 2));
-  CHECK(IsObjectShrinkable(*obj));
-
-  // Create several objects to complete the tracking.
-  for (int i = 1; i < Map::kGenerousAllocationCount; i++) {
-    CHECK(initial_map->IsInobjectSlackTrackingInProgress());
-    Handle<JSObject> tmp = RunI<JSObject>(new_A_script);
-    CHECK_EQ(initial_map->IsInobjectSlackTrackingInProgress(),
-             IsObjectShrinkable(*tmp));
-  }
-  CHECK(!initial_map->IsInobjectSlackTrackingInProgress());
-  CHECK(!IsObjectShrinkable(*obj));
-
-  // No slack left.
-  CHECK_EQ(3, obj->map().GetInObjectProperties());
-}
+TEST_F(InObjectSlackTrackingTest, JSObjectBasic) { TestJSObjectBasic(); }
 
 TEST_F(InObjectSlackTrackingTest, JSObjectBasicNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestJSObjectBasic();
 }
 
-TEST_F(InObjectSlackTrackingTest, JSObjectComplex) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-  const char* source =
-      "function A(n) {"
-      "  if (n > 0) this.a = 42;"
-      "  if (n > 1) this.d = 4.2;"
-      "  if (n > 2) this.o1 = this;"
-      "  if (n > 3) this.o2 = this;"
-      "  if (n > 4) this.o3 = this;"
-      "  if (n > 5) this.o4 = this;"
-      "}";
-  CompileRun(source);
-
-  Handle<JSFunction> func = GetGlobal<JSFunction>("A");
-
-  // Zero instances were created so far.
-  CHECK(!func->has_initial_map());
-
-  Handle<JSObject> obj1 = CompileRunI<JSObject>("new A(1);");
-  Handle<JSObject> obj3 = CompileRunI<JSObject>("new A(3);");
-  Handle<JSObject> obj5 = CompileRunI<JSObject>("new A(5);");
-
-  CHECK(func->has_initial_map());
-  Handle<Map> initial_map(func->initial_map(), func->GetIsolate());
-
-  // Three instances created.
-  CHECK_EQ(Map::kSlackTrackingCounterStart - 3,
-           initial_map->construction_counter());
-  CHECK(initial_map->IsInobjectSlackTrackingInProgress());
-
-  // There must be at least some slack.
-  CHECK_LT(5, obj3->map().GetInObjectProperties());
-  CHECK_EQ(Smi::FromInt(42), GetFieldValue(*obj3, 0));
-  CHECK_EQ(4.2, GetDoubleFieldValue(*obj3, 1));
-  CHECK_EQ(*obj3, GetFieldValue(*obj3, 2));
-  CHECK(IsObjectShrinkable(*obj1));
-  CHECK(IsObjectShrinkable(*obj3));
-  CHECK(IsObjectShrinkable(*obj5));
-
-  // Create several objects to complete the tracking.
-  for (int i = 3; i < Map::kGenerousAllocationCount; i++) {
-    CHECK(initial_map->IsInobjectSlackTrackingInProgress());
-    CompileRun("new A(3);");
-  }
-  CHECK(!initial_map->IsInobjectSlackTrackingInProgress());
-
-  // obj1 and obj2 stays shrinkable because we don't clear unused fields.
-  CHECK(IsObjectShrinkable(*obj1));
-  CHECK(IsObjectShrinkable(*obj3));
-  CHECK(!IsObjectShrinkable(*obj5));
-
-  CHECK_EQ(5, obj1->map().GetInObjectProperties());
-  CHECK_EQ(4, obj1->map().UnusedPropertyFields());
-
-  CHECK_EQ(5, obj3->map().GetInObjectProperties());
-  CHECK_EQ(2, obj3->map().UnusedPropertyFields());
-
-  CHECK_EQ(5, obj5->map().GetInObjectProperties());
-  CHECK_EQ(0, obj5->map().UnusedPropertyFields());
-
-  // Since slack tracking is complete, the new objects should not be shrinkable.
-  obj1 = CompileRunI<JSObject>("new A(1);");
-  obj3 = CompileRunI<JSObject>("new A(3);");
-  obj5 = CompileRunI<JSObject>("new A(5);");
-
-  CHECK(!IsObjectShrinkable(*obj1));
-  CHECK(!IsObjectShrinkable(*obj3));
-  CHECK(!IsObjectShrinkable(*obj5));
-}
+TEST_F(InObjectSlackTrackingTest, JSObjectComplex) { TestJSObjectComplex(); }
 
 TEST_F(InObjectSlackTrackingTest, JSObjectComplexNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestJSObjectComplex();
 }
 
 TEST_F(InObjectSlackTrackingTest, JSGeneratorObjectBasic) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-  const char* source =
-      "function* A() {"
-      "  var i = 0;"
-      "  while(true) {"
-      "    yield i++;"
-      "  }"
-      "};"
-      "function CreateGenerator() {"
-      "  var o = A();"
-      "  o.a = 42;"
-      "  o.d = 4.2;"
-      "  o.o = o;"
-      "  return o;"
-      "}";
-  CompileRun(source);
-
-  Handle<JSFunction> func = GetGlobal<JSFunction>("A");
-
-  // Zero instances were created so far.
-  CHECK(!func->has_initial_map());
-
-  v8::Local<v8::Script> new_A_script = Compile("CreateGenerator();");
-
-  Handle<JSObject> obj = RunI<JSObject>(new_A_script);
-
-  CHECK(func->has_initial_map());
-  Handle<Map> initial_map(func->initial_map(), func->GetIsolate());
-
-  // One instance created.
-  CHECK_EQ(Map::kSlackTrackingCounterStart - 1,
-           initial_map->construction_counter());
-  CHECK(initial_map->IsInobjectSlackTrackingInProgress());
-
-  // There must be at least some slack.
-  CHECK_LT(5, obj->map().GetInObjectProperties());
-  CHECK_EQ(Smi::FromInt(42), GetFieldValue(*obj, 0));
-  CHECK_EQ(4.2, GetDoubleFieldValue(*obj, 1));
-  CHECK_EQ(*obj, GetFieldValue(*obj, 2));
-  CHECK(IsObjectShrinkable(*obj));
-
-  // Create several objects to complete the tracking.
-  for (int i = 1; i < Map::kGenerousAllocationCount; i++) {
-    CHECK(initial_map->IsInobjectSlackTrackingInProgress());
-    Handle<JSObject> tmp = RunI<JSObject>(new_A_script);
-    CHECK_EQ(initial_map->IsInobjectSlackTrackingInProgress(),
-             IsObjectShrinkable(*tmp));
-  }
-  CHECK(!initial_map->IsInobjectSlackTrackingInProgress());
-  CHECK(!IsObjectShrinkable(*obj));
-
-  // No slack left.
-  CHECK_EQ(3, obj->map().GetInObjectProperties());
+  TestJSGeneratorObjectBasic();
 }
 
 TEST_F(InObjectSlackTrackingTest, JSGeneratorObjectBasicNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestJSGeneratorObjectBasic();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassBasicNoBaseClassInstances) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-
-  // Check that base class' and subclass' slack tracking do not interfere with
-  // each other.
-  // In this test we never create base class instances.
-
-  const char* source =
-      "'use strict';"
-      "class A {"
-      "  constructor(...args) {"
-      "    this.aa = 42;"
-      "    this.ad = 4.2;"
-      "    this.ao = this;"
-      "  }"
-      "};"
-      "class B extends A {"
-      "  constructor(...args) {"
-      "    super(...args);"
-      "    this.ba = 142;"
-      "    this.bd = 14.2;"
-      "    this.bo = this;"
-      "  }"
-      "};";
-  CompileRun(source);
-
-  Handle<JSFunction> a_func = GetLexical<JSFunction>("A");
-  Handle<JSFunction> b_func = GetLexical<JSFunction>("B");
-
-  // Zero instances were created so far.
-  CHECK(!a_func->has_initial_map());
-  CHECK(!b_func->has_initial_map());
-
-  v8::Local<v8::Script> new_B_script = Compile("new B();");
-
-  Handle<JSObject> obj = RunI<JSObject>(new_B_script);
-
-  CHECK(a_func->has_initial_map());
-  Handle<Map> a_initial_map(a_func->initial_map(), a_func->GetIsolate());
-
-  CHECK(b_func->has_initial_map());
-  Handle<Map> b_initial_map(b_func->initial_map(), a_func->GetIsolate());
-
-  // Zero instances of A created.
-  CHECK_EQ(Map::kSlackTrackingCounterStart,
-           a_initial_map->construction_counter());
-  CHECK(a_initial_map->IsInobjectSlackTrackingInProgress());
-
-  // One instance of B created.
-  CHECK_EQ(Map::kSlackTrackingCounterStart - 1,
-           b_initial_map->construction_counter());
-  CHECK(b_initial_map->IsInobjectSlackTrackingInProgress());
-
-  // There must be at least some slack.
-  CHECK_LT(10, obj->map().GetInObjectProperties());
-  CHECK_EQ(Smi::FromInt(42), GetFieldValue(*obj, 0));
-  CHECK_EQ(4.2, GetDoubleFieldValue(*obj, 1));
-  CHECK_EQ(*obj, GetFieldValue(*obj, 2));
-  CHECK_EQ(Smi::FromInt(142), GetFieldValue(*obj, 3));
-  CHECK_EQ(14.2, GetDoubleFieldValue(*obj, 4));
-  CHECK_EQ(*obj, GetFieldValue(*obj, 5));
-  CHECK(IsObjectShrinkable(*obj));
-
-  // Create several subclass instances to complete the tracking.
-  for (int i = 1; i < Map::kGenerousAllocationCount; i++) {
-    CHECK(b_initial_map->IsInobjectSlackTrackingInProgress());
-    Handle<JSObject> tmp = RunI<JSObject>(new_B_script);
-    CHECK_EQ(b_initial_map->IsInobjectSlackTrackingInProgress(),
-             IsObjectShrinkable(*tmp));
-  }
-  CHECK(!b_initial_map->IsInobjectSlackTrackingInProgress());
-  CHECK(!IsObjectShrinkable(*obj));
-
-  // Zero instances of A created.
-  CHECK_EQ(Map::kSlackTrackingCounterStart,
-           a_initial_map->construction_counter());
-  CHECK(a_initial_map->IsInobjectSlackTrackingInProgress());
-
-  // No slack left.
-  CHECK_EQ(6, obj->map().GetInObjectProperties());
+  TestSubclassBasicNoBaseClassInstances();
 }
 
 TEST_F(InObjectSlackTrackingTest,
        SubclassBasicNoBaseClassInstancesNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestSubclassBasicNoBaseClassInstances();
 }
 
-TEST_F(InObjectSlackTrackingTest, SubclassBasic) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-
-  // Check that base class' and subclass' slack tracking do not interfere with
-  // each other.
-  // In this test we first create enough base class instances to complete
-  // the slack tracking and then proceed creating subclass instances.
-
-  const char* source =
-      "'use strict';"
-      "class A {"
-      "  constructor(...args) {"
-      "    this.aa = 42;"
-      "    this.ad = 4.2;"
-      "    this.ao = this;"
-      "  }"
-      "};"
-      "class B extends A {"
-      "  constructor(...args) {"
-      "    super(...args);"
-      "    this.ba = 142;"
-      "    this.bd = 14.2;"
-      "    this.bo = this;"
-      "  }"
-      "};";
-  CompileRun(source);
-
-  Handle<JSFunction> a_func = GetLexical<JSFunction>("A");
-  Handle<JSFunction> b_func = GetLexical<JSFunction>("B");
-
-  // Zero instances were created so far.
-  CHECK(!a_func->has_initial_map());
-  CHECK(!b_func->has_initial_map());
-
-  v8::Local<v8::Script> new_A_script = Compile("new A();");
-  v8::Local<v8::Script> new_B_script = Compile("new B();");
-
-  Handle<JSObject> a_obj = RunI<JSObject>(new_A_script);
-  Handle<JSObject> b_obj = RunI<JSObject>(new_B_script);
-
-  CHECK(a_func->has_initial_map());
-  Handle<Map> a_initial_map(a_func->initial_map(), a_func->GetIsolate());
-
-  CHECK(b_func->has_initial_map());
-  Handle<Map> b_initial_map(b_func->initial_map(), a_func->GetIsolate());
-
-  // One instance of a base class created.
-  CHECK_EQ(Map::kSlackTrackingCounterStart - 1,
-           a_initial_map->construction_counter());
-  CHECK(a_initial_map->IsInobjectSlackTrackingInProgress());
-
-  // One instance of a subclass created.
-  CHECK_EQ(Map::kSlackTrackingCounterStart - 1,
-           b_initial_map->construction_counter());
-  CHECK(b_initial_map->IsInobjectSlackTrackingInProgress());
-
-  // Create several base class instances to complete the tracking.
-  for (int i = 1; i < Map::kGenerousAllocationCount; i++) {
-    CHECK(a_initial_map->IsInobjectSlackTrackingInProgress());
-    Handle<JSObject> tmp = RunI<JSObject>(new_A_script);
-    CHECK_EQ(a_initial_map->IsInobjectSlackTrackingInProgress(),
-             IsObjectShrinkable(*tmp));
-  }
-  CHECK(!a_initial_map->IsInobjectSlackTrackingInProgress());
-  CHECK(!IsObjectShrinkable(*a_obj));
-
-  // No slack left.
-  CHECK_EQ(3, a_obj->map().GetInObjectProperties());
-
-  // There must be at least some slack.
-  CHECK_LT(10, b_obj->map().GetInObjectProperties());
-  CHECK_EQ(Smi::FromInt(42), GetFieldValue(*b_obj, 0));
-  CHECK_EQ(4.2, GetDoubleFieldValue(*b_obj, 1));
-  CHECK_EQ(*b_obj, GetFieldValue(*b_obj, 2));
-  CHECK_EQ(Smi::FromInt(142), GetFieldValue(*b_obj, 3));
-  CHECK_EQ(14.2, GetDoubleFieldValue(*b_obj, 4));
-  CHECK_EQ(*b_obj, GetFieldValue(*b_obj, 5));
-  CHECK(IsObjectShrinkable(*b_obj));
-
-  // Create several subclass instances to complete the tracking.
-  for (int i = 1; i < Map::kGenerousAllocationCount; i++) {
-    CHECK(b_initial_map->IsInobjectSlackTrackingInProgress());
-    Handle<JSObject> tmp = RunI<JSObject>(new_B_script);
-    CHECK_EQ(b_initial_map->IsInobjectSlackTrackingInProgress(),
-             IsObjectShrinkable(*tmp));
-  }
-  CHECK(!b_initial_map->IsInobjectSlackTrackingInProgress());
-  CHECK(!IsObjectShrinkable(*b_obj));
-
-  // No slack left.
-  CHECK_EQ(6, b_obj->map().GetInObjectProperties());
-}
+TEST_F(InObjectSlackTrackingTest, SubclassBasic) { TestSubclassBasic(); }
 
 TEST_F(InObjectSlackTrackingTest, SubclassBasicNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestSubclassBasic();
 }
 
@@ -737,9 +800,6 @@ TEST_F(InObjectSlackTrackingTest, LongSubclassChain3) {
 }
 
 TEST_F(InObjectSlackTrackingTest, InobjectPropetiesCountOverflowInSubclass) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-
   std::vector<int> hierarchy_desc;
   const int kNoOverflowCount = 5;
   for (int i = 0; i < kNoOverflowCount; i++) {
@@ -758,16 +818,16 @@ TEST_F(InObjectSlackTrackingTest, InobjectPropetiesCountOverflowInSubclass) {
     // Create |class_name| objects and check slack tracking.
     v8::Local<v8::Script> new_script = GetNewObjectScript(class_name);
 
-    Handle<JSFunction> func = GetLexical<JSFunction>(class_name);
+    DirectHandle<JSFunction> func = GetLexical<JSFunction>(class_name);
 
-    Handle<JSObject> obj = RunI<JSObject>(new_script);
+    DirectHandle<JSObject> obj = RunI<JSObject>(new_script);
 
     CHECK(func->has_initial_map());
-    Handle<Map> initial_map(func->initial_map(), func->GetIsolate());
+    DirectHandle<Map> initial_map(func->initial_map(), i_isolate());
 
     // There must be no slack left.
-    CHECK_EQ(JSObject::kMaxInstanceSize, obj->map().instance_size());
-    CHECK_EQ(kMaxInobjectProperties, obj->map().GetInObjectProperties());
+    CHECK_EQ(JSObject::kMaxInstanceSize, obj->map()->instance_size());
+    CHECK_EQ(kMaxInobjectProperties, obj->map()->GetInObjectProperties());
 
     // One instance was created.
     CHECK_EQ(Map::kSlackTrackingCounterStart - 1,
@@ -777,14 +837,14 @@ TEST_F(InObjectSlackTrackingTest, InobjectPropetiesCountOverflowInSubclass) {
     // Create several instances to complete the tracking.
     for (int i = 1; i < Map::kGenerousAllocationCount; i++) {
       CHECK(initial_map->IsInobjectSlackTrackingInProgress());
-      Handle<JSObject> tmp = RunI<JSObject>(new_script);
+      DirectHandle<JSObject> tmp = RunI<JSObject>(new_script);
       CHECK(!IsObjectShrinkable(*tmp));
     }
     CHECK(!initial_map->IsInobjectSlackTrackingInProgress());
     CHECK(!IsObjectShrinkable(*obj));
 
     // No slack left.
-    CHECK_EQ(kMaxInobjectProperties, obj->map().GetInObjectProperties());
+    CHECK_EQ(kMaxInobjectProperties, obj->map()->GetInObjectProperties());
   }
 
   // The other classes in the hierarchy are not affected.
@@ -912,9 +972,6 @@ TEST_F(InObjectSlackTrackingTest, ObjectLiteralPropertyBackingStoreSize) {
 TEST_F(InObjectSlackTrackingTest, SlowModeSubclass) {
   if (v8_flags.stress_concurrent_allocation) return;
 
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-
   std::vector<int> hierarchy_desc;
   const int kNoOverflowCount = 5;
   for (int i = 0; i < kNoOverflowCount; i++) {
@@ -933,16 +990,16 @@ TEST_F(InObjectSlackTrackingTest, SlowModeSubclass) {
     // Create |class_name| objects and check slack tracking.
     v8::Local<v8::Script> new_script = GetNewObjectScript(class_name);
 
-    Handle<JSFunction> func = GetLexical<JSFunction>(class_name);
+    DirectHandle<JSFunction> func = GetLexical<JSFunction>(class_name);
 
-    Handle<JSObject> obj = RunI<JSObject>(new_script);
+    DirectHandle<JSObject> obj = RunI<JSObject>(new_script);
 
     CHECK(func->has_initial_map());
-    Handle<Map> initial_map(func->initial_map(), func->GetIsolate());
+    DirectHandle<Map> initial_map(func->initial_map(), i_isolate());
 
     // Object should go dictionary mode.
-    CHECK_EQ(JSObject::kHeaderSize, obj->map().instance_size());
-    CHECK(obj->map().is_dictionary_map());
+    CHECK_EQ(JSObject::kHeaderSize, obj->map()->instance_size());
+    CHECK(obj->map()->is_dictionary_map());
 
     // One instance was created.
     CHECK_EQ(Map::kSlackTrackingCounterStart - 1,
@@ -952,15 +1009,15 @@ TEST_F(InObjectSlackTrackingTest, SlowModeSubclass) {
     // Create several instances to complete the tracking.
     for (int i = 1; i < Map::kGenerousAllocationCount; i++) {
       CHECK(initial_map->IsInobjectSlackTrackingInProgress());
-      Handle<JSObject> tmp = RunI<JSObject>(new_script);
+      DirectHandle<JSObject> tmp = RunI<JSObject>(new_script);
       CHECK(!IsObjectShrinkable(*tmp));
     }
     CHECK(!initial_map->IsInobjectSlackTrackingInProgress());
     CHECK(!IsObjectShrinkable(*obj));
 
     // Object should stay in dictionary mode.
-    CHECK_EQ(JSObject::kHeaderSize, obj->map().instance_size());
-    CHECK(obj->map().is_dictionary_map());
+    CHECK_EQ(JSObject::kHeaderSize, obj->map()->instance_size());
+    CHECK(obj->map()->is_dictionary_map());
   }
 
   // The other classes in the hierarchy are not affected.
@@ -968,199 +1025,137 @@ TEST_F(InObjectSlackTrackingTest, SlowModeSubclass) {
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassObjectBuiltin) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-  TestSubclassBuiltin("A1", JS_OBJECT_TYPE, "Object", "true");
-  TestSubclassBuiltin("A2", JS_OBJECT_TYPE, "Object", "42");
-  TestSubclassBuiltin("A3", JS_OBJECT_TYPE, "Object", "'some string'");
+  TestSubclassObjectBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassObjectBuiltinNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestSubclassObjectBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassFunctionBuiltin) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-
-  TestSubclassBuiltin("A1", JS_FUNCTION_TYPE, "Function", "'return 153;'");
-  TestSubclassBuiltin("A2", JS_FUNCTION_TYPE, "Function", "'this.a = 44;'");
+  TestSubclassFunctionBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassFunctionBuiltinNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestSubclassFunctionBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassBooleanBuiltin) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-
-  TestSubclassBuiltin("A1", JS_PRIMITIVE_WRAPPER_TYPE, "Boolean", "true");
-  TestSubclassBuiltin("A2", JS_PRIMITIVE_WRAPPER_TYPE, "Boolean", "false");
+  TestSubclassBooleanBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassBooleanBuiltinNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestSubclassBooleanBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassErrorBuiltin) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-
-  const int first_field = 2;
-  TestSubclassBuiltin("A1", JS_ERROR_TYPE, "Error", "'err'", first_field);
-  TestSubclassBuiltin("A2", JS_ERROR_TYPE, "EvalError", "'err'", first_field);
-  TestSubclassBuiltin("A3", JS_ERROR_TYPE, "RangeError", "'err'", first_field);
-  TestSubclassBuiltin("A4", JS_ERROR_TYPE, "ReferenceError", "'err'",
-                      first_field);
-  TestSubclassBuiltin("A5", JS_ERROR_TYPE, "SyntaxError", "'err'", first_field);
-  TestSubclassBuiltin("A6", JS_ERROR_TYPE, "TypeError", "'err'", first_field);
-  TestSubclassBuiltin("A7", JS_ERROR_TYPE, "URIError", "'err'", first_field);
+  TestSubclassErrorBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassErrorBuiltinNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestSubclassErrorBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassNumberBuiltin) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-
-  TestSubclassBuiltin("A1", JS_PRIMITIVE_WRAPPER_TYPE, "Number", "42");
-  TestSubclassBuiltin("A2", JS_PRIMITIVE_WRAPPER_TYPE, "Number", "4.2");
+  TestSubclassNumberBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassNumberBuiltinNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestSubclassNumberBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassDateBuiltin) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-
-  TestSubclassBuiltin("A1", JS_DATE_TYPE, "Date", "123456789");
+  TestSubclassDateBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassDateBuiltinNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestSubclassDateBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassStringBuiltin) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-
-  TestSubclassBuiltin("A1", JS_PRIMITIVE_WRAPPER_TYPE, "String",
-                      "'some string'");
-  TestSubclassBuiltin("A2", JS_PRIMITIVE_WRAPPER_TYPE, "String", "");
+  TestSubclassStringBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassStringBuiltinNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
+  TestSubclassStringBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassRegExpBuiltin) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-
-  const int first_field = 1;
-  TestSubclassBuiltin("A1", JS_REG_EXP_TYPE, "RegExp", "'o(..)h', 'g'",
-                      first_field);
+  TestSubclassRegExpBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassRegExpBuiltinNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestSubclassRegExpBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassArrayBuiltin) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-
-  TestSubclassBuiltin("A1", JS_ARRAY_TYPE, "Array", "42");
+  TestSubclassArrayBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassArrayBuiltinNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestSubclassArrayBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassTypedArrayBuiltin) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-
-#define TYPED_ARRAY_TEST_F(InObjectSlackTrackingTest, Type, type, TYPE, \
-                           elementType)                                 \
-  TestSubclassBuiltin("A" #Type, JS_TYPED_ARRAY_TYPE, #Type "Array", "42");
-
-  TYPED_ARRAYS(TYPED_ARRAY_TEST)
-
-#undef TYPED_ARRAY_TEST
+  TestSubclassTypedArrayBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassTypedArrayBuiltinNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestSubclassTypedArrayBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassCollectionBuiltin) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-  CcTest::InitializeVM();
-  v8::HandleScope scope(CcTest::isolate());
-
-  TestSubclassBuiltin("A1", JS_SET_TYPE, "Set", "");
-  TestSubclassBuiltin("A2", JS_MAP_TYPE, "Map", "");
-  TestSubclassBuiltin("A3", JS_WEAK_SET_TYPE, "WeakSet", "");
-  TestSubclassBuiltin("A4", JS_WEAK_MAP_TYPE, "WeakMap", "");
+  TestSubclassCollectionBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassCollectionBuiltinNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestSubclassCollectionBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassArrayBufferBuiltin) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-  CcTest::InitializeVM();
-  v8::HandleScope scope(CcTest::isolate());
-
-  TestSubclassBuiltin("A1", JS_ARRAY_BUFFER_TYPE, "ArrayBuffer", "42");
-  TestSubclassBuiltin("A2", JS_DATA_VIEW_TYPE, "DataView",
-                      "new ArrayBuffer(42)");
+  TestSubclassArrayBufferBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassArrayBufferBuiltinNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestSubclassArrayBufferBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassPromiseBuiltin) {
-  // Avoid eventual completion of in-object slack tracking.
-  v8_flags.always_turbofan = false;
-  CcTest::InitializeVM();
-  v8::HandleScope scope(CcTest::isolate());
-
-  TestSubclassBuiltin("A1", JS_PROMISE_TYPE, "Promise",
-                      "function(resolve, reject) { resolve('ok'); }");
+  TestSubclassPromiseBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassPromiseBuiltinNoInlineNew) {
-  v8_flags.inline_new = false;
+  FlagScope<bool> no_inline_new(&v8_flags.inline_new, false);
+  i_isolate()->heap()->DisableInlineAllocation();
   TestSubclassPromiseBuiltin();
 }
 
 TEST_F(InObjectSlackTrackingTest, SubclassTranspiledClassHierarchy) {
-  CcTest::InitializeVM();
-  v8::HandleScope scope(CcTest::isolate());
-
-  CompileRun(
+  RunJS(
       "Object.setPrototypeOf(B, A);\n"
       "function A() {\n"
       "  this.a0 = 0;\n"
@@ -1189,7 +1184,7 @@ TEST_F(InObjectSlackTrackingTest, SubclassTranspiledClassHierarchy) {
       "  this.b = 1;\n"
       "};\n");
 
-  Handle<JSFunction> func = GetGlobal<JSFunction>("B");
+  DirectHandle<JSFunction> func = GetGlobal<JSFunction>("B");
 
   // Zero instances have been created so far.
   CHECK(!func->has_initial_map());
@@ -1199,7 +1194,7 @@ TEST_F(InObjectSlackTrackingTest, SubclassTranspiledClassHierarchy) {
   RunI<JSObject>(new_script);
 
   CHECK(func->has_initial_map());
-  Handle<Map> initial_map(func->initial_map(), func->GetIsolate());
+  DirectHandle<Map> initial_map(func->initial_map(), i_isolate());
 
   CHECK_EQ(JS_OBJECT_TYPE, initial_map->instance_type());
 
@@ -1210,7 +1205,7 @@ TEST_F(InObjectSlackTrackingTest, SubclassTranspiledClassHierarchy) {
 
   // Create two instances in order to ensure that |obj|.o is a data field
   // in case of Function subclassing.
-  Handle<JSObject> obj = RunI<JSObject>(new_script);
+  DirectHandle<JSObject> obj = RunI<JSObject>(new_script);
 
   // Two instances of a subclass created.
   CHECK_EQ(Map::kSlackTrackingCounterStart - 2,
@@ -1221,7 +1216,7 @@ TEST_F(InObjectSlackTrackingTest, SubclassTranspiledClassHierarchy) {
   // Create several subclass instances to complete the tracking.
   for (int i = 2; i < Map::kGenerousAllocationCount; i++) {
     CHECK(initial_map->IsInobjectSlackTrackingInProgress());
-    Handle<JSObject> tmp = RunI<JSObject>(new_script);
+    DirectHandle<JSObject> tmp = RunI<JSObject>(new_script);
     CHECK_EQ(initial_map->IsInobjectSlackTrackingInProgress(),
              IsObjectShrinkable(*tmp));
   }
@@ -1229,20 +1224,17 @@ TEST_F(InObjectSlackTrackingTest, SubclassTranspiledClassHierarchy) {
   CHECK(!IsObjectShrinkable(*obj));
 
   // No slack left.
-  CHECK_EQ(21, obj->map().GetInObjectProperties());
-  CHECK_EQ(JS_OBJECT_TYPE, obj->map().instance_type());
+  CHECK_EQ(21, obj->map()->GetInObjectProperties());
+  CHECK_EQ(JS_OBJECT_TYPE, obj->map()->instance_type());
 }
 
 TEST_F(InObjectSlackTrackingTest, Regress8853_ClassConstructor) {
-  CcTest::InitializeVM();
-  v8::HandleScope scope(CcTest::isolate());
-
   // For classes without any this.prop assignments in their
   // constructors we start out with 10 inobject properties.
-  Handle<JSObject> obj = CompileRunI<JSObject>("new (class {});\n");
-  CHECK(obj->map().IsInobjectSlackTrackingInProgress());
+  DirectHandle<JSObject> obj = CompileRunI<JSObject>("new (class {});\n");
+  CHECK(obj->map()->IsInobjectSlackTrackingInProgress());
   CHECK(IsObjectShrinkable(*obj));
-  CHECK_EQ(10, obj->map().GetInObjectProperties());
+  CHECK_EQ(10, obj->map()->GetInObjectProperties());
 
   // For classes with N explicit this.prop assignments in their
   // constructors we start out with N+8 inobject properties.
@@ -1254,39 +1246,33 @@ TEST_F(InObjectSlackTrackingTest, Regress8853_ClassConstructor) {
       "    this.z = 3;\n"
       "  }\n"
       "});\n");
-  CHECK(obj->map().IsInobjectSlackTrackingInProgress());
+  CHECK(obj->map()->IsInobjectSlackTrackingInProgress());
   CHECK(IsObjectShrinkable(*obj));
-  CHECK_EQ(3 + 8, obj->map().GetInObjectProperties());
+  CHECK_EQ(3 + 8, obj->map()->GetInObjectProperties());
 }
 
 TEST_F(InObjectSlackTrackingTest, Regress8853_ClassHierarchy) {
-  CcTest::InitializeVM();
-  v8::HandleScope scope(CcTest::isolate());
-
   // For class hierarchies without any this.prop assignments in their
   // constructors we reserve 2 inobject properties per constructor plus
   // 8 inobject properties slack on top.
   std::string base = "(class {})";
   for (int i = 1; i < 10; ++i) {
     std::string script = "new " + base + ";\n";
-    Handle<JSObject> obj = CompileRunI<JSObject>(script.c_str());
-    CHECK(obj->map().IsInobjectSlackTrackingInProgress());
+    DirectHandle<JSObject> obj = CompileRunI<JSObject>(script.c_str());
+    CHECK(obj->map()->IsInobjectSlackTrackingInProgress());
     CHECK(IsObjectShrinkable(*obj));
-    CHECK_EQ(8 + 2 * i, obj->map().GetInObjectProperties());
+    CHECK_EQ(8 + 2 * i, obj->map()->GetInObjectProperties());
     base = "(class extends " + base + " {})";
   }
 }
 
 TEST_F(InObjectSlackTrackingTest, Regress8853_FunctionConstructor) {
-  CcTest::InitializeVM();
-  v8::HandleScope scope(CcTest::isolate());
-
   // For constructor functions without any this.prop assignments in
   // them we start out with 10 inobject properties.
-  Handle<JSObject> obj = CompileRunI<JSObject>("new (function() {});\n");
-  CHECK(obj->map().IsInobjectSlackTrackingInProgress());
+  DirectHandle<JSObject> obj = CompileRunI<JSObject>("new (function() {});\n");
+  CHECK(obj->map()->IsInobjectSlackTrackingInProgress());
   CHECK(IsObjectShrinkable(*obj));
-  CHECK_EQ(10, obj->map().GetInObjectProperties());
+  CHECK_EQ(10, obj->map()->GetInObjectProperties());
 
   // For constructor functions with N explicit this.prop assignments
   // in them we start out with N+8 inobject properties.
@@ -1299,17 +1285,14 @@ TEST_F(InObjectSlackTrackingTest, Regress8853_FunctionConstructor) {
       "  this.c = 3;\n"
       "  this.f = 3;\n"
       "});\n");
-  CHECK(obj->map().IsInobjectSlackTrackingInProgress());
+  CHECK(obj->map()->IsInobjectSlackTrackingInProgress());
   CHECK(IsObjectShrinkable(*obj));
-  CHECK_EQ(6 + 8, obj->map().GetInObjectProperties());
+  CHECK_EQ(6 + 8, obj->map()->GetInObjectProperties());
 }
 
 TEST_F(InObjectSlackTrackingTest,
        InstanceFieldsArePropertiesDefaultConstructorLazy) {
-  CcTest::InitializeVM();
-  v8::HandleScope scope(CcTest::isolate());
-
-  Handle<JSObject> obj = CompileRunI<JSObject>(
+  DirectHandle<JSObject> obj = CompileRunI<JSObject>(
       "new (class {\n"
       "  x00 = null;\n"
       "  x01 = null;\n"
@@ -1323,15 +1306,12 @@ TEST_F(InObjectSlackTrackingTest,
       "  x09 = null;\n"
       "  x10 = null;\n"
       "});\n");
-  CHECK_EQ(11 + 8, obj->map().GetInObjectProperties());
+  CHECK_EQ(11 + 8, obj->map()->GetInObjectProperties());
 }
 
 TEST_F(InObjectSlackTrackingTest,
        InstanceFieldsArePropertiesFieldsAndConstructorLazy) {
-  CcTest::InitializeVM();
-  v8::HandleScope scope(CcTest::isolate());
-
-  Handle<JSObject> obj = CompileRunI<JSObject>(
+  DirectHandle<JSObject> obj = CompileRunI<JSObject>(
       "new (class {\n"
       "  x00 = null;\n"
       "  x01 = null;\n"
@@ -1357,16 +1337,14 @@ TEST_F(InObjectSlackTrackingTest,
       "    this.x20 = null;\n"
       "  }\n"
       "});\n");
-  CHECK_EQ(21 + 8, obj->map().GetInObjectProperties());
+  CHECK_EQ(21 + 8, obj->map()->GetInObjectProperties());
 }
 
 TEST_F(InObjectSlackTrackingTest,
        InstanceFieldsArePropertiesDefaultConstructorEager) {
-  i::v8_flags.lazy = false;
-  CcTest::InitializeVM();
-  v8::HandleScope scope(CcTest::isolate());
+  FlagScope<bool> no_lazy(&v8_flags.lazy, false);
 
-  Handle<JSObject> obj = CompileRunI<JSObject>(
+  DirectHandle<JSObject> obj = CompileRunI<JSObject>(
       "new (class {\n"
       "  x00 = null;\n"
       "  x01 = null;\n"
@@ -1380,16 +1358,14 @@ TEST_F(InObjectSlackTrackingTest,
       "  x09 = null;\n"
       "  x10 = null;\n"
       "});\n");
-  CHECK_EQ(11 + 8, obj->map().GetInObjectProperties());
+  CHECK_EQ(11 + 8, obj->map()->GetInObjectProperties());
 }
 
 TEST_F(InObjectSlackTrackingTest,
        InstanceFieldsArePropertiesFieldsAndConstructorEager) {
-  i::v8_flags.lazy = false;
-  CcTest::InitializeVM();
-  v8::HandleScope scope(CcTest::isolate());
+  FlagScope<bool> no_lazy(&v8_flags.lazy, false);
 
-  Handle<JSObject> obj = CompileRunI<JSObject>(
+  DirectHandle<JSObject> obj = CompileRunI<JSObject>(
       "new (class {\n"
       "  x00 = null;\n"
       "  x01 = null;\n"
@@ -1415,9 +1391,9 @@ TEST_F(InObjectSlackTrackingTest,
       "    this.x20 = null;\n"
       "  }\n"
       "});\n");
-  CHECK_EQ(21 + 8, obj->map().GetInObjectProperties());
+  CHECK_EQ(21 + 8, obj->map()->GetInObjectProperties());
 }
 
-}  // namespace test_inobject_slack_tracking
+}  // namespace inobject_slack_tracking_unittest
 }  // namespace internal
 }  // namespace v8

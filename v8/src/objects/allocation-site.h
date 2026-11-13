@@ -5,6 +5,11 @@
 #ifndef V8_OBJECTS_ALLOCATION_SITE_H_
 #define V8_OBJECTS_ALLOCATION_SITE_H_
 
+#include <cstddef>
+#include <cstring>
+#include <type_traits>
+
+#include "src/base/bits.h"
 #include "src/objects/objects.h"
 #include "src/objects/struct.h"
 
@@ -16,173 +21,136 @@ namespace internal {
 
 enum InstanceType : uint16_t;
 
-#include "torque-generated/src/objects/allocation-site-tq.inc"
+V8_OBJECT class AllocationSite : public HeapObject {
+  V8_IT_OWN_TYPE;
+  V8_IT_NO_AUTO_DISPATCH;
 
-class AllocationSite : public Struct {
  public:
-  NEVER_READ_ONLY_SPACE
   static const uint32_t kMaximumArrayBytesToPretransition = 8 * 1024;
 
-  // Values for pretenure decision field.
-  enum PretenureDecision {
-    kUndecided = 0,
-    kDontTenure = 1,
-    kMaybeTenure = 2,
-    kTenure = 3,
-    kZombie = 4,  // See comment to IsZombie() for documentation.
-    kLastPretenureDecisionValue = kZombie
-  };
+  inline Tagged<UnionOf<Smi, JSObject>> transition_info_or_boilerplate() const;
 
-  const char* PretenureDecisionName(PretenureDecision decision);
+  inline Tagged<JSObject> boilerplate() const;
+  inline Tagged<JSObject> boilerplate(AcquireLoadTag tag) const;
+  inline void set_boilerplate(Tagged<JSObject> value, ReleaseStoreTag,
+                              WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-  // Contains either a Smi-encoded bitfield or a boilerplate. If it's a Smi the
-  // AllocationSite is for a constructed Array.
-  DECL_ACCESSORS(transition_info_or_boilerplate, Object)
-  DECL_RELEASE_ACQUIRE_ACCESSORS(transition_info_or_boilerplate, Object)
-  DECL_GETTER(boilerplate, JSObject)
-  DECL_RELEASE_ACQUIRE_ACCESSORS(boilerplate, JSObject)
-  DECL_INT_ACCESSORS(transition_info)
+  inline int transition_info() const;
+  inline void set_transition_info(int value);
 
   // nested_site threads a list of sites that represent nested literals
   // walked in a particular order. So [[1, 2], 1, 2] will have one
   // nested_site, but [[1, 2], 3, [4]] will have a list of two.
-  DECL_ACCESSORS(nested_site, Object)
+  inline Tagged<UnionOf<Smi, AllocationSite>> nested_site() const;
+  inline void set_nested_site(Tagged<UnionOf<Smi, AllocationSite>> value,
+                              WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
-  // Bitfield containing pretenuring information.
-  DECL_RELAXED_INT32_ACCESSORS(pretenure_data)
-
-  DECL_INT32_ACCESSORS(pretenure_create_count)
-  DECL_ACCESSORS(dependent_code, DependentCode)
-
-  // heap->allocation_site_list() points to the last AllocationSite which form
-  // a linked list through the weak_next property. The GC might remove elements
-  // from the list by updateing weak_next.
-  DECL_ACCESSORS(weak_next, Object)
+  inline Tagged<DependentCode> dependent_code() const;
+  inline void set_dependent_code(Tagged<DependentCode> value,
+                                 WriteBarrierMode mode = UPDATE_WRITE_BARRIER);
 
   inline void Initialize();
 
-  // Checks if the allocation site contain weak_next field;
-  inline bool HasWeakNext() const;
-
-  // This method is expensive, it should only be called for reporting.
-  bool IsNested();
-
   // transition_info bitfields, for constructed array transition info.
   using ElementsKindBits = base::BitField<ElementsKind, 0, 6>;
-  using DoNotInlineBit = base::BitField<bool, 6, 1>;
+  using SpeculationDisabledBit = base::BitField<bool, 6, 1>;
   // Unused bits 7-30.
-
-  // Bitfields for pretenure_data
-  using MementoFoundCountBits = base::BitField<int, 0, 26>;
-  using PretenureDecisionBits = base::BitField<PretenureDecision, 26, 3>;
-  using DeoptDependentCodeBit = base::BitField<bool, 29, 1>;
-  static_assert(PretenureDecisionBits::kMax >= kLastPretenureDecisionValue);
-
-  // Increments the mementos found counter and returns the new count.
-  inline int IncrementMementoFoundCount(int increment = 1);
-
-  inline void IncrementMementoCreateCount();
-
-  AllocationType GetAllocationType() const;
-
-  void ResetPretenureDecision();
-
-  inline PretenureDecision pretenure_decision() const;
-  inline void set_pretenure_decision(PretenureDecision decision);
-
-  inline bool deopt_dependent_code() const;
-  inline void set_deopt_dependent_code(bool deopt);
-
-  inline int memento_found_count() const;
-  inline void set_memento_found_count(int count);
-
-  inline int memento_create_count() const;
-  inline void set_memento_create_count(int count);
-
-  // A "zombie" AllocationSite is one which has no more strong roots to
-  // it, and yet must be maintained until the next GC. The reason is that
-  // it may be that in new space there are AllocationMementos hanging around
-  // which point to the AllocationSite. If we scavenge these AllocationSites
-  // too soon, those AllocationMementos will end up pointing to garbage
-  // addresses. The concrete case happens when evacuating new space in the full
-  // GC which happens after sweeping has been started already. To mitigate this
-  // problem the garbage collector marks such AllocationSites as zombies when it
-  // discovers there are no roots, allowing the subsequent collection pass to
-  // recognize zombies and discard them later.
-  inline bool IsZombie() const;
-
-  inline bool IsMaybeTenure() const;
-
-  inline void MarkZombie();
-
-  inline bool MakePretenureDecision(PretenureDecision current_decision,
-                                    double ratio, bool maximum_size_scavenge);
-
-  inline bool DigestPretenuringFeedback(bool maximum_size_scavenge);
 
   inline ElementsKind GetElementsKind() const;
   inline void SetElementsKind(ElementsKind kind);
 
-  inline bool CanInlineCall() const;
-  inline void SetDoNotInlineCall();
+  // The IsSpeculationDisabled flag is only used for the Array constructor, and
+  // protects against deopt loops due to speculative optimizations.
+  inline bool IsSpeculationDisabled() const;
+  inline void SetSpeculationDisabled();
 
   inline bool PointsToLiteral() const;
 
   template <AllocationSiteUpdateMode update_or_check =
                 AllocationSiteUpdateMode::kUpdate>
-  static bool DigestTransitionFeedback(Handle<AllocationSite> site,
+  static bool DigestTransitionFeedback(Isolate* isolate,
+                                       DirectHandle<AllocationSite> site,
                                        ElementsKind to_kind);
 
   DECL_PRINTER(AllocationSite)
   DECL_VERIFIER(AllocationSite)
 
-  DECL_CAST(AllocationSite)
   static inline bool ShouldTrack(ElementsKind boilerplate_elements_kind);
   static bool ShouldTrack(ElementsKind from, ElementsKind to);
   static inline bool CanTrack(InstanceType type);
 
-  // Layout description.
-  // AllocationSite has to start with TransitionInfoOrboilerPlateOffset
-  // and end with WeakNext field.
-  #define ALLOCATION_SITE_FIELDS(V)                     \
-    V(kStartOffset, 0)                                  \
-    V(kTransitionInfoOrBoilerplateOffset, kTaggedSize)  \
-    V(kNestedSiteOffset, kTaggedSize)                   \
-    V(kDependentCodeOffset, kTaggedSize)                \
-    V(kCommonPointerFieldEndOffset, 0)                  \
-    V(kPretenureDataOffset, kInt32Size)                 \
-    V(kPretenureCreateCountOffset, kInt32Size)          \
-    /* Size of AllocationSite without WeakNext field */ \
-    V(kSizeWithoutWeakNext, 0)                          \
-    V(kWeakNextOffset, kTaggedSize)                     \
-    /* Size of AllocationSite with WeakNext field */    \
-    V(kSizeWithWeakNext, 0)
-
-  DEFINE_FIELD_OFFSET_CONSTANTS(HeapObject::kHeaderSize, ALLOCATION_SITE_FIELDS)
-  #undef ALLOCATION_SITE_FIELDS
-
   class BodyDescriptor;
 
  private:
-  inline bool PretenuringDecisionMade() const;
+  friend class CodeStubAssembler;
+  friend class ArrayBuiltinsAssembler;
+  friend class V8HeapExplorer;
 
-  OBJECT_CONSTRUCTORS(AllocationSite, Struct);
-};
+  // Contains either a Smi-encoded bitfield or a boilerplate. If it's a Smi the
+  // AllocationSite is for a constructed Array.
+  TaggedMember<UnionOf<Smi, JSObject>> transition_info_or_boilerplate_;
+  TaggedMember<UnionOf<Smi, AllocationSite>> nested_site_;
+  TaggedMember<DependentCode> dependent_code_;
+} V8_OBJECT_END;
 
-class AllocationMemento
-    : public TorqueGeneratedAllocationMemento<AllocationMemento, Struct> {
+// Direct-mapped cache of (JSArray address -> AllocationSite address) for
+// elements transition tracking. Cleared on every GC prologue.
+//
+// 256 entries (4 KB on 64-bit, 2 KB on 32-bit):
+// - Size rationale: keeps per-Isolate footprint small and GC-prologue clearing
+//   (`memset`) fast.
+// - Low eviction rate: only CSA/runtime young JSArray allocations with an
+//   active AllocationSite write to the cache, and ElementsKind transitions
+//   typically follow allocation immediately. For batch allocations, only a
+//   single surviving entry needs to hit to permanently generalize the site.
+// - On collision/eviction: direct-mapped slots overwrite unconditionally. A tag
+//   mismatch (`entry.object != object`) on lookup misses the cache, skipping
+//   the speculative AllocationSite update for that instance while the JSArray
+//   transitions its own map normally.
+class V8_EXPORT_PRIVATE AllocationSiteCache {
  public:
-  DECL_ACCESSORS(allocation_site, Object)
+  struct Entry {
+    Address object = kNullAddress;
+    Address site = kNullAddress;
+  };
+  static_assert(sizeof(Entry) == 2 * kSystemPointerSize);
+  static_assert(std::has_unique_object_representations_v<Entry>);
+  static_assert(offsetof(Entry, object) == 0);
+  static_assert(offsetof(Entry, site) == kSystemPointerSize);
 
-  inline bool IsValid() const;
-  inline AllocationSite GetAllocationSite() const;
-  inline Address GetAllocationSiteUnchecked() const;
+  static constexpr int kSize = 256;
+  static_assert(base::bits::IsPowerOfTwo(kSize));
+  static constexpr int kMask = kSize - 1;
+  static constexpr int kShift1 = 3;
+  static constexpr int kShift2 = 11;
 
-  DECL_PRINTER(AllocationMemento)
+  AllocationSiteCache() = default;
+  AllocationSiteCache(const AllocationSiteCache&) = delete;
+  AllocationSiteCache& operator=(const AllocationSiteCache&) = delete;
 
-  using BodyDescriptor = StructBodyDescriptor;
+  // Maps a tagged JSArray address to a slot in [0, 255]:
+  // - `>> 3` drops bits [2:0] (tag bit 0 and sub-8B offset bits [2:1];
+  //   JSArray::kHeaderSize >= 16 even when kObjectAlignmentBits == 2), using
+  //   bits [10:3] to index 8-byte words across a 2 KB window.
+  // - `^ (addr >> 11)` XOR-folds bits [18:11] into [10:3] so 16-byte-strided
+  //   allocations (e.g. 16B empty JSArrays under pointer compression) flip bit
+  //   0 at 2 KB boundaries and populate odd as well as even slots, while
+  //   breaking power-of-two stride aliasing across a 512 KB range.
+  // - `& 0xff` masks to the 256-entry direct-mapped table.
+  static inline size_t ComputeIndex(Tagged<JSArray> object);
 
-  TQ_OBJECT_CONSTRUCTORS(AllocationMemento)
+  inline void Update(Tagged<JSArray> object, Tagged<AllocationSite> site);
+  inline bool Lookup(Tagged<JSArray> object,
+                     Tagged<AllocationSite>* site_out) const;
+
+  void Clear() { std::memset(entries_, 0, sizeof(entries_)); }
+
+#ifdef VERIFY_HEAP
+  void Verify() const;
+#endif
+
+ private:
+  Entry entries_[kSize] = {};
 };
 
 }  // namespace internal

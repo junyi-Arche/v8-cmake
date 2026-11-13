@@ -31,21 +31,23 @@ class SCTableReference {
 
 class V8_EXPORT_PRIVATE StubCache {
  public:
+  // An entry is either empty (all fields zero, i.e. Smi::zero()) or holds a
+  // valid name, handler and map. Generated code and Get() only read {value}
+  // after both {key} and {map} matched, which never happens for an empty
+  // entry.
   struct Entry {
-    // {key} is a tagged Name pointer, may be cleared by setting to empty
-    // string.
+    // {key} is a tagged Name pointer.
     StrongTaggedValue key;
     // {value} is a tagged heap object reference (weak or strong), equivalent
-    // to a MaybeObject's payload.
+    // to a Tagged<MaybeObject>'s payload.
     TaggedValue value;
-    // {map} is a tagged Map pointer, may be cleared by setting to Smi::zero().
+    // {map} is a tagged Map pointer.
     StrongTaggedValue map;
   };
 
-  void Initialize();
   // Access cache for entry hash(name, map).
-  void Set(Name name, Map map, MaybeObject handler);
-  MaybeObject Get(Name name, Map map);
+  void Set(Tagged<Name> name, Tagged<Map> map, Tagged<MaybeObject> handler);
+  Tagged<MaybeObject> Get(Tagged<Name> name, Tagged<Map> map);
   // Clear the lookup table (@ mark compact collection).
   void Clear();
 
@@ -85,13 +87,16 @@ class V8_EXPORT_PRIVATE StubCache {
   // the static_assert below, in {entry(...)}).
   static const int kCacheIndexShift = Name::HashBits::kShift;
 
-  static const int kPrimaryTableBits = 11;
+  static const int kPrimaryTableBits = 12;
   static const int kPrimaryTableSize = (1 << kPrimaryTableBits);
-  static const int kSecondaryTableBits = 9;
+  static const int kSecondaryTableBits = 10;
   static const int kSecondaryTableSize = (1 << kSecondaryTableBits);
 
-  static int PrimaryOffsetForTesting(Name name, Map map);
-  static int SecondaryOffsetForTesting(Name name, Map map);
+  static_assert(base::bits::IsPowerOfTwo(kPrimaryTableSize));
+  static_assert(base::bits::IsPowerOfTwo(kSecondaryTableSize));
+
+  static int PrimaryOffsetForTesting(Tagged<Name> name, Tagged<Map> map);
+  static int SecondaryOffsetForTesting(Tagged<Name> name, Tagged<Map> map);
 
   // The constructor is made public only for the purposes of testing.
   explicit StubCache(Isolate* isolate);
@@ -109,12 +114,12 @@ class V8_EXPORT_PRIVATE StubCache {
   // Hash algorithm for the primary table.  This algorithm is replicated in
   // assembler for every architecture.  Returns an index into the table that
   // is scaled by 1 << kCacheIndexShift.
-  static int PrimaryOffset(Name name, Map map);
+  static int PrimaryOffset(Tagged<Name> name, Tagged<Map> map);
 
   // Hash algorithm for the secondary table.  This algorithm is replicated in
   // assembler for every architecture.  Returns an index into the table that
   // is scaled by 1 << kCacheIndexShift.
-  static int SecondaryOffset(Name name, Map map);
+  static int SecondaryOffset(Tagged<Name> name, Tagged<Map> map);
 
   // Compute the entry for a given offset in exactly the same way as
   // we do in generated code.  We generate an hash code that already

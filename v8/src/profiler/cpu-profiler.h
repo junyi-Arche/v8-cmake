@@ -180,17 +180,23 @@ class V8_EXPORT_PRIVATE ProfilerEventsProcessor : public base::Thread,
   void Enqueue(const CodeEventsContainer& event);
 
   // Puts current stack into the tick sample events buffer.
-  void AddCurrentStack(bool update_stats = false);
+  void AddCurrentStack(bool update_stats = false,
+                       const std::optional<uint64_t> trace_id = std::nullopt);
   void AddDeoptStack(Address from, int fp_to_sp_delta);
   // Add a sample into the tick sample events buffer. Used for testing.
   void AddSample(TickSample sample);
 
   virtual void SetSamplingInterval(base::TimeDelta) {}
 
+  using SampleContextExtractor = void* (*)(v8::Isolate*);
+
+  void* ExtractSampleContext() const;
+
  protected:
   ProfilerEventsProcessor(Isolate* isolate, Symbolizer* symbolizer,
                           ProfilerCodeObserver* code_observer,
-                          CpuProfilesCollection* profiles);
+                          CpuProfilesCollection* profiles,
+                          SampleContextExtractor sample_context_extractor);
 
   // Called from events processing thread (Run() method.)
   bool ProcessCodeEvent();
@@ -213,6 +219,9 @@ class V8_EXPORT_PRIVATE ProfilerEventsProcessor : public base::Thread,
   std::atomic<unsigned> last_code_event_id_;
   unsigned last_processed_code_event_id_;
   Isolate* isolate_;
+
+ private:
+  const SampleContextExtractor sample_context_extractor_;
 };
 
 class V8_EXPORT_PRIVATE SamplingEventsProcessor
@@ -221,7 +230,8 @@ class V8_EXPORT_PRIVATE SamplingEventsProcessor
   SamplingEventsProcessor(Isolate* isolate, Symbolizer* symbolizer,
                           ProfilerCodeObserver* code_observer,
                           CpuProfilesCollection* profiles,
-                          base::TimeDelta period, bool use_precise_sampling);
+                          base::TimeDelta period, bool use_precise_sampling,
+                          SampleContextExtractor sample_context_extractor);
   ~SamplingEventsProcessor() override;
 
   // SamplingCircularQueue has stricter alignment requirements than a normal new
@@ -263,7 +273,7 @@ class V8_EXPORT_PRIVATE SamplingEventsProcessor
 #endif  // V8_OS_WIN
 };
 
-// Builds and maintains a InstructionStreamMap tracking code objects on the VM
+// Builds and maintains an InstructionStreamMap tracking code objects on the VM
 // heap. While alive, logs generated code, callbacks, and builtins from the
 // isolate. Redirects events to the profiler events processor when present.
 // CodeEntry lifetime is associated with the given CodeEntryStorage.
@@ -312,7 +322,7 @@ class V8_EXPORT_PRIVATE ProfilerCodeObserver : public CodeEventObserver {
 //
 // Sampling is done using posix signals (except on Windows). The profiling
 // thread sends a signal to the main thread, based on a timer. The signal
-// handler can interrupt the main thread between any abitrary instructions.
+// handler can interrupt the main thread between any arbitrary instructions.
 // This means we are very careful about reading stack values during the signal
 // handler as we could be in the middle of an operation that is modifying the
 // stack.
@@ -339,7 +349,8 @@ class V8_EXPORT_PRIVATE CpuProfiler {
   CpuProfiler(const CpuProfiler&) = delete;
   CpuProfiler& operator=(const CpuProfiler&) = delete;
 
-  static void CollectSample(Isolate* isolate);
+  static void CollectSample(Isolate* isolate,
+                            std::optional<uint64_t> trace_id = std::nullopt);
   static size_t GetAllProfilersMemorySize(Isolate* isolate);
 
   using ProfilingMode = v8::CpuProfilingMode;
@@ -351,7 +362,9 @@ class V8_EXPORT_PRIVATE CpuProfiler {
   base::TimeDelta sampling_interval() const { return base_sampling_interval_; }
   void set_sampling_interval(base::TimeDelta value);
   void set_use_precise_sampling(bool);
-  void CollectSample();
+  void set_sample_context_extractor(
+      ProfilerEventsProcessor::SampleContextExtractor extractor);
+  void CollectSample(const std::optional<uint64_t> trace_id = std::nullopt);
   size_t GetEstimatedMemoryUsage() const;
   CpuProfilingResult StartProfiling(
       CpuProfilingOptions options = {},
@@ -360,11 +373,11 @@ class V8_EXPORT_PRIVATE CpuProfiler {
       const char* title, CpuProfilingOptions options = {},
       std::unique_ptr<DiscardedSamplesDelegate> delegate = nullptr);
   CpuProfilingResult StartProfiling(
-      String title, CpuProfilingOptions options = {},
+      Tagged<String> title, CpuProfilingOptions options = {},
       std::unique_ptr<DiscardedSamplesDelegate> delegate = nullptr);
 
   CpuProfile* StopProfiling(const char* title);
-  CpuProfile* StopProfiling(String title);
+  CpuProfile* StopProfiling(Tagged<String> title);
   CpuProfile* StopProfiling(ProfilerId id);
 
   int GetProfilesCount();
@@ -394,7 +407,7 @@ class V8_EXPORT_PRIVATE CpuProfiler {
   void EnableLogging();
   void DisableLogging();
 
-  // Computes a sampling interval sufficient to accomodate attached profiles.
+  // Computes a sampling interval sufficient to accommodate attached profiles.
   base::TimeDelta ComputeSamplingInterval();
   // Dynamically updates the sampler to use a sampling interval sufficient for
   // child profiles.
@@ -404,6 +417,8 @@ class V8_EXPORT_PRIVATE CpuProfiler {
   const NamingMode naming_mode_;
   const LoggingMode logging_mode_;
   bool use_precise_sampling_ = true;
+  ProfilerEventsProcessor::SampleContextExtractor sample_context_extractor_ =
+      nullptr;
   // Sampling interval to which per-profile sampling intervals will be clamped
   // to a multiple of, or used as the default if unspecified.
   base::TimeDelta base_sampling_interval_;

@@ -4,6 +4,7 @@
 //
 // Tests the sampling API in include/v8.h
 
+#include <array>
 #include <map>
 #include <string>
 
@@ -11,6 +12,7 @@
 #include "include/v8-local-handle.h"
 #include "include/v8-template.h"
 #include "include/v8-unwinder.h"
+#include "src/api/api.h"
 #include "src/flags/flags.h"
 #include "test/cctest/cctest.h"
 
@@ -19,18 +21,18 @@ namespace {
 class Sample {
  public:
   enum { kFramesLimit = 255 };
+  using DataVector = std::array<void*, kFramesLimit>;
 
   Sample() = default;
 
-  using const_iterator = const void* const*;
-  const_iterator begin() const { return data_.begin(); }
-  const_iterator end() const { return &data_[data_.length()]; }
-
-  int size() const { return data_.length(); }
-  v8::base::Vector<void*>& data() { return data_; }
+  const void* operator[](size_t index) const { return data_[index]; }
+  size_t size() const { return size_; }
+  void set_size(size_t size) { size_ = size; }
+  DataVector& data() { return data_; }
 
  private:
-  v8::base::EmbeddedVector<void*, kFramesLimit> data_;
+  DataVector data_;
+  size_t size_ = kFramesLimit;
 };
 
 
@@ -96,11 +98,11 @@ class SamplingTestHelper {
     state.sp = &state;
 #endif
     v8::SampleInfo info;
-    isolate_->GetStackSample(state, sample_.data().begin(),
-                             static_cast<size_t>(sample_.size()), &info);
+    isolate_->GetStackSample(state, sample_.data().data(), sample_.size(),
+                             &info);
     size_t frames_count = info.frames_count;
-    CHECK_LE(frames_count, static_cast<size_t>(sample_.size()));
-    sample_.data().Truncate(static_cast<int>(frames_count));
+    CHECK_LE(frames_count, sample_.size());
+    sample_.set_size(frames_count);
     sample_is_taken_ = true;
   }
 
@@ -180,7 +182,7 @@ TEST(BuiltinsInSamples) {
   CHECK_EQ(26, sample.size());
   for (int i = 0; i < 20; i++) {
     const SamplingTestHelper::CodeEventEntry* entry;
-    entry = helper.FindEventEntry(sample.begin()[i]);
+    entry = helper.FindEventEntry(sample[i]);
     switch (i % 3) {
       case 0:
         CHECK(std::string::npos != entry->name.find("func"));
@@ -202,7 +204,7 @@ TEST(BuiltinsInSamples) {
 //                              ^      ^       ^
 // sample.stack indices         2      1       0
 TEST(StackFramesConsistent) {
-  i::v8_flags.allow_natives_syntax = true;
+  i::v8_flags.allow_natives_syntax.Set(true);
   const char* test_script =
       "function test_sampler_api_inner() {"
       "  CollectSample();"
@@ -220,11 +222,11 @@ TEST(StackFramesConsistent) {
   CHECK_EQ(3, sample.size());
 
   const SamplingTestHelper::CodeEventEntry* entry;
-  entry = helper.FindEventEntry(sample.begin()[0]);
+  entry = helper.FindEventEntry(sample[0]);
   CHECK(entry);
   CHECK(std::string::npos != entry->name.find("test_sampler_api_inner"));
 
-  entry = helper.FindEventEntry(sample.begin()[1]);
+  entry = helper.FindEventEntry(sample[1]);
   CHECK(entry);
   CHECK(std::string::npos != entry->name.find("test_sampler_api_outer"));
 }

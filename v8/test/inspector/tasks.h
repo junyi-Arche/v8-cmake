@@ -74,12 +74,13 @@ class ExecuteStringTask : public TaskRunner::Task {
                     v8::Local<v8::String> name,
                     v8::Local<v8::Integer> line_offset,
                     v8::Local<v8::Integer> column_offset,
-                    v8::Local<v8::Boolean> is_module)
+                    v8::Local<v8::Boolean> is_module, bool evaluate = true)
       : expression_(expression),
         name_(ToVector(isolate, name)),
         line_offset_(line_offset.As<v8::Int32>()->Value()),
         column_offset_(column_offset.As<v8::Int32>()->Value()),
         is_module_(is_module->Value()),
+        evaluate_(evaluate),
         context_group_id_(context_group_id) {}
 
   ExecuteStringTask(const std::string& expression, int context_group_id)
@@ -88,16 +89,47 @@ class ExecuteStringTask : public TaskRunner::Task {
   ~ExecuteStringTask() override = default;
   ExecuteStringTask(const ExecuteStringTask&) = delete;
   ExecuteStringTask& operator=(const ExecuteStringTask&) = delete;
+  enum class CodeCacheMode {
+    kNone,
+    kProduceAfterCompile,
+    kProduceEagerAfterCompile,
+    kProduceAfterExecute
+  };
+  static void SetCodeCacheMode(CodeCacheMode mode) { code_cache_mode_ = mode; }
+
   bool is_priority_task() override { return false; }
   void Run(InspectorIsolateData* data) override;
 
  private:
+  static CodeCacheMode code_cache_mode_;
   std::vector<uint16_t> expression_;
   std::string expression_utf8_;
   std::vector<uint16_t> name_;
   int32_t line_offset_ = 0;
   int32_t column_offset_ = 0;
   bool is_module_ = false;
+  bool evaluate_ = true;
+  int context_group_id_;
+};
+
+class ExecuteWrappedStringTask : public TaskRunner::Task {
+ public:
+  ExecuteWrappedStringTask(v8::Isolate* isolate, int context_group_id,
+                           const std::vector<uint16_t>& expression,
+                           v8::Local<v8::String> name)
+      : expression_(expression),
+        name_(ToVector(isolate, name)),
+        context_group_id_(context_group_id) {}
+
+  ~ExecuteWrappedStringTask() override = default;
+  ExecuteWrappedStringTask(const ExecuteWrappedStringTask&) = delete;
+  ExecuteWrappedStringTask& operator=(const ExecuteWrappedStringTask&) = delete;
+  bool is_priority_task() override { return false; }
+  void Run(InspectorIsolateData* data) override;
+
+ private:
+  std::vector<uint16_t> expression_;
+  std::vector<uint16_t> name_;
   int context_group_id_;
 };
 

@@ -246,6 +246,17 @@
       ]
     },
     {
+      "name": "IteratorsWithOptimization",
+      "path": ["Iterators"],
+      "main": "run.js",
+      "resources": ["forof.js"],
+      "flags": ["--for_of_optimization", "--maglev", "--no-turbofan"],
+      "results_regexp": "^%s\\-Iterators\\(Score\\): (.+)$",
+      "tests": [
+        {"name": "ForOf"}
+        ]
+    },
+    {
       "name": "StringIterators",
       "path": ["StringIterators"],
       "main": "run.js",
@@ -535,20 +546,6 @@
       ]
     },
     {
-      "name": "Inspector",
-      "path": ["Inspector"],
-      "main": "run.js",
-      "resources": [ "debugger.js", "runtime.js" ],
-      "flags": ["--enable-inspector","--allow-natives-syntax"],
-      "results_regexp": "^%s\\-Inspector\\(Score\\): (.+)$",
-      "tests": [
-        {"name": "Debugger.paused"},
-        {"name": "Runtime.evaluate(String16Cstor)"},
-        {"name": "Debugger.getPossibleBreakpoints"},
-        {"name": "AsyncStacksInstrumentation"}
-      ]
-    },
-    {
       "name": "Parsing",
       "path": ["Parsing"],
       "main": "run.js",
@@ -624,7 +621,7 @@
         {
           "name": "NumberToString",
           "main": "run.js",
-          "flags": [],
+          "flags": ["--no-maglev"],
           "resources": ["typedLowering.js"],
           "test_flags": ["typedLowering"],
           "results_regexp": "^NumberToString\\-TurboFan\\(Score\\): (.+)$"
@@ -632,10 +629,7 @@
         {
           "name": "WasmInliningLoopArray",
           "main": "run.js",
-          "flags": [
-            "--experimental-wasm-gc",
-            "--experimental-wasm-js-inlining"
-          ],
+          "flags": [],
           "resources": ["wasm-inlining-loop-array.js"],
           "test_flags": ["wasm-inlining-loop-array"],
           "results_regexp": "^%s\\-TurboFan\\(Score\\): (.+)$",
@@ -644,6 +638,14 @@
             {"name": "JSLoop"},
             {"name": "PureJSLoop"}
           ]
+        },
+        {
+          "name": "AdditiveSafeIntFeedback",
+          "main": "run.js",
+          "flags": [],
+          "resources": ["additiveSafeIntFeedback.js"],
+          "test_flags": ["additiveSafeIntFeedback"],
+          "results_regexp": "^AdditiveSafeIntFeedback\\-TurboFan\\(Score\\): (.+)$"
         }
       ]
     },

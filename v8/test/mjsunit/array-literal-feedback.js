@@ -25,7 +25,7 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Flags: --allow-natives-syntax --expose-gc --turbofan --no-always-turbofan --deopt-every-n-times=0
+// Flags: --allow-natives-syntax --expose-gc --turbofan --deopt-every-n-times=0
 
 var elements_kind = {
   packed_smi               :  'packed smi elements',
@@ -67,14 +67,14 @@ function get_literal(x) {
 %PrepareFunctionForOptimization(get_literal);
 get_literal(3);
 // It's important to store a from before we crankshaft get_literal, because
-// mementos won't be created from crankshafted code at all.
+// allocation site tracking won't be recorded from crankshafted code at all.
 a = get_literal(3);
 %OptimizeFunctionOnNextCall(get_literal);
 get_literal(3);
 assertOptimized(get_literal);
 assertTrue(%HasSmiElements(a));
-// a has a memento so the transition caused by the store will affect the
-// boilerplate.
+// a is tracked in the AllocationSiteCache so the transition caused by the store
+// will affect the boilerplate.
 a[0] = 3.5;
 
 // We should have transitioned the boilerplate array to double, and

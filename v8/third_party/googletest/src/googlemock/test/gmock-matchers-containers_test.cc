@@ -31,15 +31,26 @@
 //
 // This file tests some commonly used argument matchers.
 
+#include <algorithm>
+#include <array>
+#include <cstddef>
+#include <deque>
+#include <forward_list>
+#include <iterator>
+#include <list>
+#include <memory>
+#include <ostream>
+#include <string>
+#include <tuple>
+#include <vector>
+
+#include "gmock/gmock.h"
+#include "test/gmock-matchers_test.h"
+#include "gtest/gtest.h"
+
 // Silence warning C4244: 'initializing': conversion from 'int' to 'short',
 // possible loss of data and C4100, unreferenced local parameter
-#ifdef _MSC_VER
-#pragma warning(push)
-#pragma warning(disable : 4244)
-#pragma warning(disable : 4100)
-#endif
-
-#include "test/gmock-matchers_test.h"
+GTEST_DISABLE_MSC_WARNINGS_PUSH_(4244 4100)
 
 namespace testing {
 namespace gmock_matchers_test {
@@ -65,6 +76,54 @@ TEST(ContainsTest, WorksWithMoveOnly) {
   helper.Call(MakeUniquePtrs({1, 2}));
 }
 
+INSTANTIATE_GTEST_MATCHER_TEST_P(ElementsAreTest);
+
+// A range of decreasing, positive integers.
+class DecreasingIntRange {
+ public:
+  explicit DecreasingIntRange(int start) : v_(start) {}
+
+  struct Sentinel {};
+
+  class Iterator {
+   public:
+    using difference_type = std::ptrdiff_t;
+    using value_type = int;
+    using iterator_category = std::input_iterator_tag;
+    using pointer = void;
+    using reference = int;
+
+    explicit Iterator(int v) : v_(v) {}
+
+    int operator*() const { return v_; }
+
+    Iterator& operator++() {
+      --v_;
+      return *this;
+    }
+    Iterator operator++(int) {
+      auto tmp = *this;
+      ++*this;
+      return tmp;
+    }
+
+    bool operator==(const Iterator& other) const { return v_ == other.v_; }
+    bool operator!=(const Iterator& other) const { return v_ != other.v_; }
+
+    bool operator==(const Sentinel&) const { return v_ < 0; }
+    bool operator!=(const Sentinel&) const { return v_ >= 0; }
+
+   private:
+    int v_;
+  };
+
+  Iterator begin() const { return Iterator(v_); }
+  Sentinel end() const { return Sentinel{}; }
+
+ private:
+  int v_;
+};
+
 // Tests the variadic version of the ElementsAreMatcher
 TEST(ElementsAreTest, HugeMatcher) {
   vector<int> test_vector{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12};
@@ -72,6 +131,13 @@ TEST(ElementsAreTest, HugeMatcher) {
   EXPECT_THAT(test_vector,
               ElementsAre(Eq(1), Eq(2), Lt(13), Eq(4), Eq(5), Eq(6), Eq(7),
                           Eq(8), Eq(9), Eq(10), Gt(1), Eq(12)));
+}
+
+// Tests ElementsAreMatcher with a range that uses a sentinel.
+TEST(ElementsAreTest, HugeMatcherSentinel) {
+  DecreasingIntRange range(3);
+
+  EXPECT_THAT(range, ElementsAre(Eq(3), Eq(2), Eq(1), Eq(0)));
 }
 
 // Tests the variadic version of the UnorderedElementsAreMatcher
@@ -90,6 +156,13 @@ TEST(ElementsAreTest, HugeMatcherUnordered) {
   EXPECT_THAT(test_vector, UnorderedElementsAre(
                                Eq(2), Eq(1), Gt(7), Eq(5), Eq(4), Eq(6), Eq(7),
                                Eq(3), Eq(9), Eq(12), Eq(11), Ne(122)));
+}
+
+// Tests the UnorderedElementsAreMatcher with a range that uses a sentinel.
+TEST(ElementsAreTest, HugeMatcherUnorderedSentinel) {
+  DecreasingIntRange range(3);
+
+  EXPECT_THAT(range, UnorderedElementsAre(Eq(2), Eq(1), Eq(3), Eq(0)));
 }
 
 // Tests that ASSERT_THAT() and EXPECT_THAT() work when the value
@@ -204,7 +277,7 @@ TEST(PointeeTest, ReferenceToNonConstRawPointer) {
 TEST(PointeeTest, SmartPointer) {
   const Matcher<std::unique_ptr<int>> m = Pointee(Ge(0));
 
-  std::unique_ptr<int> n(new int(1));
+  std::unique_ptr<int> n = std::make_unique<int>(1);
   EXPECT_TRUE(m.Matches(n));
 }
 
@@ -241,7 +314,7 @@ TEST(PointerTest, RawPointerToConst) {
 }
 
 TEST(PointerTest, SmartPointer) {
-  std::unique_ptr<int> n(new int(10));
+  std::unique_ptr<int> n = std::make_unique<int>(10);
   int* raw_n = n.get();
   const Matcher<std::unique_ptr<int>> m = Pointer(Eq(raw_n));
 
@@ -280,6 +353,8 @@ class ConstPropagatingPtr {
   T* val_;
 };
 
+INSTANTIATE_GTEST_MATCHER_TEST_P(PointeeTest);
+
 TEST(PointeeTest, WorksWithConstPropagatingPointers) {
   const Matcher<ConstPropagatingPtr<int>> m = Pointee(Lt(5));
   int three = 3;
@@ -314,7 +389,7 @@ TEST(PointeeTest, CanDescribeSelf) {
   EXPECT_EQ("does not point to a value that is > 3", DescribeNegation(m));
 }
 
-TEST(PointeeTest, CanExplainMatchResult) {
+TEST_P(PointeeTestP, CanExplainMatchResult) {
   const Matcher<const std::string*> m = Pointee(StartsWith("Hi"));
 
   EXPECT_EQ("", Explain(m, static_cast<const std::string*>(nullptr)));
@@ -342,7 +417,8 @@ class Uncopyable {
 
  private:
   int value_;
-  GTEST_DISALLOW_COPY_AND_ASSIGN_(Uncopyable);
+  Uncopyable(const Uncopyable&) = delete;
+  Uncopyable& operator=(const Uncopyable&) = delete;
 };
 
 // Returns true if and only if x.value() is positive.
@@ -368,6 +444,8 @@ struct AStruct {
 struct DerivedStruct : public AStruct {
   char ch;
 };
+
+INSTANTIATE_GTEST_MATCHER_TEST_P(FieldTest);
 
 // Tests that Field(&Foo::field, ...) works when field is non-const.
 TEST(FieldTest, WorksForNonConstField) {
@@ -475,7 +553,7 @@ TEST(FieldTest, CanDescribeSelfWithFieldName) {
 }
 
 // Tests that Field() can explain the match result.
-TEST(FieldTest, CanExplainMatchResult) {
+TEST_P(FieldTestP, CanExplainMatchResult) {
   Matcher<const AStruct&> m = Field(&AStruct::x, Ge(0));
 
   AStruct a;
@@ -488,7 +566,7 @@ TEST(FieldTest, CanExplainMatchResult) {
       Explain(m, a));
 }
 
-TEST(FieldTest, CanExplainMatchResultWithFieldName) {
+TEST_P(FieldTestP, CanExplainMatchResultWithFieldName) {
   Matcher<const AStruct&> m = Field("field_name", &AStruct::x, Ge(0));
 
   AStruct a;
@@ -500,6 +578,8 @@ TEST(FieldTest, CanExplainMatchResultWithFieldName) {
                 ", which is 1 more than 0",
             Explain(m, a));
 }
+
+INSTANTIATE_GTEST_MATCHER_TEST_P(FieldForPointerTest);
 
 // Tests that Field() works when the argument is a pointer to const.
 TEST(FieldForPointerTest, WorksForPointerToConst) {
@@ -567,7 +647,7 @@ TEST(FieldForPointerTest, CanDescribeSelfWithFieldName) {
 }
 
 // Tests that Field() can explain the result of matching a pointer.
-TEST(FieldForPointerTest, CanExplainMatchResult) {
+TEST_P(FieldForPointerTestP, CanExplainMatchResult) {
   Matcher<const AStruct*> m = Field(&AStruct::x, Ge(0));
 
   AStruct a;
@@ -582,7 +662,7 @@ TEST(FieldForPointerTest, CanExplainMatchResult) {
             Explain(m, &a));
 }
 
-TEST(FieldForPointerTest, CanExplainMatchResultWithFieldName) {
+TEST_P(FieldForPointerTestP, CanExplainMatchResultWithFieldName) {
   Matcher<const AStruct*> m = Field("field_name", &AStruct::x, Ge(0));
 
   AStruct a;
@@ -635,6 +715,8 @@ class DerivedClass : public AClass {
  private:
   int k_;
 };
+
+INSTANTIATE_GTEST_MATCHER_TEST_P(PropertyTest);
 
 // Tests that Property(&Foo::property, ...) works when property()
 // returns a non-reference.
@@ -762,7 +844,7 @@ TEST(PropertyTest, CanDescribeSelfWithPropertyName) {
 }
 
 // Tests that Property() can explain the match result.
-TEST(PropertyTest, CanExplainMatchResult) {
+TEST_P(PropertyTestP, CanExplainMatchResult) {
   Matcher<const AClass&> m = Property(&AClass::n, Ge(0));
 
   AClass a;
@@ -775,7 +857,7 @@ TEST(PropertyTest, CanExplainMatchResult) {
       Explain(m, a));
 }
 
-TEST(PropertyTest, CanExplainMatchResultWithPropertyName) {
+TEST_P(PropertyTestP, CanExplainMatchResultWithPropertyName) {
   Matcher<const AClass&> m = Property("fancy_name", &AClass::n, Ge(0));
 
   AClass a;
@@ -787,6 +869,8 @@ TEST(PropertyTest, CanExplainMatchResultWithPropertyName) {
                 ", which is 1 more than 0",
             Explain(m, a));
 }
+
+INSTANTIATE_GTEST_MATCHER_TEST_P(PropertyForPointerTest);
 
 // Tests that Property() works when the argument is a pointer to const.
 TEST(PropertyForPointerTest, WorksForPointerToConst) {
@@ -864,7 +948,7 @@ TEST(PropertyForPointerTest, CanDescribeSelfWithPropertyDescription) {
 }
 
 // Tests that Property() can explain the result of matching a pointer.
-TEST(PropertyForPointerTest, CanExplainMatchResult) {
+TEST_P(PropertyForPointerTestP, CanExplainMatchResult) {
   Matcher<const AClass*> m = Property(&AClass::n, Ge(0));
 
   AClass a;
@@ -880,7 +964,7 @@ TEST(PropertyForPointerTest, CanExplainMatchResult) {
             Explain(m, &a));
 }
 
-TEST(PropertyForPointerTest, CanExplainMatchResultWithPropertyName) {
+TEST_P(PropertyForPointerTestP, CanExplainMatchResultWithPropertyName) {
   Matcher<const AClass*> m = Property("fancy_name", &AClass::n, Ge(0));
 
   AClass a;
@@ -903,6 +987,8 @@ TEST(PropertyForPointerTest, CanExplainMatchResultWithPropertyName) {
 std::string IntToStringFunction(int input) {
   return input == 1 ? "foo" : "bar";
 }
+
+INSTANTIATE_GTEST_MATCHER_TEST_P(ResultOfTest);
 
 TEST(ResultOfTest, WorksForFunctionPointers) {
   Matcher<int> matcher = ResultOf(&IntToStringFunction, Eq(std::string("foo")));
@@ -938,13 +1024,24 @@ TEST(ResultOfTest, CanDescribeItselfWithResultDescription) {
 // Tests that ResultOf() can explain the match result.
 int IntFunction(int input) { return input == 42 ? 80 : 90; }
 
-TEST(ResultOfTest, CanExplainMatchResult) {
+TEST_P(ResultOfTestP, CanExplainMatchResult) {
   Matcher<int> matcher = ResultOf(&IntFunction, Ge(85));
   EXPECT_EQ("which is mapped by the given callable to 90" + OfType("int"),
             Explain(matcher, 36));
 
   matcher = ResultOf(&IntFunction, GreaterThan(85));
   EXPECT_EQ("which is mapped by the given callable to 90" + OfType("int") +
+                ", which is 5 more than 85",
+            Explain(matcher, 36));
+}
+
+TEST_P(ResultOfTestP, CanExplainMatchResultWithResultDescription) {
+  Matcher<int> matcher = ResultOf("magic int conversion", &IntFunction, Ge(85));
+  EXPECT_EQ("whose magic int conversion is 90" + OfType("int"),
+            Explain(matcher, 36));
+
+  matcher = ResultOf("magic int conversion", &IntFunction, GreaterThan(85));
+  EXPECT_EQ("whose magic int conversion is 90" + OfType("int") +
                 ", which is 5 more than 85",
             Explain(matcher, 36));
 }
@@ -1010,8 +1107,8 @@ TEST(ResultOfTest, WorksForCompatibleMatcherTypes) {
 // a NULL function pointer.
 TEST(ResultOfDeathTest, DiesOnNullFunctionPointers) {
   EXPECT_DEATH_IF_SUPPORTED(
-      ResultOf(static_cast<std::string (*)(int dummy)>(nullptr),
-               Eq(std::string("foo"))),
+      (void)ResultOf(static_cast<std::string (*)(int dummy)>(nullptr),
+                     Eq(std::string("foo"))),
       "NULL function pointer is passed into ResultOf\\(\\)\\.");
 }
 
@@ -1156,8 +1253,8 @@ TEST(SizeIsTest, WorksWithMinimalistCustomType) {
 
 TEST(SizeIsTest, CanDescribeSelf) {
   Matcher<vector<int>> m = SizeIs(2);
-  EXPECT_EQ("size is equal to 2", Describe(m));
-  EXPECT_EQ("size isn't equal to 2", DescribeNegation(m));
+  EXPECT_EQ("has a size that is equal to 2", Describe(m));
+  EXPECT_EQ("has a size that isn't equal to 2", DescribeNegation(m));
 }
 
 TEST(SizeIsTest, ExplainsResult) {
@@ -1168,13 +1265,16 @@ TEST(SizeIsTest, ExplainsResult) {
   vector<int> container;
   EXPECT_EQ("whose size 0 doesn't match", Explain(m1, container));
   EXPECT_EQ("whose size 0 matches", Explain(m2, container));
-  EXPECT_EQ("whose size 0 matches", Explain(m3, container));
+  EXPECT_EQ("whose size 0 matches, which matches (is equal to 0)",
+            Explain(m3, container));
   EXPECT_EQ("whose size 0 doesn't match", Explain(m4, container));
   container.push_back(0);
   container.push_back(0);
   EXPECT_EQ("whose size 2 matches", Explain(m1, container));
   EXPECT_EQ("whose size 2 doesn't match", Explain(m2, container));
-  EXPECT_EQ("whose size 2 doesn't match", Explain(m3, container));
+  EXPECT_EQ(
+      "whose size 2 doesn't match, isn't equal to 0, and isn't equal to 3",
+      Explain(m3, container));
   EXPECT_EQ("whose size 2 matches", Explain(m4, container));
 }
 
@@ -1232,10 +1332,11 @@ TEST(WhenSortedByTest, CanDescribeSelf) {
 
 TEST(WhenSortedByTest, ExplainsMatchResult) {
   const int a[] = {2, 1};
-  EXPECT_EQ("which is { 1, 2 } when sorted, whose element #0 doesn't match",
-            Explain(WhenSortedBy(less<int>(), ElementsAre(2, 3)), a));
-  EXPECT_EQ("which is { 1, 2 } when sorted",
-            Explain(WhenSortedBy(less<int>(), ElementsAre(1, 2)), a));
+  EXPECT_EQ(
+      Explain(WhenSortedBy(less<int>(), ElementsAre(2, 3)), a),
+      "which is { 1, 2 } when sorted, whose element #0 (1) isn't equal to 2");
+  EXPECT_EQ(Explain(WhenSortedBy(less<int>(), ElementsAre(1, 2)), a),
+            "which is { 1, 2 } when sorted");
 }
 
 // WhenSorted() is a simple wrapper on WhenSortedBy().  Hence we don't
@@ -1396,6 +1497,8 @@ TEST(StreamlikeTest, Iteration) {
   }
 }
 
+INSTANTIATE_GTEST_MATCHER_TEST_P(BeginEndDistanceIsTest);
+
 TEST(BeginEndDistanceIsTest, WorksWithForwardList) {
   std::forward_list<int> container;
   EXPECT_THAT(container, BeginEndDistanceIs(0));
@@ -1427,7 +1530,7 @@ TEST(BeginEndDistanceIsTest, WorksWithMoveOnly) {
   helper.Call(MakeUniquePtrs({1, 2}));
 }
 
-TEST(BeginEndDistanceIsTest, ExplainsResult) {
+TEST_P(BeginEndDistanceIsTestP, ExplainsResult) {
   Matcher<vector<int>> m1 = BeginEndDistanceIs(2);
   Matcher<vector<int>> m2 = BeginEndDistanceIs(Lt(2));
   Matcher<vector<int>> m3 = BeginEndDistanceIs(AnyOf(0, 3));
@@ -1437,8 +1540,10 @@ TEST(BeginEndDistanceIsTest, ExplainsResult) {
             Explain(m1, container));
   EXPECT_EQ("whose distance between begin() and end() 0 matches",
             Explain(m2, container));
-  EXPECT_EQ("whose distance between begin() and end() 0 matches",
-            Explain(m3, container));
+  EXPECT_EQ(
+      "whose distance between begin() and end() 0 matches, which matches (is "
+      "equal to 0)",
+      Explain(m3, container));
   EXPECT_EQ(
       "whose distance between begin() and end() 0 doesn't match, which is 1 "
       "less than 1",
@@ -1449,8 +1554,10 @@ TEST(BeginEndDistanceIsTest, ExplainsResult) {
             Explain(m1, container));
   EXPECT_EQ("whose distance between begin() and end() 2 doesn't match",
             Explain(m2, container));
-  EXPECT_EQ("whose distance between begin() and end() 2 doesn't match",
-            Explain(m3, container));
+  EXPECT_EQ(
+      "whose distance between begin() and end() 2 doesn't match, isn't equal "
+      "to 0, and isn't equal to 3",
+      Explain(m3, container));
   EXPECT_EQ(
       "whose distance between begin() and end() 2 matches, which is 1 more "
       "than 1",
@@ -1730,6 +1837,295 @@ TEST(IsSubsetOfTest, WorksWithMoveOnly) {
   helper.Call(MakeUniquePtrs({2}));
 }
 
+// A container whose iterator returns a temporary. This can iterate over the
+// characters in a string.
+class CharString {
+ public:
+  using value_type = char;
+
+  class const_iterator {
+   public:
+    using iterator_category = std::input_iterator_tag;
+    using value_type = char;
+    using difference_type = std::ptrdiff_t;
+    using pointer = const char*;
+    using reference = const char&;
+
+    // Create an iterator that points to the given character.
+    explicit const_iterator(const char* ptr) : ptr_(ptr) {}
+
+    // Returns the current character. IMPORTANT: this must return a temporary,
+    // not a reference, to test that ElementsAre() works with containers whose
+    // iterators return temporaries.
+    char operator*() const { return *ptr_; }
+
+    // Advances to the next character.
+    const_iterator& operator++() {
+      ++ptr_;
+      return *this;
+    }
+
+    // Compares two iterators.
+    bool operator==(const const_iterator& other) const {
+      return ptr_ == other.ptr_;
+    }
+    bool operator!=(const const_iterator& other) const {
+      return ptr_ != other.ptr_;
+    }
+
+   private:
+    const char* ptr_ = nullptr;
+  };
+
+  // Creates a CharString that contains the given string.
+  explicit CharString(const std::string& s) : s_(s) {}
+
+  // Returns an iterator pointing to the first character in the string.
+  const_iterator begin() const { return const_iterator(s_.c_str()); }
+
+  // Returns an iterator pointing past the last character in the string.
+  const_iterator end() const { return const_iterator(s_.c_str() + s_.size()); }
+
+ private:
+  std::string s_;
+};
+
+// Tests using ElementsAre() with a container whose iterator returns a
+// temporary.
+TEST(ElementsAreTest, WorksWithContainerThatReturnsTempInIterator) {
+  CharString s("abc");
+  EXPECT_THAT(s, ElementsAre('a', 'b', 'c'));
+  EXPECT_THAT(s, Not(ElementsAre('a', 'b', 'd')));
+}
+
+// Tests using ElementsAreArray() with a container whose iterator returns a
+// temporary.
+TEST(ElementsAreArrayTest, WorksWithContainerThatReturnsTempInIterator) {
+  CharString s("abc");
+  EXPECT_THAT(s, ElementsAreArray({'a', 'b', 'c'}));
+  EXPECT_THAT(s, Not(ElementsAreArray({'a', 'b', 'd'})));
+}
+
+// A container whose iterator returns a temporary and is not copy-assignable.
+// This simulates the behavior of the proxy object returned by absl::StrSplit().
+class CharString2 {
+ public:
+  using value_type = char;
+
+  class const_iterator {
+   public:
+    using iterator_category = std::input_iterator_tag;
+    using value_type = char;
+    using difference_type = std::ptrdiff_t;
+    using pointer = const char*;
+    using reference = const char&;
+
+    // Make const_iterator copy-constructible but not copy-assignable,
+    // simulating the behavior of the proxy object returned by absl::StrSplit().
+    const_iterator(const const_iterator&) = default;
+    const_iterator& operator=(const const_iterator&) = delete;
+
+    // Create an iterator that points to the given character.
+    explicit const_iterator(const char* ptr) : ptr_(ptr) {}
+
+    // Returns the current character. IMPORTANT: this must return a temporary,
+    // not a reference, to test that ElementsAre() works with containers whose
+    // iterators return temporaries.
+    char operator*() const { return *ptr_; }
+
+    // Advances to the next character.
+    const_iterator& operator++() {
+      ++ptr_;
+      return *this;
+    }
+
+    // Compares two iterators.
+    bool operator==(const const_iterator& other) const {
+      return ptr_ == other.ptr_;
+    }
+    bool operator!=(const const_iterator& other) const {
+      return ptr_ != other.ptr_;
+    }
+
+   private:
+    const char* ptr_ = nullptr;
+  };
+
+  // Creates a CharString that contains the given string.
+  explicit CharString2(const std::string& s) : s_(s) {}
+
+  // Returns an iterator pointing to the first character in the string.
+  const_iterator begin() const { return const_iterator(s_.c_str()); }
+
+  // Returns an iterator pointing past the last character in the string.
+  const_iterator end() const { return const_iterator(s_.c_str() + s_.size()); }
+
+ private:
+  std::string s_;
+};
+
+// Tests using ElementsAre() with a container whose iterator returns a
+// temporary and is not copy-assignable.
+TEST(ElementsAreTest, WorksWithContainerThatReturnsTempInUnassignableIterator) {
+  CharString2 s("abc");
+  EXPECT_THAT(s, ElementsAre('a', 'b', 'c'));
+  EXPECT_THAT(s, Not(ElementsAre('a', 'b', 'd')));
+}
+
+// Tests using ElementsAreArray() with a container whose iterator returns a
+// temporary and is not copy-assignable.
+TEST(ElementsAreArrayTest,
+     WorksWithContainerThatReturnsTempInUnassignableIterator) {
+  CharString2 s("abc");
+  EXPECT_THAT(s, ElementsAreArray({'a', 'b', 'c'}));
+  EXPECT_THAT(s, Not(ElementsAreArray({'a', 'b', 'd'})));
+}
+
+// A container whose iterator returns a temporary and is neither
+// copy-constructible nor copy-assignable.
+class CharString3 {
+ public:
+  using value_type = char;
+
+  class const_iterator {
+   public:
+    using iterator_category = std::input_iterator_tag;
+    using value_type = char;
+    using difference_type = std::ptrdiff_t;
+    using pointer = const char*;
+    using reference = const char&;
+
+    // Make const_iterator neither copy-constructible nor copy-assignable.
+    const_iterator(const const_iterator&) = delete;
+    const_iterator& operator=(const const_iterator&) = delete;
+
+    // Create an iterator that points to the given character.
+    explicit const_iterator(const char* ptr) : ptr_(ptr) {}
+
+    // Returns the current character. IMPORTANT: this must return a temporary,
+    // not a reference, to test that ElementsAre() works with containers whose
+    // iterators return temporaries.
+    char operator*() const { return *ptr_; }
+
+    // Advances to the next character.
+    const_iterator& operator++() {
+      ++ptr_;
+      return *this;
+    }
+
+    // Compares two iterators.
+    bool operator==(const const_iterator& other) const {
+      return ptr_ == other.ptr_;
+    }
+    bool operator!=(const const_iterator& other) const {
+      return ptr_ != other.ptr_;
+    }
+
+   private:
+    const char* ptr_ = nullptr;
+  };
+
+  // Creates a CharString that contains the given string.
+  explicit CharString3(const std::string& s) : s_(s) {}
+
+  // Returns an iterator pointing to the first character in the string.
+  const_iterator begin() const { return const_iterator(s_.c_str()); }
+
+  // Returns an iterator pointing past the last character in the string.
+  const_iterator end() const { return const_iterator(s_.c_str() + s_.size()); }
+
+ private:
+  std::string s_;
+};
+
+// Tests using ElementsAre() with a container whose iterator returns a
+// temporary and is neither copy-constructible nor copy-assignable.
+TEST(ElementsAreTest, WorksWithContainerThatReturnsTempInUncopyableIterator) {
+  CharString3 s("abc");
+  EXPECT_THAT(s, ElementsAre('a', 'b', 'c'));
+  EXPECT_THAT(s, Not(ElementsAre('a', 'b', 'd')));
+}
+
+// Tests using ElementsAreArray() with a container whose iterator returns a
+// temporary and is neither copy-constructible nor copy-assignable.
+TEST(ElementsAreArrayTest,
+     WorksWithContainerThatReturnsTempInUncopyableIterator) {
+  CharString3 s("abc");
+  EXPECT_THAT(s, ElementsAreArray({'a', 'b', 'c'}));
+  EXPECT_THAT(s, Not(ElementsAreArray({'a', 'b', 'd'})));
+}
+
+// A container whose iterator returns a temporary, is neither
+// copy-constructible nor copy-assignable, and has no member types.
+class CharString4 {
+ public:
+  using value_type = char;
+
+  class const_iterator {
+   public:
+    // Do not define difference_type, etc.
+
+    // Make const_iterator neither copy-constructible nor copy-assignable.
+    const_iterator(const const_iterator&) = delete;
+    const_iterator& operator=(const const_iterator&) = delete;
+
+    // Create an iterator that points to the given character.
+    explicit const_iterator(const char* ptr) : ptr_(ptr) {}
+
+    // Returns the current character. IMPORTANT: this must return a temporary,
+    // not a reference, to test that ElementsAre() works with containers whose
+    // iterators return temporaries.
+    char operator*() const { return *ptr_; }
+
+    // Advances to the next character.
+    const_iterator& operator++() {
+      ++ptr_;
+      return *this;
+    }
+
+    // Compares two iterators.
+    bool operator==(const const_iterator& other) const {
+      return ptr_ == other.ptr_;
+    }
+    bool operator!=(const const_iterator& other) const {
+      return ptr_ != other.ptr_;
+    }
+
+   private:
+    const char* ptr_ = nullptr;
+  };
+
+  // Creates a CharString that contains the given string.
+  explicit CharString4(const std::string& s) : s_(s) {}
+
+  // Returns an iterator pointing to the first character in the string.
+  const_iterator begin() const { return const_iterator(s_.c_str()); }
+
+  // Returns an iterator pointing past the last character in the string.
+  const_iterator end() const { return const_iterator(s_.c_str() + s_.size()); }
+
+ private:
+  std::string s_;
+};
+
+// Tests using ElementsAre() with a container whose iterator returns a
+// temporary, is neither copy-constructible nor copy-assignable, and has no
+// member types.
+TEST(ElementsAreTest, WorksWithContainerWithIteratorWithNoMemberTypes) {
+  CharString4 s("abc");
+  EXPECT_THAT(s, ElementsAre('a', 'b', 'c'));
+  EXPECT_THAT(s, Not(ElementsAre('a', 'b', 'd')));
+}
+
+// Tests using ElementsAreArray() with a container whose iterator returns a
+// temporary, is neither copy-constructible nor copy-assignable, and has no
+// member types.
+TEST(ElementsAreArrayTest, WorksWithContainerWithIteratorWithNoMemberTypes) {
+  CharString4 s("abc");
+  EXPECT_THAT(s, ElementsAreArray({'a', 'b', 'c'}));
+  EXPECT_THAT(s, Not(ElementsAreArray({'a', 'b', 'd'})));
+}
+
 // Tests using ElementsAre() and ElementsAreArray() with stream-like
 // "containers".
 
@@ -1798,8 +2194,8 @@ TEST(UnorderedElementsAreArrayTest, SucceedsWhenExpected) {
 }
 
 TEST(UnorderedElementsAreArrayTest, VectorBool) {
-  const bool a[] = {0, 1, 0, 1, 1};
-  const bool b[] = {1, 0, 1, 1, 0};
+  const bool a[] = {false, true, false, true, true};
+  const bool b[] = {true, false, true, true, false};
   std::vector<bool> expected(std::begin(a), std::end(a));
   std::vector<bool> actual(std::begin(b), std::end(b));
   StringMatchResultListener listener;
@@ -1892,6 +2288,13 @@ TEST_F(UnorderedElementsAreTest, WorksWithUncopyable) {
               UnorderedElementsAre(Truly(ValueIsPositive), UncopyableIs(-3)));
 }
 
+TEST_F(UnorderedElementsAreTest, WorksWithNativeArrayPassedAsPointerAndSize) {
+  int array[] = {0, 1};
+  ::std::tuple<int*, size_t> array_as_tuple(array, 2);
+  EXPECT_THAT(array_as_tuple, UnorderedElementsAre(1, 0));
+  EXPECT_THAT(array_as_tuple, Not(UnorderedElementsAre(0)));
+}
+
 TEST_F(UnorderedElementsAreTest, SucceedsWhenExpected) {
   const int a[] = {1, 2, 3};
   std::vector<int> s(std::begin(a), std::end(a));
@@ -1976,7 +2379,14 @@ TEST_F(UnorderedElementsAreTest, FailMessageCountWrong) {
   StringMatchResultListener listener;
   EXPECT_FALSE(ExplainMatchResult(UnorderedElementsAre(1, 2, 3), v, &listener))
       << listener.str();
-  EXPECT_THAT(listener.str(), Eq("which has 1 element"));
+  EXPECT_THAT(listener.str(),
+              Eq("which has 1 element\n"
+                 "where the following matchers don't match any elements:\n"
+                 "matcher #0: is equal to 1,\n"
+                 "matcher #1: is equal to 2,\n"
+                 "matcher #2: is equal to 3\n"
+                 "and where the following elements don't match any matchers:\n"
+                 "element #0: 4"));
 }
 
 TEST_F(UnorderedElementsAreTest, FailMessageCountWrongZero) {
@@ -1984,7 +2394,11 @@ TEST_F(UnorderedElementsAreTest, FailMessageCountWrongZero) {
   StringMatchResultListener listener;
   EXPECT_FALSE(ExplainMatchResult(UnorderedElementsAre(1, 2, 3), v, &listener))
       << listener.str();
-  EXPECT_THAT(listener.str(), Eq(""));
+  EXPECT_THAT(listener.str(),
+              Eq("where the following matchers don't match any elements:\n"
+                 "matcher #0: is equal to 1,\n"
+                 "matcher #1: is equal to 2,\n"
+                 "matcher #2: is equal to 3"));
 }
 
 TEST_F(UnorderedElementsAreTest, FailMessageUnmatchedMatchers) {
@@ -2091,13 +2505,15 @@ TEST_F(UnorderedElementsAreTest, DescribeNegation) {
 
 // Tests Each().
 
-TEST(EachTest, ExplainsMatchResultCorrectly) {
+INSTANTIATE_GTEST_MATCHER_TEST_P(EachTest);
+
+TEST_P(EachTestP, ExplainsMatchResultCorrectly) {
   set<int> a;  // empty
 
   Matcher<set<int>> m = Each(2);
   EXPECT_EQ("", Explain(m, a));
 
-  Matcher<const int(&)[1]> n = Each(1);  // NOLINT
+  Matcher<const int (&)[1]> n = Each(1);  // NOLINT
 
   const int b[1] = {1};
   EXPECT_EQ("", Explain(n, b));
@@ -2232,7 +2648,7 @@ TEST(PointwiseTest, MakesCopyOfRhs) {
   rhs.push_back(4);
 
   int lhs[] = {1, 2};
-  const Matcher<const int(&)[2]> m = Pointwise(IsHalfOf(), rhs);
+  const Matcher<const int (&)[2]> m = Pointwise(IsHalfOf(), rhs);
   EXPECT_THAT(lhs, m);
 
   // Changing rhs now shouldn't affect m, which made a copy of rhs.
@@ -2360,7 +2776,7 @@ TEST(UnorderedPointwiseTest, MakesCopyOfRhs) {
   rhs.push_back(4);
 
   int lhs[] = {2, 1};
-  const Matcher<const int(&)[2]> m = UnorderedPointwise(IsHalfOf(), rhs);
+  const Matcher<const int (&)[2]> m = UnorderedPointwise(IsHalfOf(), rhs);
   EXPECT_THAT(lhs, m);
 
   // Changing rhs now shouldn't affect m, which made a copy of rhs.
@@ -2398,7 +2814,7 @@ TEST(UnorderedPointwiseTest, RejectsWrongSize) {
   const double lhs[2] = {1, 2};
   const int rhs[1] = {0};
   EXPECT_THAT(lhs, Not(UnorderedPointwise(Gt(), rhs)));
-  EXPECT_EQ("which has 2 elements",
+  EXPECT_EQ("which has 2 elements\n",
             Explain(UnorderedPointwise(Gt(), rhs), lhs));
 
   const int rhs2[3] = {0, 1, 2};
@@ -2447,7 +2863,7 @@ TEST(UnorderedPointwiseTest, WorksWithMoveOnly) {
 }
 
 TEST(PointeeTest, WorksOnMoveOnlyType) {
-  std::unique_ptr<int> p(new int(3));
+  std::unique_ptr<int> p = std::make_unique<int>(3);
   EXPECT_THAT(p, Pointee(Eq(3)));
   EXPECT_THAT(p, Not(Pointee(Eq(2))));
 }
@@ -2582,7 +2998,7 @@ TEST(ElementsAreTest, DoesNotExplainTrivialMatch) {
   EXPECT_EQ("", Explain(m, test_list));  // No need to explain anything.
 }
 
-TEST(ElementsAreTest, ExplainsNonTrivialMatch) {
+TEST_P(ElementsAreTestP, ExplainsNonTrivialMatch) {
   Matcher<const vector<int>&> m =
       ElementsAre(GreaterThan(1), 0, GreaterThan(2));
 
@@ -2605,17 +3021,17 @@ TEST(ElementsAreTest, CanExplainMismatchWrongSize) {
   EXPECT_EQ("which has 1 element", Explain(m, test_list));
 }
 
-TEST(ElementsAreTest, CanExplainMismatchRightSize) {
+TEST_P(ElementsAreTestP, CanExplainMismatchRightSize) {
   Matcher<const vector<int>&> m = ElementsAre(1, GreaterThan(5));
 
   vector<int> v;
   v.push_back(2);
   v.push_back(1);
-  EXPECT_EQ("whose element #0 doesn't match", Explain(m, v));
+  EXPECT_EQ(Explain(m, v), "whose element #0 (2) isn't equal to 1");
 
   v[0] = 1;
-  EXPECT_EQ("whose element #1 doesn't match, which is 4 less than 5",
-            Explain(m, v));
+  EXPECT_EQ(Explain(m, v),
+            "whose element #1 (1) is <= 5, which is 4 less than 5");
 }
 
 TEST(ElementsAreTest, MatchesOneElementVector) {
@@ -2748,12 +3164,15 @@ TEST(ElementsAreTest, WorksWithNativeArrayPassedByReference) {
 
 class NativeArrayPassedAsPointerAndSize {
  public:
-  NativeArrayPassedAsPointerAndSize() {}
+  NativeArrayPassedAsPointerAndSize() = default;
 
   MOCK_METHOD(void, Helper, (int* array, int size));
 
  private:
-  GTEST_DISALLOW_COPY_AND_ASSIGN_(NativeArrayPassedAsPointerAndSize);
+  NativeArrayPassedAsPointerAndSize(const NativeArrayPassedAsPointerAndSize&) =
+      delete;
+  NativeArrayPassedAsPointerAndSize& operator=(
+      const NativeArrayPassedAsPointerAndSize&) = delete;
 };
 
 TEST(ElementsAreTest, WorksWithNativeArrayPassedAsPointerAndSize) {
@@ -2955,6 +3374,8 @@ TEST(ElementsAreArrayTest, SourceLifeSpan) {
 
 // Tests Contains().
 
+INSTANTIATE_GTEST_MATCHER_TEST_P(ContainsTest);
+
 TEST(ContainsTest, ListMatchesWhenElementIsInContainer) {
   list<int> some_list;
   some_list.push_back(3);
@@ -3008,9 +3429,9 @@ TEST(ContainsTest, SetDoesNotMatchWhenElementIsNotInContainer) {
   EXPECT_THAT(c_string_set, Not(Contains(std::string("goodbye"))));
 }
 
-TEST(ContainsTest, ExplainsMatchResultCorrectly) {
+TEST_P(ContainsTestP, ExplainsMatchResultCorrectly) {
   const int a[2] = {1, 2};
-  Matcher<const int(&)[2]> m = Contains(2);
+  Matcher<const int (&)[2]> m = Contains(2);
   EXPECT_EQ("whose element #1 matches", Explain(m, a));
 
   m = Contains(3);
@@ -3085,10 +3506,80 @@ TEST(ContainsTest, WorksForTwoDimensionalNativeArray) {
   EXPECT_THAT(a, Contains(Not(Contains(5))));
 }
 
+// Tests ContainsSubsequence().
+
+TEST(ContainsSubsequenceTest, WorksForNativeArray) {
+  const int a[] = {1, 2, 3, 4, 5};
+  EXPECT_THAT(a, ContainsSubsequence(1, 3, 4));
+  EXPECT_THAT(a, Not(ContainsSubsequence(1, 3, 2)));
+}
+
+TEST(ContainsSubsequenceTest, AcceptsMatcher) {
+  const int a[] = {1, 2, 3, 4, 5};
+  EXPECT_THAT(a, ContainsSubsequence(Eq(1), Gt(3), Gt(4)));
+  EXPECT_THAT(a, Not(ContainsSubsequence(1, Gt(3), Lt(3))));
+}
+
+TEST(ContainsSubsequenceTest, WorksForTwoDimensionalNativeArray) {
+  int a[][3] = {{1, 2, 3}, {7, 8, 9}, {4, 5, 6}};
+  EXPECT_THAT(a, ContainsSubsequence(ElementsAre(1, 2, 3), Contains(4)));
+  EXPECT_THAT(a,
+              Not(ContainsSubsequence(Contains(1), Contains(8), Contains(9))));
+}
+
+TEST(ContainsSubsequenceTest, WorksForVector) {
+  const vector<int> a = {1, 2, 3, 4, 5};
+  EXPECT_THAT(a, ContainsSubsequence(1, 3, 4));
+  EXPECT_THAT(a, Not(ContainsSubsequence(1, 3, 2)));
+}
+
+TEST(ContainsSubsequenceTest, WorksForEmptySmallSizedSubsequences) {
+  const int a[] = {1, 2, 3, 4, 5};
+  EXPECT_THAT(a, ContainsSubsequence());
+  EXPECT_THAT(a, ContainsSubsequence(Gt(4)));
+  EXPECT_THAT(a, Not(ContainsSubsequence(Gt(6))));
+  EXPECT_THAT(a, ContainsSubsequence(Lt(2), Gt(3)));
+  EXPECT_THAT(a, Not(ContainsSubsequence(Lt(2), Lt(2))));
+}
+
+TEST(ContainsSubsequenceTest, DescribesItselfCorrectly) {
+  Matcher<const int (&)[5]> m = ContainsSubsequence(1, 3, 4);
+  EXPECT_EQ(
+      "contains in order a subsequence of elements that matches: is equal to "
+      "1, then is equal to 3, then is equal to 4",
+      Describe(m));
+  m = ContainsSubsequence(Eq(1), Gt(3), Gt(4));
+  EXPECT_EQ(
+      "contains in order a subsequence of elements that matches: is equal to "
+      "1, then is > 3, then is > 4",
+      Describe(m));
+
+  m = Not(ContainsSubsequence(1, 3, 4));
+  EXPECT_EQ(
+      "does not contain in order a subsequence of elements that matches is "
+      "equal to 1, then is equal to 3, then is equal to 4",
+      Describe(m));
+}
+
+TEST(ContainsSubsequenceTest, ExplainsMismatchCorrectlyForSingleMatcher) {
+  const int a[] = {1, 2, 3, 4, 5};
+  Matcher<const int (&)[5]> m = ContainsSubsequence(Eq(6));
+  EXPECT_EQ(Explain(m, a),
+            "could not find a match for matcher #0 (is equal to 6)");
+}
+
+TEST(ContainsSubsequenceTest, ExplainsMismatchCorrectlyForMultipleMatchers) {
+  const int a[] = {1, 2, 3, 4, 5};
+  Matcher<const int (&)[5]> m = ContainsSubsequence(Eq(2), Gt(4), Gt(4));
+  EXPECT_EQ(
+      Explain(m, a),
+      "found match for matcher #0 with element at position #1, found match for "
+      "matcher #1 with element at position #4, but could not find a match for "
+      "matcher #2 (is > 4) after the last match at position #4");
+}
+
 }  // namespace
 }  // namespace gmock_matchers_test
 }  // namespace testing
 
-#ifdef _MSC_VER
-#pragma warning(pop)
-#endif
+GTEST_DISABLE_MSC_WARNINGS_POP_()  // 4244 4100

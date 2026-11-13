@@ -2,8 +2,11 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <algorithm>
+
 #include "src/codegen/assembler-inl.h"
 #include "src/compiler/pipeline.h"
+#include "src/compiler/turboshaft/pipelines.h"
 #include "test/unittests/compiler/backend/instruction-sequence-unittest.h"
 
 namespace v8 {
@@ -78,7 +81,27 @@ class RegisterAllocatorTest : public InstructionSequenceTest {
  public:
   void Allocate() {
     WireBlocks();
-    Pipeline::AllocateRegistersForTesting(config(), sequence(), false, true);
+
+    InstructionSequence* sequence = this->sequence();
+
+    OptimizedCompilationInfo info("testing", sequence->zone(),
+                                  CodeKind::FOR_TESTING);
+    ZoneStats zone_stats(sequence->isolate()->allocator());
+    turboshaft::PipelineData data(
+        &zone_stats, turboshaft::TurboshaftPipelineKind::kCSA, nullptr, &info,
+        AssemblerOptions(sequence->isolate()));
+    data.InitializeCodegenComponent(nullptr);
+    data.InitializeFrameData(nullptr);
+    data.InitializeInstructionComponentWithSequence(sequence);
+
+    if (info.trace_turbo_json()) {
+      TurboJsonFile json_of(&info, std::ios_base::trunc);
+      json_of << "{\"function\":\"" << info.GetDebugName().get()
+              << "\", \"source\":\"\",\n\"phases\":[";
+    }
+
+    turboshaft::Pipeline pipeline(&data, turboshaft::kNoLinkage);
+    CHECK(pipeline.AllocateRegisters(config(), true));
   }
 };
 
@@ -92,6 +115,31 @@ TEST_F(RegisterAllocatorTest, CanAllocateThreeRegisters) {
   EndBlock(Last());
 
   Allocate();
+}
+
+TEST_F(RegisterAllocatorTest, CombineFPAliasingSimd128InactiveDouble) {
+  if (kFPAliasing != AliasingKind::kCombine) return;
+  // Four double registers give two Simd128 registers under combine aliasing;
+  // the second Simd128 register aliases the two upper double registers.
+  SetNumRegs(4, 4);
+
+  StartBlock();
+  // Occupy the first Simd128 register for the whole block.
+  auto blocker = Define(FPReg(0, kSimd128));
+  // The Simd128 value below has to share resources with the fixed double
+  // definition that follows, since that double aliases the only remaining
+  // Simd128 register.
+  auto simd = EmitOI(FPReg(kNoValue, kSimd128));
+  EmitOI(FPReg(2, kFloat64));
+  Instruction* use = EmitI(Reg(simd));
+  EmitI(Reg(blocker, 0));
+  EndBlock(Last());
+
+  Allocate();
+
+  AllocatedOperand d2(LocationOperand::REGISTER, kFloat64, 2);
+  EXPECT_TRUE(use->InputAt(0)->IsAnyLocationOperand());
+  EXPECT_FALSE(use->InputAt(0)->InterferesWith(d2));
 }
 
 TEST_F(RegisterAllocatorTest, CanAllocateFPRegisters) {
@@ -766,6 +814,127 @@ INSTANTIATE_TEST_SUITE_P(
     RegisterAllocatorTest, SlotConstraintTest,
     ::testing::Combine(::testing::ValuesIn(kParameterTypes),
                        ::testing::Range(0, SlotConstraintTest::kMaxVariant)));
+
+TEST_F(RegisterAllocatorTest, AllocateBlockedRegDeferredClampBelowStart) {
+  SetNumRegs(3, 1);
+
+  // B0 (non-deferred): branch selector `c`, value `d` used at the deferred
+  // jump, and phi inputs `w0..w2` creating register pressure.
+  StartBlock();
+  VReg c = Parameter(Reg());
+  VReg d = Define(Reg());
+  VReg w0 = Define(Reg());
+  VReg w1 = Define(Reg());
+  VReg w2 = Define(Reg());
+  EndBlock(Branch(Reg(c), 1, 2));  // succs: B1 (deferred), B2
+
+  // B1 (deferred): a call clobbers all registers, defs re-occupy all
+  // registers, ending with a jump that uses `d` in a register. The next block
+  // in RPO order (B2) is not deferred.
+  StartBlock(true);
+  EmitCall(Slot(-1));
+  VReg z0 = Define(Reg());
+  VReg z1 = Define(Reg());
+  VReg z2 = Define(Reg());
+  EndBlock(Jump(2, Reg(d)));  // succ: B3
+
+  // B2 (non-deferred; predecessor B0).
+  StartBlock();
+  EmitNop();
+  EndBlock(Jump(1));  // succ: B3
+
+  // B3: merge with phis keeping `z0..z2` live out of B1, and a late use of `d`
+  // so that its split child survives past the B2 block boundary.
+  StartBlock();
+  VReg p0 = Phi(z0, w0);
+  VReg p1 = Phi(z1, w1);
+  VReg p2 = Phi(z2, w2);
+  EmitI(Use(d));
+  EmitI(Use(p0), Use(p1), Use(p2));
+  Return(p0);
+  EndBlock(Last());
+
+  Allocate();
+}
+
+TEST_F(RegisterAllocatorTest, TaggedConstantSlotReferenceMap) {
+  StartBlock();
+  VReg tagged_const = DefineConstant();
+  sequence()->MarkAsRepresentation(MachineRepresentation::kTagged,
+                                   tagged_const.value_);
+  VReg compressed_const = DefineConstant();
+  sequence()->MarkAsRepresentation(MachineRepresentation::kCompressed,
+                                   compressed_const.value_);
+  VReg untagged_const = DefineConstant();
+
+  // First call uses reference constants in registers before any slot
+  // constraint; their constant spill slots are not yet initialized here.
+  EmitCall(Slot(-1), Reg(tagged_const), Reg(compressed_const));
+  const int call1_index = sequence()->LastInstructionIndex();
+
+  // Second call requires stack slots for all three constants, including
+  // duplicate slot inputs for `tagged_const`.
+  TestOperand call2_inputs[] = {Slot(tagged_const), Slot(tagged_const),
+                                Slot(compressed_const), Slot(untagged_const)};
+  EmitCall(Slot(-2), arraysize(call2_inputs), call2_inputs);
+  const int call2_index = sequence()->LastInstructionIndex();
+
+  // Third call uses reference constants in registers rather than slots.
+  EmitCall(Slot(-3), Reg(tagged_const), Reg(compressed_const));
+  const int call3_index = sequence()->LastInstructionIndex();
+
+  // Fourth call again requires stack slots for both reference constants.
+  EmitCall(Slot(-4), Slot(tagged_const), Slot(compressed_const));
+  const int call4_index = sequence()->LastInstructionIndex();
+
+  // Non-call instruction requiring stack slots (e.g. eager deoptimize) has no
+  // ReferenceMap; verify slots are assigned without null-dereferencing it.
+  const Instruction* non_call =
+      EmitI(Slot(tagged_const), Slot(compressed_const));
+
+  Return(Reg(tagged_const));
+  EndBlock(Last());
+
+  Allocate();
+
+  const Instruction* call1 = sequence()->InstructionAt(call1_index);
+  const Instruction* call2 = sequence()->InstructionAt(call2_index);
+  const Instruction* call3 = sequence()->InstructionAt(call3_index);
+  const Instruction* call4 = sequence()->InstructionAt(call4_index);
+  ASSERT_TRUE(call1->HasReferenceMap());
+  ASSERT_TRUE(call2->HasReferenceMap());
+  ASSERT_TRUE(call3->HasReferenceMap());
+  ASSERT_TRUE(call4->HasReferenceMap());
+  ASSERT_FALSE(non_call->HasReferenceMap());
+
+  const InstructionOperand tagged_slot = *call2->InputAt(0);
+  const InstructionOperand compressed_slot = *call2->InputAt(2);
+  const InstructionOperand untagged_slot = *call2->InputAt(3);
+  ASSERT_TRUE(tagged_slot.IsStackSlot());
+  ASSERT_TRUE(compressed_slot.IsStackSlot());
+  ASSERT_TRUE(untagged_slot.IsStackSlot());
+  EXPECT_TRUE(tagged_slot.Equals(*call2->InputAt(1)));
+  EXPECT_TRUE(tagged_slot.Equals(*call4->InputAt(0)));
+  EXPECT_TRUE(compressed_slot.Equals(*call4->InputAt(1)));
+  EXPECT_TRUE(tagged_slot.Equals(*non_call->InputAt(0)));
+  EXPECT_TRUE(compressed_slot.Equals(*non_call->InputAt(1)));
+
+  auto count_in_ref_map = [](const Instruction* call,
+                             const InstructionOperand& op) {
+    const auto& refs = call->reference_map()->reference_operands();
+    return std::count(refs.begin(), refs.end(), op);
+  };
+
+  EXPECT_EQ(0, count_in_ref_map(call1, tagged_slot));
+  EXPECT_EQ(0, count_in_ref_map(call1, compressed_slot));
+  EXPECT_EQ(1, count_in_ref_map(call2, tagged_slot));
+  EXPECT_EQ(1, count_in_ref_map(call2, compressed_slot));
+  EXPECT_EQ(0, count_in_ref_map(call2, untagged_slot));
+  EXPECT_EQ(0, count_in_ref_map(call3, tagged_slot));
+  EXPECT_EQ(0, count_in_ref_map(call3, compressed_slot));
+  EXPECT_EQ(1, count_in_ref_map(call4, tagged_slot));
+  EXPECT_EQ(1, count_in_ref_map(call4, compressed_slot));
+}
 
 }  // namespace
 }  // namespace compiler

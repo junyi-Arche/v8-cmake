@@ -36,20 +36,24 @@ class V8_EXPORT_PRIVATE FrameInspector {
   Handle<Object> GetContext();
   Handle<Object> GetReceiver() { return receiver_; }
 
-  Handle<String> GetFunctionName();
+  DirectHandle<String> GetFunctionName();
 
 #if V8_ENABLE_WEBASSEMBLY
-  bool IsWasm();
+  bool IsWasm() const;
+  bool IsWasmInlined() const { return is_wasm_inlined_; }
+#if V8_ENABLE_DRUMBRAKE
+  bool IsWasmInterpreter() const;
+#endif  // V8_ENABLE_DRUMBRAKE
 #endif  // V8_ENABLE_WEBASSEMBLY
-  bool IsJavaScript();
+  bool IsJavaScript() const;
 
   JavaScriptFrame* javascript_frame();
 
   int inlined_frame_index() const { return inlined_frame_index_; }
 
  private:
-  bool ParameterIsShadowedByContextLocal(Handle<ScopeInfo> info,
-                                         Handle<String> parameter_name);
+  bool ParameterIsShadowedByContextLocal(DirectHandle<ScopeInfo> info,
+                                         DirectHandle<String> parameter_name);
 
   CommonFrame* frame_;
   int inlined_frame_index_;
@@ -61,6 +65,9 @@ class V8_EXPORT_PRIVATE FrameInspector {
   int source_position_ = -1;
   bool is_optimized_ = false;
   bool is_constructor_ = false;
+#if V8_ENABLE_WEBASSEMBLY
+  bool is_wasm_inlined_ = false;
+#endif  // V8_ENABLE_WEBASSEMBLY
 };
 
 class RedirectActiveFunctions : public ThreadVisitor {
@@ -70,12 +77,13 @@ class RedirectActiveFunctions : public ThreadVisitor {
     kUseDebugBytecode,
   };
 
-  explicit RedirectActiveFunctions(SharedFunctionInfo shared, Mode mode);
+  RedirectActiveFunctions(Isolate* isolate, Tagged<SharedFunctionInfo> shared,
+                          Mode mode);
 
   void VisitThread(Isolate* isolate, ThreadLocalTop* top) override;
 
  private:
-  SharedFunctionInfo shared_;
+  Tagged<SharedFunctionInfo> shared_;
   Mode mode_;
   DISALLOW_GARBAGE_COLLECTION(no_gc_)
 };

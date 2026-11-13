@@ -77,10 +77,24 @@ class BytecodeLivenessState : public ZoneObject {
     bit_vector_.Add(index + 1);
   }
 
+  void MarkRegistersLive(int index, int count) {
+    DCHECK_GE(index, 0);
+    DCHECK_GE(count, 0);
+    DCHECK_LE(index + count, bit_vector_.length() - 1);
+    bit_vector_.Add(index + 1, count);
+  }
+
   void MarkRegisterDead(int index) {
     DCHECK_GE(index, 0);
     DCHECK_LT(index, bit_vector_.length() - 1);
     bit_vector_.Remove(index + 1);
+  }
+
+  void MarkRegistersDead(int index, int count) {
+    DCHECK_GE(index, 0);
+    DCHECK_GE(count, 0);
+    DCHECK_LE(index + count, bit_vector_.length() - 1);
+    bit_vector_.Remove(index + 1, count);
   }
 
   void MarkAccumulatorLive() { bit_vector_.Add(0); }
@@ -99,6 +113,13 @@ class BytecodeLivenessState : public ZoneObject {
 
   void CopyFrom(const BytecodeLivenessState& other) {
     bit_vector_.CopyFrom(other.bit_vector_);
+  }
+
+  void CopyFrom(const BytecodeLivenessState& other, int index, int count) {
+    DCHECK_GE(index, 0);
+    DCHECK_GE(count, 0);
+    DCHECK_LE(index + count, bit_vector_.length() - 1);
+    bit_vector_.CopyFrom(other.bit_vector_, index + 1, count);
   }
 
   int register_count() const { return bit_vector_.length() - 1; }
@@ -122,7 +143,7 @@ struct BytecodeLiveness {
 class V8_EXPORT_PRIVATE BytecodeLivenessMap {
  public:
   BytecodeLivenessMap(int bytecode_size, Zone* zone)
-      : liveness_(zone->NewArray<BytecodeLiveness>(bytecode_size))
+      : liveness_(zone->AllocateArray<BytecodeLiveness>(bytecode_size))
 #ifdef DEBUG
         ,
         size_(bytecode_size)

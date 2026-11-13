@@ -6,6 +6,7 @@
 #define V8_BUILTINS_BUILTINS_CONSTRUCTOR_GEN_H_
 
 #include "src/codegen/code-stub-assembler.h"
+#include "src/common/globals.h"
 
 namespace v8 {
 namespace internal {
@@ -18,7 +19,8 @@ class ConstructorBuiltinsAssembler : public CodeStubAssembler {
   TNode<Context> FastNewFunctionContext(TNode<ScopeInfo> scope_info,
                                         TNode<Uint32T> slots,
                                         TNode<Context> context,
-                                        ScopeType scope_type);
+                                        ScopeType scope_type,
+                                        ContextMode context_mode);
 
   TNode<JSRegExp> CreateRegExpLiteral(TNode<HeapObject> maybe_feedback_vector,
                                       TNode<TaggedIndex> slot,
@@ -27,8 +29,7 @@ class ConstructorBuiltinsAssembler : public CodeStubAssembler {
 
   TNode<JSArray> CreateShallowArrayLiteral(
       TNode<FeedbackVector> feedback_vector, TNode<TaggedIndex> slot,
-      TNode<Context> context, AllocationSiteMode allocation_site_mode,
-      Label* call_runtime);
+      TNode<Context> context, Label* call_runtime);
 
   TNode<JSArray> CreateEmptyArrayLiteral(TNode<FeedbackVector> feedback_vector,
                                          TNode<TaggedIndex> slot,
@@ -37,6 +38,10 @@ class ConstructorBuiltinsAssembler : public CodeStubAssembler {
   TNode<HeapObject> CreateShallowObjectLiteral(
       TNode<FeedbackVector> feedback_vector, TNode<TaggedIndex> slot,
       Label* call_runtime);
+  TNode<HeapObject> CreateShallowObjectLiteral(
+      TNode<JSObject> boilerplate, Label* call_runtime,
+      bool bailout_if_dictionary = false);
+
   TNode<JSObject> CreateEmptyObjectLiteral(TNode<Context> context);
 
   TNode<JSObject> FastNewObject(TNode<Context> context,

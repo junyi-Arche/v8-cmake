@@ -6,10 +6,11 @@
 #define V8_DEBUG_DEBUG_H_
 
 #include <memory>
+#include <optional>
+#include <unordered_map>
 #include <vector>
 
 #include "src/base/enum-set.h"
-#include "src/base/platform/elapsed-timer.h"
 #include "src/codegen/source-position-table.h"
 #include "src/common/globals.h"
 #include "src/debug/debug-interface.h"
@@ -17,9 +18,9 @@
 #include "src/execution/interrupts-scope.h"
 #include "src/execution/isolate.h"
 #include "src/handles/handles.h"
+#include "src/interpreter/bytecode-array-iterator.h"
 #include "src/objects/debug-objects.h"
 #include "src/objects/shared-function-info.h"
-#include "src/utils/identity-map.h"
 
 namespace v8 {
 namespace internal {
@@ -27,10 +28,13 @@ namespace internal {
 // Forward declarations.
 class AbstractCode;
 class DebugScope;
+class DebugScriptScopeInfo;
+class EphemeronHashTable;
 class InterpretedFrame;
 class JavaScriptFrame;
 class JSGeneratorObject;
 class StackFrame;
+class ProtectedFixedArray;
 
 // Step actions.
 enum StepAction : int8_t {
@@ -52,8 +56,8 @@ enum ExceptionBreakType {
 // below inside BreakLocation, so be careful when adding / removing.
 enum DebugBreakType {
   NOT_DEBUG_BREAK,
-  DEBUGGER_STATEMENT,
   DEBUG_BREAK_AT_ENTRY,
+  DEBUGGER_STATEMENT,
   DEBUG_BREAK_SLOT,
   DEBUG_BREAK_SLOT_AT_CALL,
   DEBUG_BREAK_SLOT_AT_RETURN,
@@ -88,10 +92,11 @@ class BreakLocation {
 
   int generator_suspend_id() { return generator_suspend_id_; }
   int position() const { return position_; }
+  int code_offset() const { return code_offset_; }
 
   debug::BreakLocationType type() const;
 
-  JSGeneratorObject GetGeneratorObjectForSuspendedFrame(
+  Tagged<JSGeneratorObject> GetGeneratorObjectForSuspendedFrame(
       JavaScriptFrame* frame) const;
 
  private:
@@ -115,7 +120,7 @@ class BreakLocation {
         generator_suspend_id_(-1) {}
 
   static int BreakIndexFromCodeOffset(Handle<DebugInfo> debug_info,
-                                      Handle<AbstractCode> abstract_code,
+                                      DirectHandle<AbstractCode> abstract_code,
                                       int offset);
 
   void SetDebugBreak();
@@ -159,14 +164,13 @@ class V8_EXPORT_PRIVATE BreakIterator {
  private:
   int BreakIndexFromPosition(int position);
 
-  Isolate* isolate();
-
   Handle<DebugInfo> debug_info_;
   int break_index_;
   int position_;
   int statement_position_;
+  V8_NO_UNIQUE_ADDRESS DisallowGarbageCollection no_gc_;
   SourcePositionTableIterator source_position_iterator_;
-  DISALLOW_GARBAGE_COLLECTION(no_gc_)
+  interpreter::BytecodeArrayIterator bytecode_iterator_;
 };
 
 // Holds all active DebugInfo objects. This is a composite data structure
@@ -178,29 +182,24 @@ class V8_EXPORT_PRIVATE BreakIterator {
 //
 // DebugInfos are held strongly through global handles.
 //
-// TODO(jgruber): If we had a map-like data structure that supports fast
-// deletion-during-iteration, the list-like part of this data structure could
-// be removed. However, that's a no-go with IdentityMap.
+// TODO(jgruber): Now that we use an unordered_map as the map-like structure,
+// which supports deletion-during-iteration, the list-like part of this data
+// structure could be removed.
 class DebugInfoCollection final {
   using HandleLocation = Address*;
+  using SFIUniqueId = uint32_t;  // The type of SFI::unique_id.
 
  public:
-  explicit DebugInfoCollection(Isolate* isolate)
-      : isolate_(isolate), map_(isolate->heap()) {}
+  explicit DebugInfoCollection(Isolate* isolate) : isolate_(isolate) {}
 
-  void Insert(SharedFunctionInfo sfi, DebugInfo debug_info);
+  void Insert(Tagged<SharedFunctionInfo> sfi, Tagged<DebugInfo> debug_info);
 
-  bool Contains(SharedFunctionInfo sfi) const;
-  MaybeHandle<DebugInfo> Find(SharedFunctionInfo sfi) const;
+  bool Contains(Tagged<SharedFunctionInfo> sfi) const;
+  std::optional<Tagged<DebugInfo>> Find(Tagged<SharedFunctionInfo> sfi) const;
 
-  void DeleteSlow(SharedFunctionInfo sfi);
+  void DeleteSlow(Tagged<SharedFunctionInfo> sfi);
 
   size_t Size() const { return list_.size(); }
-
-  void TearDown() {
-    list_.clear();
-    map_.Clear();
-  }
 
   class Iterator final {
    public:
@@ -211,10 +210,10 @@ class DebugInfoCollection final {
       return index_ < static_cast<int>(collection_->list_.size());
     }
 
-    Handle<DebugInfo> Next() const {
+    Tagged<DebugInfo> Next() const {
       DCHECK_GE(index_, 0);
       if (!HasNext()) return {};
-      return collection_->EntryAsHandle(index_);
+      return collection_->EntryAsDebugInfo(index_);
     }
 
     void Advance() {
@@ -236,36 +235,12 @@ class DebugInfoCollection final {
   };
 
  private:
-  Handle<DebugInfo> EntryAsHandle(size_t index) const {
-    DCHECK_LT(index, list_.size());
-    return Handle<DebugInfo>(list_[index]);
-  }
+  V8_EXPORT_PRIVATE Tagged<DebugInfo> EntryAsDebugInfo(size_t index) const;
   void DeleteIndex(size_t index);
 
   Isolate* const isolate_;
   std::vector<HandleLocation> list_;
-  IdentityMap<HandleLocation, FreeStoreAllocationPolicy> map_;
-};
-
-class DebugFeatureTracker {
- public:
-  enum Feature {
-    kActive = 1,
-    kBreakPoint = 2,
-    kStepping = 3,
-    kHeapSnapshot = 4,
-    kAllocationTracking = 5,
-    kProfiler = 6,
-    kLiveEdit = 7,
-  };
-
-  explicit DebugFeatureTracker(Isolate* isolate)
-      : isolate_(isolate), bitfield_(0) {}
-  void Track(Feature feature);
-
- private:
-  Isolate* isolate_;
-  uint32_t bitfield_;
+  std::unordered_map<SFIUniqueId, HandleLocation> map_;
 };
 
 // This class contains the debugger support. The main purpose is to handle
@@ -281,61 +256,86 @@ class V8_EXPORT_PRIVATE Debug {
   Debug& operator=(const Debug&) = delete;
 
   // Debug event triggers.
-  void OnDebugBreak(Handle<FixedArray> break_points_hit, StepAction stepAction,
+  void OnDebugBreak(DirectHandle<FixedArray> break_points_hit,
+                    StepAction stepAction,
                     debug::BreakReasons break_reasons = {});
+  // Must only be called for breaks that are caused purely by stepping (i.e.
+  // not by breakpoints, debugger statements, scheduled pauses, asserts, ...)
+  // after stepping was cleared. If the current location is covered by the skip
+  // list of the last StepInto/StepOver, stepping is re-armed and true is
+  // returned. In that case the caller must not pause.
+  bool ContinueSteppingIfSkipped(StepAction last_step_action);
   debug::DebugDelegate::ActionAfterInstrumentation OnInstrumentationBreak();
 
-  base::Optional<Object> OnThrow(Handle<Object> exception)
+  std::optional<Tagged<Object>> OnThrow(DirectHandle<Object> exception,
+                                        bool is_stack_overflow = false)
       V8_WARN_UNUSED_RESULT;
-  void OnPromiseReject(Handle<Object> promise, Handle<Object> value);
-  void OnCompileError(Handle<Script> script);
-  void OnAfterCompile(Handle<Script> script);
+  void OnPromiseReject(DirectHandle<Object> promise,
+                       DirectHandle<Object> value);
+  void OnCompileError(DirectHandle<Script> script);
+  void OnAfterCompile(DirectHandle<Script> script);
 
-  void HandleDebugBreak(IgnoreBreakMode ignore_break_mode,
+  // Breaks execution at the current statement if possible, or schedules a break
+  // on function entry / next function call. Returns true if the break was
+  // delivered or scheduled; false if it was dropped (e.g. breaks disabled,
+  // ignore_events, or stack overflow).
+  bool HandleDebugBreak(IgnoreBreakMode ignore_break_mode,
                         debug::BreakReasons break_reasons);
 
   // The break target may not be the top-most frame, since we may be
   // breaking before entering a function that cannot contain break points.
-  void Break(JavaScriptFrame* frame, Handle<JSFunction> break_target);
+  void Break(JavaScriptFrame* frame, DirectHandle<JSFunction> break_target);
 
   // Scripts handling.
-  Handle<FixedArray> GetLoadedScripts();
+  DirectHandle<FixedArray> GetLoadedScripts();
+
+  // DebugInfo accessors.
+  std::optional<Tagged<DebugInfo>> TryGetDebugInfo(
+      Tagged<SharedFunctionInfo> sfi);
+  bool HasDebugInfo(Tagged<SharedFunctionInfo> sfi);
+  bool HasCoverageInfo(Tagged<SharedFunctionInfo> sfi);
+  bool HasBreakInfo(Tagged<SharedFunctionInfo> sfi);
+  bool BreakAtEntry(Tagged<SharedFunctionInfo> sfi);
 
   // Break point handling.
   enum BreakPointKind { kRegular, kInstrumentation };
   bool SetBreakpoint(Handle<SharedFunctionInfo> shared,
-                     Handle<BreakPoint> break_point, int* source_position);
-  void ClearBreakPoint(Handle<BreakPoint> break_point);
+                     DirectHandle<BreakPoint> break_point,
+                     int* source_position);
+  void ClearBreakPoint(DirectHandle<BreakPoint> break_point);
   void ChangeBreakOnException(ExceptionBreakType type, bool enable);
-  bool IsBreakOnException(ExceptionBreakType type);
 
   void SetTerminateOnResume();
 
-  bool SetBreakPointForScript(Handle<Script> script, Handle<String> condition,
+  bool SetBreakPointForScript(Handle<Script> script,
+                              DirectHandle<String> condition,
                               int* source_position, int* id);
   bool SetBreakpointForFunction(Handle<SharedFunctionInfo> shared,
-                                Handle<String> condition, int* id,
+                                DirectHandle<String> condition, int* id,
                                 BreakPointKind kind = kRegular);
   void RemoveBreakpoint(int id);
 #if V8_ENABLE_WEBASSEMBLY
-  void SetInstrumentationBreakpointForWasmScript(Handle<Script> script,
+  void SetInstrumentationBreakpointForWasmScript(DirectHandle<Script> script,
                                                  int* id);
-  void RemoveBreakpointForWasmScript(Handle<Script> script, int id);
+  void RemoveBreakpointForWasmScript(DirectHandle<Script> script, int id);
 
-  void RecordWasmScriptWithBreakpoints(Handle<Script> script);
+  void RecordWasmScriptWithBreakpoints(DirectHandle<Script> script);
+  DirectHandle<WeakArrayList> wasm_scripts_with_break_points() const {
+    return wasm_scripts_with_break_points_;
+  }
 #endif  // V8_ENABLE_WEBASSEMBLY
 
   // Find breakpoints from the debug info and the break location and check
   // whether they are hit. Return an empty handle if not, or a FixedArray with
   // hit BreakPoint objects. has_break_points is set to true if position has
   // any non-instrumentation breakpoint.
-  MaybeHandle<FixedArray> GetHitBreakPoints(Handle<DebugInfo> debug_info,
+  MaybeHandle<FixedArray> GetHitBreakPoints(DirectHandle<DebugInfo> debug_info,
                                             int position,
                                             bool* has_break_points);
 
   // Stepping handling.
   void PrepareStep(StepAction step_action);
-  void PrepareStepIn(Handle<JSFunction> function);
+  void PrepareStepIn(DirectHandle<JSFunction> function);
   void PrepareStepInSuspendedGenerator();
   void PrepareStepOnThrow();
   void ClearStepping();
@@ -344,30 +344,35 @@ class V8_EXPORT_PRIVATE Debug {
   void SetBreakOnNextFunctionCall();
   void ClearBreakOnNextFunctionCall();
 
-  void DiscardBaselineCode(SharedFunctionInfo shared);
+  void DiscardBaselineCode(Tagged<SharedFunctionInfo> shared);
   void DiscardAllBaselineCode();
 
-  void DeoptimizeFunction(Handle<SharedFunctionInfo> shared);
-  void PrepareFunctionForDebugExecution(Handle<SharedFunctionInfo> shared);
+  void DeoptimizeFunction(DirectHandle<SharedFunctionInfo> shared);
+  void PrepareFunctionForDebugExecution(
+      DirectHandle<SharedFunctionInfo> shared);
   void InstallDebugBreakTrampoline();
   bool GetPossibleBreakpoints(Handle<Script> script, int start_position,
                               int end_position, bool restrict_to_function,
                               std::vector<BreakLocation>* locations);
 
-  bool IsBlackboxed(Handle<SharedFunctionInfo> shared);
+  bool IsFunctionBlackboxed(DirectHandle<Script> script, const int start,
+                            const int end);
+  bool IsBlackboxed(DirectHandle<SharedFunctionInfo> shared);
   bool ShouldBeSkipped();
+  bool ShouldEnterFunction(DirectHandle<SharedFunctionInfo> shared);
 
-  bool CanBreakAtEntry(Handle<SharedFunctionInfo> shared);
+  bool CanBreakAtEntry(DirectHandle<SharedFunctionInfo> shared);
 
   void SetDebugDelegate(debug::DebugDelegate* delegate);
 
   // Returns whether the operation succeeded.
   bool EnsureBreakInfo(Handle<SharedFunctionInfo> shared);
-  void CreateBreakInfo(Handle<SharedFunctionInfo> shared);
-  Handle<DebugInfo> GetOrCreateDebugInfo(Handle<SharedFunctionInfo> shared);
+  bool CreateBreakInfo(DirectHandle<SharedFunctionInfo> shared);
+  Handle<DebugInfo> GetOrCreateDebugInfo(
+      DirectHandle<SharedFunctionInfo> shared);
 
-  void InstallCoverageInfo(Handle<SharedFunctionInfo> shared,
-                           Handle<CoverageInfo> coverage_info);
+  void InstallCoverageInfo(DirectHandle<SharedFunctionInfo> shared,
+                           DirectHandle<CoverageInfo> coverage_info);
   void RemoveAllCoverageInfos();
 
   // This function is used in FunctionNameUsing* tests.
@@ -382,23 +387,19 @@ class V8_EXPORT_PRIVATE Debug {
       Handle<Script> script, int start_position, int end_position,
       std::vector<Handle<SharedFunctionInfo>>* candidates);
 
-  static Handle<Object> GetSourceBreakLocations(
-      Isolate* isolate, Handle<SharedFunctionInfo> shared);
+  MaybeDirectHandle<SharedFunctionInfo> GetTopLevelWithRecompile(
+      Handle<Script> script, bool* did_compile = nullptr);
+
+  static DirectHandle<Object> GetSourceBreakLocations(
+      Isolate* isolate, DirectHandle<SharedFunctionInfo> shared);
 
   // Check whether this frame is just about to return.
   bool IsBreakAtReturn(JavaScriptFrame* frame);
 
+  // Walks the call stack to see if any frames are not ignore listed.
   bool AllFramesOnStackAreBlackboxed();
 
-  // Set new script source, throw an exception if error occurred. When preview
-  // is true: try to set source, throw exception if any without actual script
-  // change. stack_changed is true if after editing script on pause stack is
-  // changed and client should request stack trace again.
-  bool SetScriptSource(Handle<Script> script, Handle<String> source,
-                       bool preview, bool allow_top_frame_live_editing,
-                       debug::LiveEditResult* result);
-
-  int GetFunctionDebuggingId(Handle<JSFunction> function);
+  int GetFunctionDebuggingId(DirectHandle<JSFunction> function);
 
   // Threading support.
   char* ArchiveDebug(char* to);
@@ -413,26 +414,28 @@ class V8_EXPORT_PRIVATE Debug {
   void StartSideEffectCheckMode();
   void StopSideEffectCheckMode();
 
-  void ApplySideEffectChecks(Handle<DebugInfo> debug_info);
-  void ClearSideEffectChecks(Handle<DebugInfo> debug_info);
+  void ApplySideEffectChecks(DirectHandle<DebugInfo> debug_info);
+  void ClearSideEffectChecks(DirectHandle<DebugInfo> debug_info);
 
   // Make a one-time exception for a next call to given side-effectful API
   // function.
-  void IgnoreSideEffectsOnNextCallTo(Handle<CallHandlerInfo> call_handler_info);
+  void IgnoreSideEffectsOnNextCallTo(Handle<FunctionTemplateInfo> function);
 
-  bool PerformSideEffectCheck(Handle<JSFunction> function,
-                              Handle<Object> receiver);
+  bool PerformSideEffectCheck(DirectHandle<JSFunction> function,
+                              DirectHandle<Object> receiver);
 
-  bool PerformSideEffectCheckForAccessor(Handle<AccessorInfo> accessor_info,
-                                         Handle<Object> receiver,
-                                         AccessorComponent component);
-  bool PerformSideEffectCheckForCallback(
-      Handle<CallHandlerInfo> call_handler_info);
+  void PrepareBuiltinForSideEffectCheck(Isolate* isolate, Builtin id);
+
+  bool PerformSideEffectCheckForAccessor(
+      DirectHandle<AccessorInfo> accessor_info, DirectHandle<Object> holder,
+      AccessorComponent component);
+  bool PerformSideEffectCheckForCallback(Handle<FunctionTemplateInfo> function);
   bool PerformSideEffectCheckForInterceptor(
-      Handle<InterceptorInfo> interceptor_info);
+      DirectHandle<InterceptorInfo> interceptor_info);
+  void FailSideEffectCheckForDeferredModuleEvaluation();
 
   bool PerformSideEffectCheckAtBytecode(InterpretedFrame* frame);
-  bool PerformSideEffectCheckForObject(Handle<Object> object);
+  bool PerformSideEffectCheckForObject(DirectHandle<Object> object);
 
   // Flags and states.
   inline bool is_active() const { return is_active_; }
@@ -449,8 +452,10 @@ class V8_EXPORT_PRIVATE Debug {
   StackFrameId break_frame_id() { return thread_local_.break_frame_id_; }
 
   Handle<Object> return_value_handle();
-  Object return_value() { return thread_local_.return_value_; }
-  void set_return_value(Object value) { thread_local_.return_value_ = value; }
+  Tagged<Object> return_value() { return thread_local_.return_value_; }
+  void set_return_value(Tagged<Object> value) {
+    thread_local_.return_value_ = value;
+  }
 
   // Support for embedding into generated code.
   Address is_active_address() { return reinterpret_cast<Address>(&is_active_); }
@@ -468,12 +473,33 @@ class V8_EXPORT_PRIVATE Debug {
     return thread_local_.break_on_next_function_call_;
   }
 
+  void set_step_over_enters_functions(bool value) {
+    thread_local_.step_over_enters_functions_ = value;
+  }
+  // Whether the current StepOver enters functions selected by the delegate.
+  bool step_over_enters_functions() const {
+    return thread_local_.last_step_action_ == StepOver &&
+           thread_local_.step_over_enters_functions_;
+  }
+
   bool scheduled_break_on_function_call() const {
+    return !thread_local_.scheduled_break_on_next_function_call_.empty();
+  }
+  v8::debug::BreakReasons scheduled_break_on_next_function_call() const {
     return thread_local_.scheduled_break_on_next_function_call_;
   }
 
-  bool IsRestartFrameScheduled() const {
+  // Raw state, for Debug-internal checks right after a delegate callback
+  // returns while a DebugScope is still on the stack (e.g.
+  // OnInstrumentationBreak).
+  bool has_scheduled_restart_frame() const {
     return thread_local_.restart_frame_id_ != StackFrameId::NO_ID;
+  }
+  // For code that runs JS or unwinds frames. False while a DebugScope is
+  // active, so embedder JS that runs from inspector notifications does not see
+  // the pending restart.
+  bool IsRestartFrameScheduled() const {
+    return !in_debug_scope() && has_scheduled_restart_frame();
   }
   bool ShouldRestartFrame(StackFrameId id) const {
     return IsRestartFrameScheduled() && thread_local_.restart_frame_id_ == id;
@@ -488,8 +514,6 @@ class V8_EXPORT_PRIVATE Debug {
 
   inline bool break_disabled() const { return break_disabled_; }
 
-  DebugFeatureTracker* feature_tracker() { return &feature_tracker_; }
-
   // For functions in which we cannot set a break point, use a canonical
   // source position for break points.
   static const int kBreakAtEntryPosition = 0;
@@ -497,12 +521,30 @@ class V8_EXPORT_PRIVATE Debug {
   // Use -1 to encode instrumentation breakpoints.
   static const int kInstrumentationId = -1;
 
-  void RemoveBreakInfoAndMaybeFree(Handle<DebugInfo> debug_info);
-
-  // Stops the timer for the top-most `DebugScope` and records a UMA event.
-  void NotifyDebuggerPausedEventSent();
+  void RemoveBreakInfoAndMaybeFree(DirectHandle<DebugInfo> debug_info);
 
   static char* Iterate(RootVisitor* v, char* thread_storage);
+
+  // Clear information pertaining to break location muting.
+  void ClearMutedLocation();
+#if V8_ENABLE_WEBASSEMBLY
+  // Mute additional pauses from this Wasm location.
+  void SetMutedWasmLocation(DirectHandle<Script> script, int position);
+#endif  // V8_ENABLE_WEBASSEMBLY
+
+  uint64_t IsolateId() const { return isolate_id_; }
+  void SetIsolateId(uint64_t id) { isolate_id_ = id; }
+
+  bool IsTemporaryObject(DirectHandle<HeapObject> object) const;
+
+  DirectHandle<DebugScriptScopeInfo> GetScriptScopeInfo(
+      DirectHandle<Script> script);
+  void SetScriptScopeInfo(DirectHandle<Script> script,
+                          DirectHandle<DebugScriptScopeInfo> info);
+  void ClearScriptScopeInfos();
+
+  void GetContextScripts(
+      std::map<int, std::unordered_set<int>>& context_scripts);
 
  private:
   explicit Debug(Isolate* isolate);
@@ -512,13 +554,6 @@ class V8_EXPORT_PRIVATE Debug {
   void UpdateState();
   void UpdateHookOnFunctionCall();
   void Unload();
-
-  void TearDown() {
-    Unload();
-    // Must be done explicitly prior to Heap::TearDown to avoid double-freeing
-    // the registered strong roots.
-    debug_infos_.TearDown();
-  }
 
   // Return the number of virtual frames below debugger entry.
   int CurrentFrameCount();
@@ -536,12 +571,13 @@ class V8_EXPORT_PRIVATE Debug {
     return thread_local_.suspended_generator_ != Smi::zero();
   }
 
-  bool IsExceptionBlackboxed(bool uncaught);
+  void OnException(DirectHandle<Object> exception,
+                   MaybeDirectHandle<JSPromise> promise,
+                   v8::debug::ExceptionType exception_type,
+                   bool is_stack_overflow = false);
 
-  void OnException(Handle<Object> exception, Handle<Object> promise,
-                   v8::debug::ExceptionType exception_type);
-
-  void ProcessCompileEvent(bool has_compile_error, Handle<Script> script);
+  void ProcessCompileEvent(bool has_compile_error, DirectHandle<Script> script);
+  void RecordScriptContext(DirectHandle<Script> script);
 
   // Find the closest source position for a break point for a given position.
   int FindBreakablePosition(Handle<DebugInfo> debug_info, int source_position);
@@ -551,31 +587,42 @@ class V8_EXPORT_PRIVATE Debug {
   void ClearBreakPoints(Handle<DebugInfo> debug_info);
   // Clear all code from instrumentation.
   void ClearAllBreakPoints();
-  // Instrument a function with one-shots.
+  // Instrument a function with one-shots. Blackboxed functions are ignored.
   void FloodWithOneShot(Handle<SharedFunctionInfo> function,
                         bool returns_only = false);
+  // Same as {FloodWithOneShot}, but also instruments blackboxed functions.
+  void FloodWithOneShotIncludingBlackboxed(Handle<SharedFunctionInfo> function,
+                                           bool returns_only = false);
   // Clear all one-shot instrumentations, but restore break points.
   void ClearOneShot();
+
+  // Mute additional pauses from this JavaScript location.
+  void SetMutedLocation(DirectHandle<SharedFunctionInfo> function,
+                        const BreakLocation& location);
 
   bool IsFrameBlackboxed(JavaScriptFrame* frame);
 
   void ActivateStepOut(StackFrame* frame);
   bool IsBreakOnInstrumentation(Handle<DebugInfo> debug_info,
                                 const BreakLocation& location);
+  bool IsBreakOnDebuggerStatement(DirectHandle<SharedFunctionInfo> function,
+                                  const BreakLocation& location);
   MaybeHandle<FixedArray> CheckBreakPoints(Handle<DebugInfo> debug_info,
                                            BreakLocation* location,
                                            bool* has_break_points);
-  MaybeHandle<FixedArray> CheckBreakPointsForLocations(
+  MaybeDirectHandle<FixedArray> CheckBreakPointsForLocations(
       Handle<DebugInfo> debug_info, std::vector<BreakLocation>& break_locations,
       bool* has_break_points);
 
-  MaybeHandle<FixedArray> GetHitBreakpointsAtCurrentStatement(
-      JavaScriptFrame* frame, bool* hasBreakpoints);
-
-  bool IsMutedAtCurrentLocation(JavaScriptFrame* frame);
+  bool IsMutedAtAnyBreakLocation(DirectHandle<SharedFunctionInfo> function,
+                                 const std::vector<BreakLocation>& locations);
+#if V8_ENABLE_WEBASSEMBLY
+  bool IsMutedAtWasmLocation(Tagged<Script> script, int position);
+#endif  // V8_ENABLE_WEBASSEMBLY
   // Check whether a BreakPoint object is hit. Evaluate condition depending
   // on whether this is a regular break location or a break at function entry.
-  bool CheckBreakPoint(Handle<BreakPoint> break_point, bool is_break_at_entry);
+  bool CheckBreakPoint(DirectHandle<BreakPoint> break_point,
+                       bool is_break_at_entry);
 
   inline void AssertDebugContext() { DCHECK(in_debug_scope()); }
 
@@ -595,14 +642,14 @@ class V8_EXPORT_PRIVATE Debug {
   debug::DebugDelegate* debug_delegate_ = nullptr;
 
   // Debugger is active, i.e. there is a debug event listener attached.
-  bool is_active_;
+  // This field is atomic because background compilation jobs can read it
+  // through Isolate::NeedsDetailedOptimizedCodeLineInfo.
+  std::atomic<bool> is_active_;
   // Debugger needs to be notified on every new function call.
   // Used for stepping and read-only checks
   bool hook_on_function_call_;
   // Suppress debug events.
   bool is_suppressed_;
-  // Running liveedit.
-  bool running_live_edit_ = false;
   // Do not trigger debug break events.
   bool break_disabled_;
   // Do not break on break points.
@@ -621,10 +668,7 @@ class V8_EXPORT_PRIVATE Debug {
   class TemporaryObjectsTracker;
   std::unique_ptr<TemporaryObjectsTracker> temporary_objects_;
 
-  Handle<RegExpMatchInfo> regexp_match_info_;
-
-  // Used to collect histogram data on debugger feature usage.
-  DebugFeatureTracker feature_tracker_;
+  IndirectHandle<RegExpMatchInfo> regexp_match_info_;
 
   // Per-thread data.
   class ThreadLocal {
@@ -640,10 +684,16 @@ class V8_EXPORT_PRIVATE Debug {
 
     // If set, next PrepareStepIn will ignore this function until stepped into
     // another function, at which point this will be cleared.
-    Object ignore_step_into_function_;
+    Tagged<Object> ignore_step_into_function_;
 
     // If set then we need to repeat StepOut action at return.
     bool fast_forward_to_return_;
+
+    // If set, StepOver also enters functions selected by the delegate. Set by
+    // StepOver with enter_functions and preserved across internally re-prepared
+    // steps (e.g. stepping out of entered functions or generator initial
+    // yield).
+    bool step_over_enters_functions_;
 
     // Source statement position from last step next action.
     int last_statement_position_;
@@ -658,10 +708,10 @@ class V8_EXPORT_PRIVATE Debug {
     int target_frame_count_;
 
     // Value of the accumulator at the point of entering the debugger.
-    Object return_value_;
+    Tagged<Object> return_value_;
 
     // The suspended generator object to track when stepping.
-    Object suspended_generator_;
+    Tagged<Object> suspended_generator_;
 
     // Last used inspector breakpoint id.
     int last_breakpoint_id_;
@@ -670,14 +720,10 @@ class V8_EXPORT_PRIVATE Debug {
     // debugger to break on next function call.
     bool break_on_next_function_call_;
 
-    // This flag is true when we break via stack check (BreakReason::kScheduled)
-    // We don't stay paused there but instead "step in" to the function similar
-    // to what "BreakOnNextFunctionCall" does.
-    bool scheduled_break_on_next_function_call_;
-
-    // Throwing an exception may cause a Promise rejection.  For this purpose
-    // we keep track of a stack of nested promises.
-    Object promise_stack_;
+    // Non-empty when we break via stack check (BreakReason::kScheduled or
+    // BreakReason::kOOM). We don't stay paused there but instead "step in" to
+    // the function similar to what "BreakOnNextFunctionCall" does.
+    v8::debug::BreakReasons scheduled_break_on_next_function_call_;
 
     // Frame ID for the frame that needs to be restarted. StackFrameId::NO_ID
     // otherwise. The unwinder uses the id to restart execution in this frame
@@ -689,6 +735,17 @@ class V8_EXPORT_PRIVATE Debug {
     // deoptimizer uses the info to materialize and drop execution into the
     // right frame.
     int restart_inline_frame_index_;
+
+    // If the most recent breakpoint did not result in a break because its
+    // condition was false, we will mute other break reasons if we are still at
+    // the same location. In that case, this points to the SharedFunctionInfo
+    // (if JavaScript) or Script (if Wasm) of the location where stopping has
+    // been muted; otherwise it is Smi::zero().
+    Tagged<Object> muted_function_;
+
+    // The source position at which breaking is muted. Only relevant if
+    // muted_function_ is set.
+    int muted_position_;
   };
 
   static void Iterate(RootVisitor* v, ThreadLocal* thread_local_data);
@@ -698,26 +755,43 @@ class V8_EXPORT_PRIVATE Debug {
 
 #if V8_ENABLE_WEBASSEMBLY
   // This is a global handle, lazily initialized.
-  Handle<WeakArrayList> wasm_scripts_with_break_points_;
+  IndirectHandle<WeakArrayList> wasm_scripts_with_break_points_;
 #endif  // V8_ENABLE_WEBASSEMBLY
+
+  // Ephemeron table caching DebugScriptScopeInfo for Scripts.
+  // This is a global handle, lazily initialized.
+  IndirectHandle<EphemeronHashTable> script_scope_infos_;
+
+  // Ephemeron table mapping Scripts to WeakArrayLists of NativeContexts.
+  // This is a global handle, lazily initialized.
+  // Unlike script_scope_infos_, this intentionally survives Debug::Unload():
+  // it is populated regardless of whether a delegate is attached, since it has
+  // to be able to reconstruct the mapping on a later Debugger.enable.
+  IndirectHandle<EphemeronHashTable> script_to_contexts_;
 
   // This is a part of machinery for allowing to ignore side effects for one
   // call to this API function. See Function::NewInstanceWithSideEffectType().
-  // Since the call_handler_info is allowlisted right before the call to
+  // Since the FunctionTemplateInfo is allowlisted right before the call to
   // constructor there must be never more than one such object at a time.
-  Handle<CallHandlerInfo> ignore_side_effects_for_call_handler_info_;
+  IndirectHandle<FunctionTemplateInfo>
+      ignore_side_effects_for_function_template_info_;
 
   Isolate* isolate_;
+
+  // The isolate id is set by the inspector via an embedder provided RNG
+  // (if provided) but stored in debug instance so we can access it internally
+  // in V8.
+  uint64_t isolate_id_;
 
   friend class Isolate;
   friend class DebugScope;
   friend class DisableBreak;
   friend class DisableTemporaryObjectTracking;
-  friend class LiveEdit;
   friend class SuppressDebug;
 
-  friend Handle<FixedArray> GetDebuggedFunctions();  // In test-debug.cc
-  friend void CheckDebuggerUnloaded();               // In test-debug.cc
+  friend DirectHandle<ProtectedFixedArray>
+  GetDebuggedFunctions();               // In debug-unittest.cc
+  friend void CheckDebuggerUnloaded();  // In debug-unittest.cc
 };
 
 // This scope is used to load and enter the debug context and create a new
@@ -729,8 +803,6 @@ class V8_NODISCARD DebugScope {
 
   void set_terminate_on_resume();
 
-  base::TimeDelta ElapsedTimeSinceCreation();
-
  private:
   Isolate* isolate() { return debug_->isolate_; }
 
@@ -740,10 +812,6 @@ class V8_NODISCARD DebugScope {
   PostponeInterruptsScope no_interrupts_;
   // This is used as a boolean.
   bool terminate_on_resume_ = false;
-
-  // Measures (for UMA) the duration beginning when we enter this `DebugScope`
-  // until we potentially send a "Debugger.paused" response in the inspector.
-  base::ElapsedTimer timer_;
 };
 
 // This scope is used to handle return values in nested debug break points.

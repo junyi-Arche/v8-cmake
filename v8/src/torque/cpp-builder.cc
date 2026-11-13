@@ -17,13 +17,21 @@ void Function::PrintDeclarationHeader(std::ostream& stream,
   stream << std::string(indentation, ' ') << "// " << pos_ << "\n";
   stream << std::string(indentation, ' ');
   if (IsExport()) stream << "V8_EXPORT_PRIVATE ";
-  if (IsV8Inline())
+  if (IsV8Inline()) {
     stream << "V8_INLINE ";
-  else if (IsInline())
+  } else if (IsInline()) {
     stream << "inline ";
+  }
   if (IsStatic()) stream << "static ";
   if (IsConstexpr()) stream << "constexpr ";
-  stream << return_type_ << " " << name_ << "(";
+  stream << return_type_ << " ";
+  std::streampos begin = stream.tellp();
+  stream << name_;
+  std::streampos end = stream.tellp();
+  if (kythe_cb_ && end != std::streampos(-1)) {
+    kythe_cb_(stream, static_cast<size_t>(begin), static_cast<size_t>(end));
+  }
+  stream << "(";
   bool first = true;
   for (const auto& p : parameters_) {
     if (!first) stream << ", ";
@@ -76,7 +84,7 @@ void Function::PrintBeginDefinition(std::ostream& stream,
     if (!class_template_parameters.empty()) {
       stream << std::string(indentation, ' ');
       stream << "template<";
-      scope += "<";
+      scope += '<';
       bool first = true;
       for (const auto& p : class_template_parameters) {
         if (!first) {
@@ -92,12 +100,18 @@ void Function::PrintBeginDefinition(std::ostream& stream,
         first = false;
       }
       stream << ">\n";
-      scope += ">";
+      scope += '>';
     }
     scope += "::";
   }
-  stream << std::string(indentation, ' ') << return_type_ << " " << scope
-         << name_ << "(";
+  stream << std::string(indentation, ' ') << return_type_ << " " << scope;
+  std::streampos begin = stream.tellp();
+  stream << name_;
+  std::streampos end = stream.tellp();
+  if (kythe_cb_ && end != std::streampos(-1)) {
+    kythe_cb_(stream, static_cast<size_t>(begin), static_cast<size_t>(end));
+  }
+  stream << "(";
   bool first = true;
   for (const auto& p : parameters_) {
     if (!first) stream << ", ";

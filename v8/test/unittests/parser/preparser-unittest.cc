@@ -2,10 +2,12 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include "src/parsing/preparser.h"
+
 #include "src/api/api-inl.h"
 #include "src/ast/ast.h"
 #include "src/base/strings.h"
-#include "src/base/vector.h"
+#include "src/base/unique-array.h"
 #include "src/codegen/compiler.h"
 #include "src/objects/objects-inl.h"
 #include "src/parsing/parse-info.h"
@@ -35,8 +37,6 @@ enum SkipTests {
 
 enum class PreciseMaybeAssigned { YES, NO };
 
-enum class Bailout { BAILOUT_IF_OUTER_SLOPPY, NO };
-
 }  // namespace
 
 class PreParserTest : public TestWithNativeContext {
@@ -49,15 +49,14 @@ class PreParserTest : public TestWithNativeContext {
 TEST_F(PreParserTest, LazyFunctionLength) {
   const char* script_source = "function lazy(a, b, c) { } lazy";
 
-  Handle<JSFunction> lazy_function = RunJS<JSFunction>(script_source);
+  DirectHandle<JSFunction> lazy_function = RunJS<JSFunction>(script_source);
 
-  Handle<SharedFunctionInfo> shared(lazy_function->shared(),
-                                    lazy_function->GetIsolate());
+  DirectHandle<SharedFunctionInfo> shared(lazy_function->shared(), i_isolate());
   CHECK_EQ(3, shared->length());
 
-  Handle<Smi> length = RunJS<Smi>("lazy.length");
+  DirectHandle<Smi> length = RunJS<Smi>("lazy.length");
   int32_t value;
-  CHECK(length->ToInt32(&value));
+  CHECK(Object::ToInt32(*length, &value));
   CHECK_EQ(3, value);
 }
 
@@ -134,14 +133,11 @@ TEST_F(PreParserTest, PreParserScopeAnalysis) {
     Inner(const char* p, const char* s, SkipTests skip,
           PreciseMaybeAssigned precise)
         : params(p), source(s), skip(skip), precise_maybe_assigned(precise) {}
-    Inner(const char* p, const char* s, SkipTests skip, Bailout bailout)
-        : params(p), source(s), skip(skip), bailout(bailout) {}
 
     const char* params = "";
     const char* source;
     SkipTests skip = DONT_SKIP;
     PreciseMaybeAssigned precise_maybe_assigned = PreciseMaybeAssigned::YES;
-    Bailout bailout = Bailout::NO;
     std::function<void()> prologue = nullptr;
     std::function<void()> epilogue = nullptr;
   } inners[] = {
@@ -280,6 +276,13 @@ TEST_F(PreParserTest, PreParserScopeAnalysis) {
       {"const {var1: var2, var3: var4} = {var1: 1, var3: 2};"},
       {"const {var1: var2, var3: {var4: var5}} = {var1: 1, var3: {var4: 2}};"},
       {"const {var1: var2, var3: [var4, var5]} = {var1: 1, var3: [2, 3]};"},
+
+      {"var [var1 = 1, var2 = 2] = [1, 2]; function f() { var1; var2; }"},
+      {"var {var1 = 1, var2: var3 = 2} = {}; function f() { var1; var3; }"},
+      {"let [var1 = 1, var2 = 2] = [1, 2]; function f() { var1; var2; }"},
+      {"let {var1 = 1, var2: var3 = 2} = {}; function f() { var1; var3; }"},
+      {"const [var1 = 1, var2 = 2] = [1, 2]; function f() { var1; var2; }"},
+      {"const {var1 = 1, var2: var3 = 2} = {}; function f() { var1; var3; }"},
 
       // Referencing the function variable.
       {"test;"},
@@ -512,10 +515,9 @@ TEST_F(PreParserTest, PreParserScopeAnalysis) {
       {"var1, ...var2", "function f1() { var2 = 9; }", SKIP_STRICT_FUNCTION},
 
       // Default parameters.
-      {"var1 = 3", "", SKIP_STRICT_FUNCTION, PreciseMaybeAssigned::NO},
-      {"var1, var2 = var1", "", SKIP_STRICT_FUNCTION, PreciseMaybeAssigned::NO},
-      {"var1, var2 = 4, ...var3", "", SKIP_STRICT_FUNCTION,
-       PreciseMaybeAssigned::NO},
+      {"var1 = 3", "", SKIP_STRICT_FUNCTION},
+      {"var1, var2 = var1", "", SKIP_STRICT_FUNCTION},
+      {"var1, var2 = 4, ...var3", "", SKIP_STRICT_FUNCTION},
 
       // Destructuring parameters. Because of the search space explosion, we
       // cannot test all interesting cases. Let's try to test a relevant subset.
@@ -559,10 +561,10 @@ TEST_F(PreParserTest, PreParserScopeAnalysis) {
       // Complicated params.
       {"var1, [var2], var3 = 24, [var4, var5] = [2, 4], var6, {var7}, var8, "
        "{name9: var9, name10: var10}, ...var11",
-       "", SKIP_STRICT_FUNCTION, PreciseMaybeAssigned::NO},
+       "", SKIP_STRICT_FUNCTION},
 
       // Complicated cases from bugs.
-      {"var1 = {} = {}", "", SKIP_STRICT_FUNCTION, PreciseMaybeAssigned::NO},
+      {"var1 = {} = {}", "", SKIP_STRICT_FUNCTION},
 
       // Destructuring rest. Because we can.
       {"var1, ...[var2]", "", SKIP_STRICT_FUNCTION},
@@ -575,16 +577,12 @@ TEST_F(PreParserTest, PreParserScopeAnalysis) {
       {"var1, ...{0: var2, 1: var3}", "", SKIP_STRICT_FUNCTION},
 
       // Default parameters for destruring parameters.
-      {"[var1, var2] = [2, 4]", "", SKIP_STRICT_FUNCTION,
-       PreciseMaybeAssigned::NO},
-      {"{var1, var2} = {var1: 3, var2: 3}", "", SKIP_STRICT_FUNCTION,
-       PreciseMaybeAssigned::NO},
+      {"[var1, var2] = [2, 4]", "", SKIP_STRICT_FUNCTION},
+      {"{var1, var2} = {var1: 3, var2: 3}", "", SKIP_STRICT_FUNCTION},
 
       // Default parameters inside destruring parameters.
-      {"[var1 = 4, var2 = var1]", "", SKIP_STRICT_FUNCTION,
-       PreciseMaybeAssigned::NO},
-      {"{var1 = 4, var2 = var1}", "", SKIP_STRICT_FUNCTION,
-       PreciseMaybeAssigned::NO},
+      {"[var1 = 4, var2 = var1]", "", SKIP_STRICT_FUNCTION},
+      {"{var1 = 4, var2 = var1}", "", SKIP_STRICT_FUNCTION},
 
       // Locals shadowing parameters.
       {"var1, var2", "var var1 = 16; () => { var1 = 17; };"},
@@ -597,7 +595,7 @@ TEST_F(PreParserTest, PreParserScopeAnalysis) {
       {"var1, var2, ...var3", "var var3 = 16; () => { var3 = 17; };",
        SKIP_STRICT_FUNCTION},
       {"var1, var2 = var1", "var var1 = 16; () => { var1 = 17; };",
-       SKIP_STRICT_FUNCTION, PreciseMaybeAssigned::NO},
+       SKIP_STRICT_FUNCTION},
 
       // Hoisted sloppy block function shadowing a parameter.
       // FIXME(marja): why is maybe_assigned inaccurate?
@@ -606,14 +604,14 @@ TEST_F(PreParserTest, PreParserScopeAnalysis) {
 
       // Sloppy eval in default parameter.
       {"var1, var2 = eval(''), var3", "let var4 = 0;", SKIP_STRICT_FUNCTION,
-       Bailout::BAILOUT_IF_OUTER_SLOPPY},
+       PreciseMaybeAssigned::NO},
       {"var1, var2 = eval(''), var3 = eval('')", "let var4 = 0;",
-       SKIP_STRICT_FUNCTION, Bailout::BAILOUT_IF_OUTER_SLOPPY},
+       SKIP_STRICT_FUNCTION, PreciseMaybeAssigned::NO},
 
       // Sloppy eval in arrow function parameter list which is inside another
       // arrow function parameter list.
       {"var1, var2 = (var3, var4 = eval(''), var5) => { let var6; }, var7",
-       "let var8 = 0;", SKIP_STRICT_FUNCTION, Bailout::BAILOUT_IF_OUTER_SLOPPY},
+       "let var8 = 0;", SKIP_STRICT_FUNCTION, PreciseMaybeAssigned::NO},
 
       // Sloppy eval in a function body with non-simple parameters.
       {"var1 = 1, var2 = 2", "eval('');", SKIP_STRICT_FUNCTION},
@@ -627,6 +625,9 @@ TEST_F(PreParserTest, PreParserScopeAnalysis) {
 
       {"try { } catch({var1, var2}) { function f() { var1 = 3; } }"},
       {"try { } catch([var1, var2]) { function f() { var1 = 3; } }"},
+      {"try { } catch({var1 = 1, var2: var3 = 2}) { function f() { var1; var3; "
+       "} }"},
+      {"try { } catch([var1 = 1, var2 = 2]) { function f() { var1; var2; } }"},
       {"try { } catch({}) { }"},
       {"try { } catch([]) { }"},
 
@@ -707,32 +708,26 @@ TEST_F(PreParserTest, PreParserScopeAnalysis) {
       int source_len = Utf8LengthHelper(inner.source);
       int len = code_len + params_len + source_len;
 
-      v8::base::ScopedVector<char> program(len + 1);
-      v8::base::SNPrintF(program, code, inner.params, inner.source);
+      auto program = v8::base::UniqueArray<char>::NewForOverwrite(len + 1);
+      v8::base::SNPrintF(program.as_span(), code, inner.params, inner.source);
 
       i::HandleScope scope(isolate);
       i::ReusableUnoptimizedCompileState reusable_state(isolate);
 
-      i::Handle<i::String> source =
+      i::DirectHandle<i::String> source =
           factory->InternalizeUtf8String(program.begin());
       source->PrintOn(stdout);
       printf("\n");
 
       // Compile and run the script to get a pointer to the lazy function.
       v8::Local<v8::Value> v = TryRunJS(program.begin()).ToLocalChecked();
-      i::Handle<i::Object> o = v8::Utils::OpenHandle(*v);
-      i::Handle<i::JSFunction> f = i::Handle<i::JSFunction>::cast(o);
-      i::Handle<i::SharedFunctionInfo> shared = i::handle(f->shared(), isolate);
+      i::DirectHandle<i::Object> o = v8::Utils::OpenDirectHandle(*v);
+      i::DirectHandle<i::JSFunction> f = i::Cast<i::JSFunction>(o);
+      i::DirectHandle<i::SharedFunctionInfo> shared(f->shared(), isolate);
 
-      if (inner.bailout == Bailout::BAILOUT_IF_OUTER_SLOPPY &&
-          !outer.strict_outer) {
-        CHECK(!shared->HasUncompiledDataWithPreparseData());
-        continue;
-      }
-
-      CHECK(shared->HasUncompiledDataWithPreparseData());
+      CHECK(shared->HasUncompiledDataWithPreparseData(isolate));
       i::Handle<i::PreparseData> produced_data_on_heap(
-          shared->uncompiled_data_with_preparse_data().preparse_data(),
+          shared->uncompiled_data_with_preparse_data(isolate)->preparse_data(),
           isolate);
 
       i::UnoptimizedCompileFlags flags =
@@ -746,7 +741,7 @@ TEST_F(PreParserTest, PreParserScopeAnalysis) {
       using_scope_data.set_consumed_preparse_data(
           i::ConsumedPreparseData::For(isolate, produced_data_on_heap));
       CHECK(i::parsing::ParseFunction(&using_scope_data, shared, isolate,
-                                      i::parsing::ReportStatisticsMode::kYes));
+                                      i::parsing::ReportStatisticsMode{true}));
 
       // Verify that we skipped at least one function inside that scope.
       i::DeclarationScope* scope_with_skipped_functions =
@@ -759,7 +754,7 @@ TEST_F(PreParserTest, PreParserScopeAnalysis) {
       i::ParseInfo not_using_scope_data(isolate, flags, &not_using_scope_state,
                                         &reusable_state);
       CHECK(i::parsing::ParseFunction(&not_using_scope_data, shared, isolate,
-                                      i::parsing::ReportStatisticsMode::kYes));
+                                      i::parsing::ReportStatisticsMode{true}));
 
       // Verify that we didn't skip anything (there's no preparsed scope data,
       // so we cannot skip).
@@ -785,9 +780,9 @@ TEST_F(PreParserTest, Regress753896) {
   i::Factory* factory = isolate->factory();
   i::HandleScope scope(isolate);
 
-  i::Handle<i::String> source = factory->InternalizeUtf8String(
+  i::DirectHandle<i::String> source = factory->InternalizeUtf8String(
       "function lazy() { let v = 0; if (true) { var v = 0; } }");
-  i::Handle<i::Script> script = factory->NewScript(source);
+  i::DirectHandle<i::Script> script = factory->NewScript(source);
   i::UnoptimizedCompileState state;
   i::ReusableUnoptimizedCompileState reusable_state(isolate);
   i::UnoptimizedCompileFlags flags =
@@ -797,7 +792,44 @@ TEST_F(PreParserTest, Regress753896) {
   // We don't assert that parsing succeeded or that it failed; currently the
   // error is not detected inside lazy functions, but it might be in the future.
   i::parsing::ParseProgram(&info, script, isolate,
-                           i::parsing::ReportStatisticsMode::kYes);
+                           i::parsing::ReportStatisticsMode{true});
+}
+
+TEST_F(PreParserTest, TopLevelArrowFunctions) {
+  constexpr char kSource[] = R"(
+    var a = () => { return 4; };
+    var b = (() => { return 4; });
+    var c = x => x + 2;
+    var d = (x => x + 2);
+    var e = (x, y, z) => x + y + z;
+    var f = ((x, y, z) => x + y + z);
+    // Functions declared within default parameters are also top-level.
+    var g = (x = (y => y * 2)) => { return x; };
+    var h = ((x = y => y * 2) => { return x; });
+    var i = (x = (y) => 0) => { return x; };
+  )";
+  i::Isolate* isolate = i_isolate();
+  i::HandleScope scope(isolate);
+  TryRunJS(kSource).ToLocalChecked();
+  auto IsCompiled = [&](const char* name) {
+    Local<Value> v = TryRunJS(name).ToLocalChecked();
+    i::DirectHandle<i::Object> o = v8::Utils::OpenDirectHandle(*v);
+    i::DirectHandle<i::JSFunction> f = i::Cast<i::JSFunction>(o);
+    i::DirectHandle<i::SharedFunctionInfo> shared(f->shared(), isolate);
+    return shared->is_compiled();
+  };
+  EXPECT_FALSE(IsCompiled("a"));
+  EXPECT_TRUE(IsCompiled("b"));
+  EXPECT_FALSE(IsCompiled("c"));
+  EXPECT_TRUE(IsCompiled("d"));
+  EXPECT_FALSE(IsCompiled("e"));
+  EXPECT_TRUE(IsCompiled("f"));
+  EXPECT_FALSE(IsCompiled("g"));
+  EXPECT_TRUE(IsCompiled("h"));
+  EXPECT_FALSE(IsCompiled("i"));
+  EXPECT_TRUE(IsCompiled("g()"));
+  EXPECT_FALSE(IsCompiled("h()"));
+  EXPECT_FALSE(IsCompiled("i()"));
 }
 
 TEST_F(PreParserTest, ProducingAndConsumingByteData) {
@@ -884,10 +916,10 @@ TEST_F(PreParserTest, ProducingAndConsumingByteData) {
     i::ZoneConsumedPreparseData::ByteData::ReadingScope reading_scope(
         &bytes_for_reading, wrapper);
 
-    CHECK_EQ(wrapper.data_length(), kDataSize);
+    CHECK_EQ(wrapper->data_length(), kDataSize);
 
     for (int i = 0; i < kDataSize; i++) {
-      CHECK_EQ(copied_buffer.at(i), wrapper.get(i));
+      CHECK_EQ(copied_buffer.at(i), wrapper->get(i));
     }
 
 #ifdef DEBUG
@@ -927,7 +959,8 @@ TEST_F(PreParserTest, ProducingAndConsumingByteData) {
 
   {
     // Serialize as an OnHeapConsumedPreparseData, and read back data.
-    i::Handle<i::PreparseData> data_on_heap = bytes.CopyToHeap(isolate, 0);
+    i::DirectHandle<i::PreparseData> data_on_heap =
+        bytes.CopyToHeap(isolate, 0);
     CHECK_EQ(data_on_heap->data_length(), kDataSize);
     CHECK_EQ(data_on_heap->children_length(), 0);
     i::OnHeapConsumedPreparseData::ByteData bytes_for_reading;
@@ -972,6 +1005,15 @@ TEST_F(PreParserTest, ProducingAndConsumingByteData) {
     // We should have consumed all data at this point.
     CHECK(!bytes_for_reading.HasRemainingBytes(1));
   }
+}
+
+TEST_F(PreParserTest, DefaultExpressionIsNotThis) {
+  CHECK(!PreParserExpression::Default().IsThis());
+  CHECK(PreParserExpression::This().IsThis());
+  CHECK(!PreParserExpression::Property().IsThisProperty());
+  CHECK(PreParserExpression::ThisProperty().IsThisProperty());
+  CHECK(!PreParserExpression::PrivateReference().IsThisProperty());
+  CHECK(PreParserExpression::ThisPrivateReference().IsThisProperty());
 }
 
 }  // namespace internal

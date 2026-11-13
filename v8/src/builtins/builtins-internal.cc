@@ -2,7 +2,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/builtins/builtins-utils.h"
+#include "src/builtins/builtins-utils-inl.h"
 #include "src/builtins/builtins.h"
 #include "src/codegen/interface-descriptors.h"
 #include "src/logging/counters.h"
@@ -12,10 +12,22 @@ namespace v8 {
 namespace internal {
 
 BUILTIN(Illegal) {
-  UNREACHABLE();
+  // Make it distinguishable from other UNREACHABLE() calls for convenience.
+  FATAL("Called Illegal builtin");
+}
+
+BUILTIN(IllegalInvocationThrower) {
+  HandleScope scope(isolate);
+  THROW_NEW_ERROR_RETURN_FAILURE(
+      isolate, NewTypeError(MessageTemplate::kIllegalInvocation));
 }
 
 BUILTIN(EmptyFunction) { return ReadOnlyRoots(isolate).undefined_value(); }
+
+// TODO(366374966): remove this second version of EmptyFunction once the
+// CPP macro becomes the source of truth for the builtin's formal parameter
+// count.
+BUILTIN(EmptyFunction1) { return ReadOnlyRoots(isolate).undefined_value(); }
 
 BUILTIN(UnsupportedThrower) {
   HandleScope scope(isolate);

@@ -6,6 +6,7 @@
 #define V8_SNAPSHOT_SHARED_HEAP_SERIALIZER_H_
 
 #include "src/snapshot/roots-serializer.h"
+#include "src/snapshot/trusted-section-serializer.h"
 
 namespace v8 {
 namespace internal {
@@ -34,9 +35,9 @@ class V8_EXPORT_PRIVATE SharedHeapSerializer : public RootsSerializer {
   bool SerializeUsingSharedHeapObjectCache(SnapshotByteSink* sink,
                                            Handle<HeapObject> obj);
 
-  static bool CanBeInSharedOldSpace(HeapObject obj);
+  static bool CanBeInSharedOldSpace(Tagged<HeapObject> obj);
 
-  static bool ShouldBeInSharedHeapObjectCache(HeapObject obj);
+  static bool ShouldBeInSharedHeapObjectCache(Tagged<HeapObject> obj);
 
  private:
   bool ShouldReconstructSharedHeapObjectCacheForTesting() const;
@@ -46,10 +47,14 @@ class V8_EXPORT_PRIVATE SharedHeapSerializer : public RootsSerializer {
   void SerializeStringTable(StringTable* string_table);
 
   void SerializeObjectImpl(Handle<HeapObject> obj, SlotType slot_type) override;
+  TrustedSectionSerializer* trusted_serializer() override {
+    return &trusted_serializer_;
+  }
 
 #ifdef DEBUG
   IdentityMap<int, base::DefaultAllocationPolicy> serialized_objects_;
 #endif
+  TrustedSectionSerializer trusted_serializer_;
 };
 
 }  // namespace internal

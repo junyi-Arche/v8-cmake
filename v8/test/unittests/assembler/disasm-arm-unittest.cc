@@ -26,6 +26,7 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 //
 
+#include <array>
 #include <cinttypes>
 #include <cstdlib>
 
@@ -58,7 +59,7 @@ bool DisassembleAndCompare(uint8_t* begin, UseRegex use_regex,
                            S... expected_strings) {
   disasm::NameConverter converter;
   disasm::Disassembler disasm(converter);
-  base::EmbeddedVector<char, 128> buffer;
+  std::array<char, 128> buffer;
 
   std::vector<std::string> expected_disassembly = {expected_strings...};
   size_t n_expected = expected_disassembly.size();
@@ -67,7 +68,7 @@ bool DisassembleAndCompare(uint8_t* begin, UseRegex use_regex,
   std::vector<std::string> disassembly;
   for (uint8_t* pc = begin; pc < end;) {
     pc += disasm.InstructionDecode(buffer, pc);
-    disassembly.emplace_back(buffer.begin());
+    disassembly.emplace_back(buffer.data());
   }
 
   bool test_passed = true;
@@ -1744,7 +1745,7 @@ TEST_F(DisasmArmTest, SplitAddImmediate) {
   SET_UP();
 
   if (CpuFeatures::IsSupported(ARMv7)) {
-    // Re-use the destination as a scratch.
+    // Reuse the destination as a scratch.
     COMPARE(add(r0, r1, Operand(0x12345678)),
             "e3050678       movw r0, #22136",
             "e3410234       movt r0, #4660",
@@ -1756,7 +1757,7 @@ TEST_F(DisasmArmTest, SplitAddImmediate) {
             "e341c234       movt ip, #4660",
             "e080000c       add r0, r0, ip");
   } else {
-    // Re-use the destination as a scratch.
+    // Reuse the destination as a scratch.
     COMPARE_REGEX(add(r0, r1, Operand(0x12345678)),
                   "e59f0[0-9a-f]{3}       "
                       "ldr r0, \\[pc, #\\+[0-9]+\\] \\(addr 0x[0-9a-f]{8}\\)",

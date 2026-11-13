@@ -5,8 +5,11 @@
 #ifndef V8_OBJECTS_PROPERTY_DESCRIPTOR_OBJECT_INL_H_
 #define V8_OBJECTS_PROPERTY_DESCRIPTOR_OBJECT_INL_H_
 
-#include "src/objects/objects-inl.h"
 #include "src/objects/property-descriptor-object.h"
+// Include the non-inl header before the rest of the headers.
+
+#include "src/objects/objects-inl.h"
+#include "src/objects/struct-inl.h"
 
 // Has to be the last include (doesn't have include guards):
 #include "src/objects/object-macros.h"
@@ -14,9 +17,47 @@
 namespace v8 {
 namespace internal {
 
-#include "torque-generated/src/objects/property-descriptor-object-tq-inl.inc"
+PropertyDescriptorObject::PropertyDescriptorObject(
+    const AllocationWitness& witness)
+    : Struct(witness.roots().property_descriptor_object_map()),
+      flags_(Flags{}),
+      value_(witness.roots().the_hole_value()),
+      get_(witness.roots().the_hole_value()),
+      set_(witness.roots().the_hole_value()) {}
 
-TQ_OBJECT_CONSTRUCTORS_IMPL(PropertyDescriptorObject)
+PropertyDescriptorObject::Flags PropertyDescriptorObject::flags() const {
+  return flags_.load();
+}
+void PropertyDescriptorObject::set_flags(Flags value) { flags_.store(value); }
+
+Tagged<UnionOf<JSAny, TheHole>> PropertyDescriptorObject::value() const {
+  return value_.load();
+}
+void PropertyDescriptorObject::set_value(Tagged<UnionOf<JSAny, TheHole>> value,
+                                         WriteBarrierMode mode) {
+  value_.store(this, value, mode);
+}
+
+Tagged<UnionOf<FunctionTemplateInfo, JSAny, TheHole>>
+PropertyDescriptorObject::get() const {
+  return get_.load();
+}
+void PropertyDescriptorObject::set_get(
+    Tagged<UnionOf<FunctionTemplateInfo, JSAny, TheHole>> value,
+    WriteBarrierMode mode) {
+  get_.store(this, value, mode);
+}
+
+Tagged<UnionOf<FunctionTemplateInfo, JSAny, TheHole>>
+PropertyDescriptorObject::set() const {
+  return set_.load();
+}
+void PropertyDescriptorObject::set_set(
+    Tagged<UnionOf<FunctionTemplateInfo, JSAny, TheHole>> value,
+    WriteBarrierMode mode) {
+  set_.store(this, value, mode);
+}
+
 }  // namespace internal
 }  // namespace v8
 

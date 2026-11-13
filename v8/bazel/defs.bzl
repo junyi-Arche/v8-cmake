@@ -6,6 +6,12 @@
 This module contains helper functions to compile V8.
 """
 
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:find_cc_toolchain.bzl", "find_cc_toolchain", "use_cc_toolchain")
+load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
+load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
+
 FlagInfo = provider("The value of an option.",
 fields = ["value"])
 
@@ -15,33 +21,44 @@ def _options_impl(ctx):
 _create_option_flag = rule(
     implementation = _options_impl,
     build_setting = config.bool(flag = True),
+    attrs = {
+        "scope": attr.string(),
+    },
 )
 
 _create_option_string = rule(
     implementation = _options_impl,
     build_setting = config.string(flag = True),
+    attrs = {
+        "scope": attr.string(),
+    },
 )
 
 _create_option_int = rule(
     implementation = _options_impl,
     build_setting = config.int(flag = True),
+    attrs = {
+        "scope": attr.string(),
+    },
 )
 
 def v8_flag(name, default = False):
-    _create_option_flag(name = name, build_setting_default = default)
+    _create_option_flag(name = name, build_setting_default = default, scope = "universal")
     native.config_setting(name = "is_" + name, flag_values = {name: "True"})
     native.config_setting(name = "is_not_" + name, flag_values = {name: "False"})
 
 def v8_string(name, default = ""):
-    _create_option_string(name = name, build_setting_default = default)
+    _create_option_string(name = name, build_setting_default = default, scope = "universal")
 
 def v8_int(name, default = 0):
-    _create_option_int(name = name, build_setting_default = default)
+    _create_option_int(name = name, build_setting_default = default, scope = "universal")
 
 def _custom_config_impl(ctx):
     defs = []
     defs.append("V8_TYPED_ARRAY_MAX_SIZE_IN_HEAP=" +
                 str(ctx.attr._v8_typed_array_max_size_in_heap[FlagInfo].value))
+    defs.append("V8_EMBEDDER_DATA_ARRAY_SIZE=" +
+                str(ctx.attr._v8_embedder_data_array_size[FlagInfo].value))
     context = cc_common.create_compilation_context(defines = depset(defs))
     return [CcInfo(compilation_context = context)]
 
@@ -49,6 +66,7 @@ v8_custom_config = rule(
     implementation = _custom_config_impl,
     attrs = {
         "_v8_typed_array_max_size_in_heap": attr.label(default = ":v8_typed_array_max_size_in_heap"),
+        "_v8_embedder_data_array_size": attr.label(default = ":v8_embedder_data_array_size"),
     },
 )
 
@@ -92,13 +110,13 @@ v8_config = rule(
 
 def _default_args():
     return struct(
-        deps = [":define_flags"],
+        deps = [":define_flags", "@libcxx//:libc++"],
         defines = select({
             "@v8//bazel/config:is_windows": [
                 "UNICODE",
                 "_UNICODE",
                 "_CRT_RAND_S",
-                "_WIN32_WINNT=0x0602",  # Override bazel default to Windows 8
+                "_WIN32_WINNT=0x0A00",  # Override bazel default to Windows 10
             ],
             "//conditions:default": [],
         }),
@@ -106,12 +124,16 @@ def _default_args():
             "@v8//bazel/config:is_posix": [
                 "-fPIC",
                 "-fno-strict-aliasing",
+                "-fconstexpr-steps=2000000",
                 "-Werror",
                 "-Wextra",
-                "-Wno-unknown-warning-option",
+                "-Wno-unneeded-internal-declaration",
+                "-Wno-unknown-warning-option", # b/330781959
+                "-Wno-cast-function-type-mismatch",  # b/330781959
                 "-Wno-bitwise-instead-of-logical",
                 "-Wno-builtin-assume-aligned-alignment",
                 "-Wno-unused-parameter",
+                "-Wno-unused-variable",
                 "-Wno-implicit-int-float-conversion",
                 "-Wno-deprecated-copy",
                 "-Wno-non-virtual-dtor",
@@ -121,7 +143,10 @@ def _default_args():
         }) + select({
             "@v8//bazel/config:is_clang": [
                 "-Wno-invalid-offsetof",
-                "-std=c++17",
+                "-Wno-deprecated-this-capture",
+                "-Wno-deprecated-declarations",
+                "-Wno-deprecated-attributes",
+                "-std=c++20",
             ],
             "@v8//bazel/config:is_gcc": [
                 "-Wno-extra",
@@ -136,12 +161,11 @@ def _default_args():
                 "-Wno-redundant-move",
                 "-Wno-return-type",
                 "-Wno-stringop-overflow",
-                # Use GNU dialect, because GCC doesn't allow using
-                # ##__VA_ARGS__ when in standards-conforming mode.
-                "-std=gnu++17",
+                "-Wno-deprecated-this-capture",
+                "-std=c++20",
             ],
             "@v8//bazel/config:is_windows": [
-                "/std:c++17",
+                "/std:c++20",
             ],
             "//conditions:default": [],
         }) + select({
@@ -172,7 +196,7 @@ def _default_args():
                 "Advapi32.lib",
             ],
             "@v8//bazel/config:is_macos": ["-pthread"],
-            "//conditions:default": ["-Wl,--no-as-needed -ldl -pthread"],
+            "//conditions:default": ["-Wl,--no-as-needed -ldl -latomic -pthread"],
         }) + select({
             ":should_add_rdynamic": ["-rdynamic"],
             "//conditions:default": [],
@@ -208,7 +232,7 @@ def v8_binary(
         **kwargs):
     default = _default_args()
     if _should_emit_noicu_and_icu(noicu_srcs, noicu_deps, noicu_defines, icu_srcs, icu_deps, icu_defines):
-        native.cc_binary(
+        cc_binary(
             name = "noicu/" + name,
             srcs = srcs + noicu_srcs,
             deps = deps + noicu_deps + default.deps,
@@ -218,7 +242,7 @@ def v8_binary(
             linkopts = linkopts + default.linkopts,
             **kwargs
         )
-        native.cc_binary(
+        cc_binary(
             name = "icu/" + name,
             srcs = srcs + icu_srcs,
             deps = deps + icu_deps + default.deps,
@@ -229,7 +253,7 @@ def v8_binary(
             **kwargs
         )
     else:
-        native.cc_binary(
+        cc_binary(
             name = name,
             srcs = srcs,
             deps = deps + default.deps,
@@ -257,7 +281,7 @@ def v8_library(
         **kwargs):
     default = _default_args()
     if _should_emit_noicu_and_icu(noicu_srcs, noicu_deps, noicu_defines, icu_srcs, icu_deps, icu_defines):
-        native.cc_library(
+        cc_library(
             name = name + "_noicu",
             srcs = srcs + noicu_srcs,
             deps = deps + noicu_deps + default.deps,
@@ -276,7 +300,7 @@ def v8_library(
             name = "noicu/" + name,
             actual = name + "_noicu",
         )
-        native.cc_library(
+        cc_library(
             name = name + "_icu",
             srcs = srcs + icu_srcs,
             deps = deps + icu_deps + default.deps,
@@ -296,7 +320,7 @@ def v8_library(
             actual = name + "_icu",
         )
     else:
-        native.cc_library(
+        cc_library(
             name = name,
             srcs = srcs,
             deps = deps + default.deps,
@@ -308,201 +332,16 @@ def v8_library(
             **kwargs
         )
 
-def _torque_initializers_impl(ctx):
-    if ctx.workspace_name == "v8":
-        v8root = "."
-    else:
-        v8root = "external/v8"
+def _mksnapshot_transition_impl(settings, attr):
+    if settings["@v8//bazel/config:v8_target_cpu"] != "none":
+        return {}
+    if attr.default_target_cpu == "none":
+        fail("No supported CPU matches the snapshot target platform; set v8_target_cpu explicitly")
+    return {"@v8//bazel/config:v8_target_cpu": attr.default_target_cpu}
 
-    # Arguments
-    args = []
-    args += ctx.attr.args
-    args.append("-o")
-    args.append(ctx.bin_dir.path + "/" + v8root + "/" + ctx.attr.prefix + "/torque-generated")
-    args.append("-strip-v8-root")
-    args.append("-v8-root")
-    args.append(v8root)
-
-    # Sources
-    args += [f.path for f in ctx.files.srcs]
-
-    # Generate/declare output files
-    outs = []
-    for src in ctx.files.srcs:
-        root, _period, _ext = src.path.rpartition(".")
-
-        # Strip v8root
-        if root[:len(v8root)] == v8root:
-            root = root[len(v8root):]
-        file = ctx.attr.prefix + "/torque-generated/" + root
-        outs.append(ctx.actions.declare_file(file + "-tq-csa.cc"))
-        outs.append(ctx.actions.declare_file(file + "-tq-csa.h"))
-    outs += [ctx.actions.declare_file(ctx.attr.prefix + "/torque-generated/" + f) for f in ctx.attr.extras]
-    ctx.actions.run(
-        outputs = outs,
-        inputs = ctx.files.srcs,
-        arguments = args,
-        executable = ctx.executable.tool,
-        mnemonic = "GenTorqueInitializers",
-        progress_message = "Generating Torque initializers",
-    )
-    return [DefaultInfo(files = depset(outs))]
-
-_v8_torque_initializers = rule(
-    implementation = _torque_initializers_impl,
-    # cfg = v8_target_cpu_transition,
-    attrs = {
-        "prefix": attr.string(mandatory = True),
-        "srcs": attr.label_list(allow_files = True, mandatory = True),
-        "extras": attr.string_list(),
-        "tool": attr.label(
-            allow_files = True,
-            executable = True,
-            cfg = "exec",
-        ),
-        "args": attr.string_list(),
-    },
-)
-
-def v8_torque_initializers(name, noicu_srcs, icu_srcs, args, extras):
-    _v8_torque_initializers(
-        name = "noicu/" + name,
-        prefix = "noicu",
-        srcs = noicu_srcs,
-        args = args,
-        extras = extras,
-        tool = select({
-            "@v8//bazel/config:v8_target_is_32_bits": ":noicu/torque_non_pointer_compression",
-            "//conditions:default": ":noicu/torque",
-        }),
-    )
-    _v8_torque_initializers(
-        name = "icu/" + name,
-        prefix = "icu",
-        srcs = icu_srcs,
-        args = args,
-        extras = extras,
-        tool = select({
-            "@v8//bazel/config:v8_target_is_32_bits": ":icu/torque_non_pointer_compression",
-            "//conditions:default": ":icu/torque",
-        }),
-    )
-
-def _torque_definitions_impl(ctx):
-    if ctx.workspace_name == "v8":
-        v8root = "."
-    else:
-        v8root = "external/v8"
-
-    # Arguments
-    args = []
-    args += ctx.attr.args
-    args.append("-o")
-    args.append(ctx.bin_dir.path + "/" + v8root + "/" + ctx.attr.prefix + "/torque-generated")
-    args.append("-strip-v8-root")
-    args.append("-v8-root")
-    args.append(v8root)
-
-    # Sources
-    args += [f.path for f in ctx.files.srcs]
-
-    # Generate/declare output files
-    outs = []
-    for src in ctx.files.srcs:
-        root, _period, _ext = src.path.rpartition(".")
-
-        # Strip v8root
-        if root[:len(v8root)] == v8root:
-            root = root[len(v8root):]
-        file = ctx.attr.prefix + "/torque-generated/" + root
-        outs.append(ctx.actions.declare_file(file + "-tq-inl.inc"))
-        outs.append(ctx.actions.declare_file(file + "-tq.inc"))
-        outs.append(ctx.actions.declare_file(file + "-tq.cc"))
-    outs += [ctx.actions.declare_file(ctx.attr.prefix + "/torque-generated/" + f) for f in ctx.attr.extras]
-    ctx.actions.run(
-        outputs = outs,
-        inputs = ctx.files.srcs,
-        arguments = args,
-        executable = ctx.executable.tool,
-        mnemonic = "GenTorqueDefinitions",
-        progress_message = "Generating Torque definitions",
-    )
-    return [DefaultInfo(files = depset(outs))]
-
-_v8_torque_definitions = rule(
-    implementation = _torque_definitions_impl,
-    # cfg = v8_target_cpu_transition,
-    attrs = {
-        "prefix": attr.string(mandatory = True),
-        "srcs": attr.label_list(allow_files = True, mandatory = True),
-        "extras": attr.string_list(),
-        "tool": attr.label(
-            allow_files = True,
-            executable = True,
-            cfg = "exec",
-        ),
-        "args": attr.string_list(),
-    },
-)
-
-def v8_torque_definitions(name, noicu_srcs, icu_srcs, args, extras):
-    _v8_torque_definitions(
-        name = "noicu/" + name,
-        prefix = "noicu",
-        srcs = noicu_srcs,
-        args = args,
-        extras = extras,
-        tool = select({
-            "@v8//bazel/config:v8_target_is_32_bits": ":noicu/torque_non_pointer_compression",
-            "//conditions:default": ":noicu/torque",
-        }),
-    )
-    _v8_torque_definitions(
-        name = "icu/" + name,
-        prefix = "icu",
-        srcs = icu_srcs,
-        args = args,
-        extras = extras,
-        tool = select({
-            "@v8//bazel/config:v8_target_is_32_bits": ":icu/torque_non_pointer_compression",
-            "//conditions:default": ":icu/torque",
-        }),
-    )
-
-def _v8_target_cpu_transition_impl(settings,
-                                   attr, # @unused
-                                  ):
-    # Check for an existing v8_target_cpu flag.
-    if "@v8//bazel/config:v8_target_cpu" in settings:
-        if settings["@v8//bazel/config:v8_target_cpu"] != "none":
-            return
-
-    # Auto-detect target architecture based on the --cpu flag.
-    mapping = {
-        "haswell": "x64",
-        "k8": "x64",
-        "x86_64": "x64",
-        "darwin": "x64",
-        "darwin_x86_64": "x64",
-        "x64_windows": "x64",
-        "x86": "ia32",
-        "aarch64": "arm64",
-        "arm64-v8a": "arm64",
-        "arm": "arm64",
-        "darwin_arm64": "arm64",
-        "armeabi-v7a": "arm32",
-        "s390x": "s390x",
-        "riscv64": "riscv64",
-        "ppc": "ppc64le",
-    }
-    v8_target_cpu = mapping[settings["//command_line_option:cpu"]]
-    return {"@v8//bazel/config:v8_target_cpu": v8_target_cpu}
-
-# Set the v8_target_cpu to be the correct architecture given the cpu specified
-# on the command line.
-v8_target_cpu_transition = transition(
-    implementation = _v8_target_cpu_transition_impl,
-    inputs = ["@v8//bazel/config:v8_target_cpu", "//command_line_option:cpu"],
+_mksnapshot_transition = transition(
+    implementation = _mksnapshot_transition_impl,
+    inputs = ["@v8//bazel/config:v8_target_cpu"],
     outputs = ["@v8//bazel/config:v8_target_cpu"],
 )
 
@@ -516,6 +355,7 @@ def _mksnapshot(ctx):
     ctx.actions.run(
         outputs = outs,
         inputs = [],
+        mnemonic = "V8Mksnapshot",
         arguments = [
             "--embedded_variant=Default",
             "--target_os",
@@ -540,25 +380,35 @@ _v8_mksnapshot = rule(
             executable = True,
             cfg = "exec",
         ),
+        "default_target_cpu": attr.string(mandatory = True),
         "target_os": attr.string(mandatory = True),
-        "_allowlist_function_transition": attr.label(
-            default = "@bazel_tools//tools/allowlists/function_transition_allowlist",
-        ),
         "prefix": attr.string(mandatory = True),
         "suffix": attr.string(mandatory = True),
     },
-    cfg = v8_target_cpu_transition,
+    cfg = _mksnapshot_transition,
 )
 
 def v8_mksnapshot(name, args, suffix = ""):
+    default_target_cpu = select({
+        "@v8//bazel/config:is_x64": "x64",
+        "@v8//bazel/config:is_ia32": "ia32",
+        "@v8//bazel/config:is_arm64": "arm64",
+        "@v8//bazel/config:is_arm": "arm",
+        "@v8//bazel/config:is_s390x": "s390x",
+        "@v8//bazel/config:is_riscv64": "riscv64",
+        "@v8//bazel/config:is_ppc64le": "ppc64le",
+        "//conditions:default": "none",
+    })
     _v8_mksnapshot(
         name = "noicu/" + name,
         args = args,
         prefix = "noicu",
         tool = ":noicu/mksnapshot" + suffix,
         suffix = suffix,
+        default_target_cpu = default_target_cpu,
         target_os = select({
             "@v8//bazel/config:is_macos": "mac",
+            "@v8//bazel/config:is_windows": "win",
             "//conditions:default": "",
         }),
     )
@@ -568,8 +418,10 @@ def v8_mksnapshot(name, args, suffix = ""):
         prefix = "icu",
         tool = ":icu/mksnapshot" + suffix,
         suffix = suffix,
+        default_target_cpu = default_target_cpu,
         target_os = select({
             "@v8//bazel/config:is_macos": "mac",
+            "@v8//bazel/config:is_windows": "win",
             "//conditions:default": "",
         }),
     )
@@ -599,32 +451,40 @@ def build_config_content(cpu, icu):
         ("arch", arch),
         ("asan", "false"),
         ("atomic_object_field_writes", "false"),
+        ("cet_shadow_stack", "false"),
         ("cfi", "false"),
         ("clang_coverage", "false"),
         ("clang", "true"),
         ("code_comments", "false"),
         ("component_build", "false"),
         ("concurrent_marking", "false"),
-        ("conservative_stack_scanning", "false"),
         ("current_cpu", cpu),
         ("dcheck_always_on", "false"),
         ("debug_code", "false"),
         ("DEBUG_defined", "false"),
         ("debugging_features", "false"),
         ("dict_property_const_tracking", "false"),
-        ("direct_local", "false"),
+        ("direct_handle", "false"),
         ("disassembler", "false"),
+        ("dumpling", "false"),
         ("full_debug", "false"),
         ("gdbjit", "false"),
         ("has_jitless", "false"),
-        ("has_maglev", "false"),
+        ("sparkplug_plus", "true" if cpu in ['"x64"', '"arm64"'] else "false"),
+        ("has_maglev", "true"),
         ("has_turbofan", "true"),
         ("has_webassembly", "false"),
+        ("has_wasm_interpreter", "false"),
         ("i18n", icu),
         ("is_android", "false"),
         ("is_ios", "false"),
+        ("is_linux", "true"),
         ("js_shared_memory", "false"),
+        ("leaptiering", "true"),
         ("lite_mode", "false"),
+        ("local_off_stack_check", "false"),
+        ("lower_limits_mode", "false"),
+        ("memory_corruption_api", "false"),
         ("mips_arch_variant", '""'),
         ("mips_use_msa", "false"),
         ("msan", "false"),
@@ -633,13 +493,15 @@ def build_config_content(cpu, icu):
         ("pointer_compression", "true"),
         ("runtime_call_stats", "false"),
         ("sandbox", "false"),
+        ("sandbox_hardware_support", "false"),
         ("shared_ro_heap", "false"),
         ("simd_mips", "false"),
         ("simulator_run", "false"),
         ("single_generation", "false"),
         ("slow_dchecks", "false"),
         ("target_cpu", cpu),
-        ("third_party_heap", "false"),
+        ("temporal", "false"),
+        ("ecma402_icu4x", "false"),
         ("tsan", "false"),
         ("ubsan", "false"),
         ("use_sanitizer", "false"),
@@ -649,13 +511,327 @@ def build_config_content(cpu, icu):
         ("verify_csa", "false"),
         ("verify_heap", "false"),
         ("verify_predictable", "false"),
+        ("wasm_random_fuzzers", "false"),
+        ("test_only_sync_points", "false"),
         ("write_barriers", "false"),
     ])
 
+# =============================================================================
+# Metagen: libclang-driven metadata generator.
+#
+# Produces gen/metagen/instance-types.h -- the file `src/objects/instance-
+# types-gen.h` includes when V8_USE_METAGEN=1, i.e. under
+# --//:v8_use_metagen -- along with layouts.json for Torque.
+#
+# The generator runs tools/metagen/metagen.py, which uses libclang to parse
+# V8_OBJECT-annotated C++ headers and emits the IT enum macros. We feed it
+# a compile_commands.json synthesized from cc_common: the defines / includes
+# come from the cc_libraries passed via `cc_compilation_context_from`, the
+# toolchain bits (libc++ -isystem, sysroot, target triple, ...) come from
+# the active cc toolchain, and metagen-specific cflags (-std=c++20,
+# -fno-rtti, -fno-exceptions, -fsyntax-only) come from a small list below.
+# =============================================================================
+
+# Metagen-specific cflags that don't propagate via CcInfo (they're copts on
+# v8_library, not on the `:define_flags` we depend on). Kept tiny on
+# purpose -- everything else comes from the toolchain or CcInfo.
+_METAGEN_USER_COPTS = {
+    "gcc": ["-std=c++20", "-fno-rtti", "-fno-exceptions"],
+    "cl": ["/std:c++20", "/GR-", "/EHs-c-"],
+}
+
+def _run_metagen_impl(ctx):
+    v8root = ctx.label.workspace_root
+    if v8root == "":
+        v8root = "."
+
+    out_h = ctx.actions.declare_file(
+        ctx.attr.prefix + "/metagen/instance-types.h",
+    )
+    out_layouts = ctx.actions.declare_file(
+        ctx.attr.prefix + "/metagen/layouts.json",
+    )
+    # TODO(jgruber): Add a non-critical diagnostics target that requests
+    # --enable-layout-positions when C++ source positions are consumed.
+    out_dir = out_h.dirname
+
+    # Merge CcInfo from all cc_compilation_context_from targets -- this is
+    # where V8's defines (`:define_flags`), the libc++ system include path
+    # (`@libcxx//:libc++`), and the V8 source-root include come from.
+    cc_infos = [d[CcInfo] for d in ctx.attr.cc_compilation_context_from]
+    merged_cc_info = cc_common.merge_cc_infos(cc_infos = cc_infos)
+    cc_context = merged_cc_info.compilation_context
+
+    cc_toolchain = find_cc_toolchain(ctx)
+    feature_configuration = cc_common.configure_features(
+        ctx = ctx,
+        cc_toolchain = cc_toolchain,
+        requested_features = ctx.features,
+        unsupported_features = ctx.disabled_features + ["module_maps"],
+    )
+    driver_mode = (ctx.attr.driver_mode_flag[FlagInfo].value or
+                   ctx.attr.default_driver_mode)
+    if driver_mode not in _METAGEN_USER_COPTS:
+        fail("v8_metagen_driver_mode must be 'gcc' or 'cl', got %r" % driver_mode)
+
+    # -I dirs for the generated headers (torque, bytecode_builtins).
+    # None of these live in a cc_library CcInfo so they're added directly.
+    extra_quote_includes = [
+        ctx.bin_dir.path + "/" + v8root,
+        ctx.bin_dir.path + "/" + v8root + "/" + ctx.attr.prefix,
+        # V8 source root: needed because `is_posix` copts include
+        # `-isystem .` and that's a copt, not propagated via CcInfo.
+        ".",
+    ]
+
+    compile_variables = cc_common.create_compile_variables(
+        feature_configuration = feature_configuration,
+        cc_toolchain = cc_toolchain,
+        source_file = "tools/metagen/probe.cc",
+        user_compile_flags = _METAGEN_USER_COPTS[driver_mode],
+        include_directories = cc_context.includes,
+        quote_include_directories = depset(
+            extra_quote_includes,
+            transitive = [cc_context.quote_includes],
+        ),
+        system_include_directories = cc_context.system_includes,
+        framework_include_directories = cc_context.framework_includes,
+        preprocessor_defines = depset(
+            ctx.attr.extra_defines,
+            transitive = [
+                cc_context.defines,
+                cc_context.local_defines,
+            ],
+        ),
+    )
+
+    cc_cmd_line = cc_common.get_memory_inefficient_command_line(
+        feature_configuration = feature_configuration,
+        action_name = "c++-compile",
+        variables = compile_variables,
+    )
+    cc_binary = cc_common.get_tool_for_action(
+        feature_configuration = feature_configuration,
+        action_name = "c++-compile",
+    )
+
+    # Synthesize a one-entry compile_commands.json for metagen. (The GN
+    # side instead reads flags via `gn desc`; this is the Bazel path.)
+    # The `directory` is the action's cwd (execroot); the bogus
+    # `probe.cc` file + `-c`/`-o` args are filtered out by metagen.
+    compile_db = ctx.actions.declare_file(
+        ctx.attr.prefix + "/metagen-compile-commands.json",
+    )
+    ctx.actions.write(
+        output = compile_db,
+        content = json.encode([{
+            "directory": ".",
+            "file": "tools/metagen/probe.cc",
+            "arguments": [cc_binary] + cc_cmd_line,
+        }]),
+    )
+
+    args = ctx.actions.args()
+    args.add("--v8-root", v8root)
+    args.add("--compile-commands", compile_db.path)
+    args.add("--driver-mode", driver_mode)
+    args.add("--driver", ctx.file.driver.path)
+    args.add("--out", out_dir)
+
+    # Where libclang comes from. Both modes are explicit, so a mismatch
+    # is an analysis-time error rather than a Metagen run that quietly parses
+    # with the wrong library.
+    if ctx.attr.libclang_from_python_env:
+        if ctx.files.libclang_files:
+            fail("libclang_from_python_env = True, but libclang_files is " +
+                 "non-empty. In this mode the bindings come from the tool's " +
+                 "Python deps; drop libclang_files or unset the flag.")
+        args.add("--libclang-from-python-env")
+    else:
+        if not ctx.files.libclang_files:
+            fail("libclang_files is empty. Pass the llvm-libclang package " +
+                 "files, or set libclang_from_python_env = True to take the " +
+                 "bindings from the tool's Python deps instead.")
+
+        # The llvm-libclang package root, as an execroot-relative path:
+        # metagen resolves it against the action's cwd. The files get
+        # there as action inputs (:metagen_libclang_files below), which
+        # is why the tool needs no runfiles copy of them. This mirrors
+        # what the GN action passes for //third_party/llvm-libclang.
+        args.add("--libclang-dir", v8root + "/third_party/llvm-libclang")
+
+    # Find the include root via stddef.h; other headers may be in
+    # subdirectories.
+    builtin_headers_dir = None
+    for f in ctx.files.clang_builtin_headers:
+        if f.basename == "stddef.h":
+            builtin_headers_dir = f.dirname
+            break
+    if builtin_headers_dir == None or not builtin_headers_dir.endswith("/include"):
+        fail("clang_builtin_headers must contain stddef.h under " +
+             "<resource-dir>/include")
+    for f in ctx.files.clang_builtin_headers:
+        if not f.path.startswith(builtin_headers_dir + "/"):
+            fail("clang_builtin_headers must all be under " +
+                 builtin_headers_dir + ": " + f.path)
+    args.add("--clang-resource-dir", builtin_headers_dir[:-len("/include")])
+
+    all_inputs = depset(
+        direct = [compile_db, ctx.file.driver],
+        transitive = [
+            depset(ctx.files.libclang_files),
+            depset(ctx.files.clang_builtin_headers),
+            depset(ctx.files.python_srcs),
+            depset(ctx.files.extra_sandbox_files),
+            cc_context.headers,
+            cc_toolchain.all_files,
+        ],
+    )
+
+    ctx.actions.run(
+        outputs = [out_h, out_layouts],
+        inputs = all_inputs,
+        executable = ctx.executable.tool,
+        arguments = [args],
+        mnemonic = "RunMetagen",
+        progress_message = "Generating metagen metadata",
+    )
+
+    return [
+        DefaultInfo(files = depset([out_h])),
+        OutputGroupInfo(
+            layouts = depset([out_layouts]),
+        ),
+    ]
+
+# Metagen is a host tool that must reason about the target build, so
+# this rule's inputs fall into two groups -- the same split GN gets from
+# v8_generator_toolchain (see gni/snapshot_toolchain.gni), where the
+# generator is a host binary compiled with the target's V8 configuration:
+#
+#   exec-configured   the parsing machinery: the tool, libclang, and
+#                     clang's builtin headers. These are host-only
+#                     artifacts; a build that constrains targets by
+#                     platform will reject them for a non-host target
+#                     unless they are exec-configured.
+#
+#   target-configured what we parse and how: `headers`,
+#                     `cc_compilation_context_from`, `extra_defines`, and
+#                     `extra_sandbox_files` (V8's own source headers).
+#                     These must reflect the TARGET build -- exec-
+#                     configuring them would use the host's defines,
+#                     which today changes nothing but would silently emit
+#                     host object layout once metagen generates layout.
+_run_metagen = rule(
+    implementation = _run_metagen_impl,
+    attrs = {
+        "prefix": attr.string(mandatory = True),
+        "default_driver_mode": attr.string(mandatory = True),
+        "driver_mode_flag": attr.label(providers = [FlagInfo], mandatory = True),
+        # The checked-in C++ driver, passed straight through as --driver. Its
+        # direct includes are staged by extra_sandbox_files, not by this attr.
+        "driver": attr.label(allow_single_file = True, mandatory = True),
+        "libclang_files": attr.label_list(allow_files = True, cfg = "exec"),
+        # Clang's builtin headers (stddef.h etc.), staged into the action
+        # sandbox and passed to metagen as -resource-dir=. Separate from
+        # extra_sandbox_files because this is host toolchain material:
+        # it needs cfg = "exec", whereas V8's own headers must not have it.
+        "clang_builtin_headers": attr.label_list(
+            allow_files = True,
+            cfg = "exec",
+            mandatory = True,
+        ),
+        # Selects where libclang comes from; see the impl. Explicit rather
+        # than inferred from libclang_files being empty, so no call site
+        # can end up in environment mode by forgetting an argument.
+        "libclang_from_python_env": attr.bool(default = False),
+        "python_srcs": attr.label_list(allow_files = True, cfg = "exec"),
+        # Additional files that need to live in the action sandbox so
+        # libclang's transitive #include resolution succeeds, but that
+        # should NOT be directly included by the driver.
+        # Bazel hermetic sandboxing makes this necessary: header files
+        # only reach the sandbox via declared inputs, and the CcInfo of
+        # :v8_libbase / :define_flags doesn't reach into src/objects,
+        # src/handles, src/wasm etc. v8_libshared (which would) depends
+        # on this rule's output, so a CcInfo-based propagation cycles.
+        # V8's own headers, so target-configured; host-toolchain material
+        # goes in clang_builtin_headers instead.
+        "extra_sandbox_files": attr.label_list(allow_files = True),
+        # cc_library / v8_library / v8_config labels whose CcInfo merged
+        # compilation_context supplies the defines, includes, and libc++
+        # paths that V8 normally compiles with.
+        "cc_compilation_context_from": attr.label_list(
+            providers = [CcInfo],
+            mandatory = True,
+        ),
+        # Additional -D defines for Metagen that do not propagate
+        # via CcInfo (v8_library applies them as per-variant copts,
+        # e.g. V8_INTL_SUPPORT on the icu prefix).
+        "extra_defines": attr.string_list(),
+        "tool": attr.label(
+            executable = True,
+            cfg = "exec",
+            mandatory = True,
+        ),
+    },
+    fragments = ["cpp"],
+    # use_cc_toolchain() rather than a literal @bazel_tools label: the
+    # helper resolves to whichever cc toolchain type the surrounding
+    # build defines, and find_cc_toolchain() reads it back out of
+    # ctx.toolchains. Spelling the label directly makes the rule
+    # unusable in builds that do not have a @bazel_tools repository.
+    toolchains = use_cc_toolchain(),
+)
+
+def run_metagen(name, driver, default_driver_mode, driver_mode_flag,
+                python_srcs, tool,
+                cc_compilation_context_from,
+                clang_builtin_headers,
+                libclang_files = [],
+                libclang_from_python_env = False,
+                extra_sandbox_files = [],
+                icu_extra_defines = [],
+                icu_cc_compilation_context_from = []):
+    """Emit metagen metadata for both icu/ and noicu/ prefixes.
+
+    Mirrors the v8_torque_files double-emission pattern so each consumer
+    library can include the correctly-prefixed copy. The two runs
+    differ: v8_library compiles the icu variant with V8_INTL_SUPPORT
+    (via copts, invisible to CcInfo) and the intl object sources, so
+    the icu emission additionally enables the driver's i18n includes with the
+    intl defines and ICU's compilation context.
+
+    Pass either `libclang_files` (the bundled llvm-libclang package) or
+    `libclang_from_python_env = True` (bindings supplied through `tool`'s
+    Python deps) -- exactly one, enforced by the rule.
+
+    `default_driver_mode` follows the target OS. The `driver_mode_flag`
+    overrides it for toolchains that use a different flag syntax, such as
+    MinGW or clang-cl cross builds.
+    """
+    for prefix in ("noicu", "icu"):
+        is_icu = prefix == "icu"
+        _run_metagen(
+            name = prefix + "/" + name,
+            prefix = prefix,
+            driver = driver,
+            default_driver_mode = default_driver_mode,
+            driver_mode_flag = driver_mode_flag,
+            libclang_files = libclang_files,
+            libclang_from_python_env = libclang_from_python_env,
+            clang_builtin_headers = clang_builtin_headers,
+            python_srcs = python_srcs,
+            tool = tool,
+            cc_compilation_context_from = cc_compilation_context_from +
+                                          (icu_cc_compilation_context_from if is_icu else []),
+            extra_defines = icu_extra_defines if is_icu else [],
+            extra_sandbox_files = extra_sandbox_files,
+        )
+
 # TODO(victorgomes): Create a rule (instead of a macro), that can
 # dynamically populate the build config.
-def v8_build_config(name):
-    cpu = _quote("x64")
+def v8_build_config(name, arch):
+    cpu = '"' + arch + '"'
     native.genrule(
         name = "noicu/" + name,
         outs = ["noicu/" + name + ".json"],

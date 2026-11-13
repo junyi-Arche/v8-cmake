@@ -147,6 +147,10 @@ InspectorTest.runAsyncTestSuite([
     InspectorTest.logMessage((await evaluate({
       expression: 'new Error()', returnByValue: true
     })).result);
+    InspectorTest.log('Large sparse array');
+    InspectorTest.logMessage((await evaluate({
+      expression: 'new Array(0xFFFFFFFF)', returnByValue: true
+    })).error);
   },
   async function testFunction() {
     InspectorTest.logMessage((await evaluate({
@@ -208,7 +212,7 @@ InspectorTest.runAsyncTestSuite([
       expression: '-1n << 9_999_999n'
     })).result;
     InspectorTest.logMessage(result.result.description.length);
-    if (result.result.unserializableValue === '-0x8' + '0'.repeat(2_499_998) + 'n')
+    if (result.result.unserializableValue === '-0x8' + '0'.repeat(2_499_999) + 'n')
       result.result.unserializableValue = '<expected unserializableValue>';
     InspectorTest.logMessage(result);
   },
@@ -579,18 +583,12 @@ InspectorTest.runAsyncTestSuite([
       expression: '[1,2,3]'
     })).result);
   },
-  async function testArrayLike() {
+  async function testArgumentsObject() {
     InspectorTest.logMessage((await evaluate({
-      expression: '({length: 5, splice: () => []})'
+      expression: '(function() { return arguments; })(1, 2, 3)'
     })).result);
     InspectorTest.logMessage((await evaluate({
-      expression: `new (class Foo{constructor() {
-        this.length = 5;
-        this.splice = () => [];
-      }})`
-    })).result);
-    InspectorTest.logMessage((await evaluate({
-      expression: '({length: -5, splice: () => []})'
+      expression: '(function() { "use strict"; return arguments; })(-1, 0, 1, 2, 3)'
     })).result);
   },
   async function testOtherObjects() {
@@ -616,16 +614,16 @@ InspectorTest.runAsyncTestSuite([
       expression: 'new (class Bar {})'
     })).result);
     InspectorTest.logMessage((await evaluate({
-      expression: 'inspector.createObjectWithAccessor(\'title\', true)',
+      expression: 'inspector.createObjectWithNativeDataProperty(\'title\', true)',
       generatePreview: true
     })));
     InspectorTest.logMessage((await evaluate({
-      expression: 'inspector.createObjectWithAccessor(\'title\', false)',
+      expression: 'inspector.createObjectWithNativeDataProperty(\'title\', false)',
       generatePreview: true
     })));
     // TODO(kozyatinskiy): fix this one.
     InspectorTest.logMessage((await evaluate({
-      expression: 'inspector.createObjectWithAccessor(\'title\', true)',
+      expression: 'inspector.createObjectWithNativeDataProperty(\'title\', true)',
       returnByValue: true
     })));
     InspectorTest.logMessage((await evaluate({

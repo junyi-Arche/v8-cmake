@@ -31,6 +31,40 @@ using NativeObject = void*;
 using SnapshotObjectId = uint32_t;
 using ProfilerId = uint32_t;
 
+/**
+ * Embedder-supplied callback, installed via
+ * CpuProfiler::SetSampleContextExtractor, invoked as each CPU profile sample is
+ * captured. The returned pointer is stored on the sample and retrievable via
+ * CpuProfile::GetSampleContext.
+ *
+ * The context in which it runs depends on how the sample was taken. For
+ * samples taken by the sampling thread, it is invoked either from a POSIX
+ * signal handler interrupting the sampled thread, or (on platforms that sample
+ * by suspending that thread, such as Windows and Fuchsia) on the sampling
+ * thread itself. For samples requested via CpuProfiler::CollectSample, or
+ * recorded on deoptimization, it is invoked synchronously on the thread that
+ * triggered them.
+ *
+ * Consequently this function MUST NOT rely on thread-local storage. Where
+ * sampling suspends the profiled thread, the callback runs on the sampling
+ * thread, whose thread-locals are unrelated to the profiled thread's, and the
+ * profiled thread's are not reachable at all. Accessing a dynamically
+ * initialized thread-local is in any case not async-signal-safe. Use the
+ * supplied Isolate to determine what to return, keeping whatever per-isolate
+ * state that requires in memory the embedder maintains outside this callback.
+ *
+ * The signal-safety contract applies in all of these cases: this function
+ * MUST NOT allocate memory, acquire locks, call any V8 API, or perform any
+ * other operation that is not async-signal-safe. It SHOULD limit itself to
+ * reading from memory the embedder keeps stable for the duration of
+ * profiling, and returning a `void*` whose meaning is defined by the
+ * embedder. Note that V8 may hold internal locks while calling it, so
+ * reentering the CpuProfiler API from the extractor can deadlock.
+ *
+ * The returned pointer is treated as opaque by V8 and is not dereferenced.
+ */
+using SampleContextExtractor = void* (*)(Isolate*);
+
 struct CpuProfileDeoptFrame {
   int script_id;
   size_t position;
@@ -47,6 +81,21 @@ template class V8_EXPORT std::vector<v8::CpuProfileDeoptFrame>;
 #endif
 
 namespace v8 {
+
+/**
+ * Identifies which component initiated CPU profiling for proper attribution.
+ */
+enum class CpuProfileSource : uint8_t {
+  /** Default value when no explicit source is specified. */
+  kUnspecified = 0,
+  /** Profiling initiated via the DevTools Inspector protocol. */
+  kInspector = 1,
+  /** Profiling initiated by the embedder (e.g., Blink) via self-profiling API.
+   */
+  kSelfProfiling = 2,
+  /** Profiling initiated internally by V8 (e.g., tracing CPU profiler). */
+  kInternal = 3,
+};
 
 struct V8_EXPORT CpuProfileDeoptInfo {
   /** A pointer to a static string owned by v8. */
@@ -70,6 +119,10 @@ class V8_EXPORT CpuProfileNode {
   struct LineTick {
     /** The 1-based number of the source line where the function originates. */
     int line;
+
+    /** The 1-based number of the source column where the function originates.
+     */
+    int column;
 
     /** The count of samples associated with the source line. */
     unsigned int hit_count;
@@ -254,6 +307,15 @@ class V8_EXPORT CpuProfile {
   EmbedderStateTag GetSampleEmbedderState(int index) const;
 
   /**
+   * Returns the embedder-supplied sample context for the sample at the given
+   * index. The pointer was produced by the SampleContextExtractor installed
+   * on the CpuProfiler that recorded this profile. If no extractor was
+   * installed, or the extractor returned nullptr for this sample, returns
+   * nullptr.
+   */
+  void* GetSampleContext(int index) const;
+
+  /**
    * Returns time when the profile recording was stopped (in microseconds)
    * since some unspecified starting point.
    * The point is equal to the starting point used by GetStartTime.
@@ -374,11 +436,13 @@ class V8_EXPORT CpuProfilingOptions {
    *                             the profiler's sampling interval.
    * \param filter_context If specified, profiles will only contain frames
    *                       using this context. Other frames will be elided.
+   * \param profile_source Identifies the source of this CPU profile.
    */
   CpuProfilingOptions(
       CpuProfilingMode mode = kLeafNodeLineNumbers,
       unsigned max_samples = kNoSampleLimit, int sampling_interval_us = 0,
-      MaybeLocal<Context> filter_context = MaybeLocal<Context>());
+      MaybeLocal<Context> filter_context = MaybeLocal<Context>(),
+      CpuProfileSource profile_source = CpuProfileSource::kUnspecified);
 
   CpuProfilingOptions(CpuProfilingOptions&&) = default;
   CpuProfilingOptions& operator=(CpuProfilingOptions&&) = default;
@@ -386,6 +450,7 @@ class V8_EXPORT CpuProfilingOptions {
   CpuProfilingMode mode() const { return mode_; }
   unsigned max_samples() const { return max_samples_; }
   int sampling_interval_us() const { return sampling_interval_us_; }
+  CpuProfileSource profile_source() const { return profile_source_; }
 
  private:
   friend class internal::CpuProfile;
@@ -397,6 +462,7 @@ class V8_EXPORT CpuProfilingOptions {
   unsigned max_samples_;
   int sampling_interval_us_;
   Global<Context> filter_context_;
+  CpuProfileSource profile_source_;
 };
 
 /**
@@ -418,8 +484,11 @@ class V8_EXPORT CpuProfiler {
    * Synchronously collect current stack sample in all profilers attached to
    * the |isolate|. The call does not affect number of ticks recorded for
    * the current top node.
+   * |trace_id| is an optional identifier set to the collected sample.
+   * this is useful to associate the sample with a trace event.
    */
-  static void CollectSample(Isolate* isolate);
+  static void CollectSample(
+      Isolate* isolate, const std::optional<uint64_t> trace_id = std::nullopt);
 
   /**
    * Disposes the CPU profiler object.
@@ -441,6 +510,17 @@ class V8_EXPORT CpuProfiler {
    * no profiles being recorded.
    */
   void SetUsePreciseSampling(bool);
+
+  /**
+   * Installs an embedder callback invoked as each sample is captured while
+   * this profiler is recording profiles. The pointer it returns is stored on
+   * the sample, and retrievable via CpuProfile::GetSampleContext from every
+   * profile recorded by this profiler. Embedders wanting different extractors
+   * should use a separate CpuProfiler for each. Passing nullptr removes the
+   * extractor. See SampleContextExtractor for the signal-safety contract. This
+   * method must be called when there are no profiles being recorded.
+   */
+  void SetSampleContextExtractor(SampleContextExtractor extractor);
 
   /**
    * Starts collecting a CPU profile. Several profiles may be collected at once.
@@ -597,7 +677,6 @@ class V8_EXPORT HeapGraphNode {
     kBigInt = 13,        // BigInt.
     kObjectShape = 14,   // Internal data used for tracking the shapes (or
                          // "hidden classes") of JS objects.
-    kWasmObject = 15,    // A WasmGC struct or array.
   };
 
   /** Returns node type (see HeapGraphNode::Type). */
@@ -805,6 +884,25 @@ class V8_EXPORT AllocationProfile {
      * what samples were added or removed between two snapshots.
      */
     uint64_t sample_id;
+
+    /**
+     * Indicates whether the sampled allocation is still live or has already
+     * been collected by GC.
+     */
+    bool is_live;
+
+    /**
+     * Sample interval in bytes used when this sample was selected.
+     */
+    uint64_t sample_interval;
+
+    /**
+     * Value returned for this sample by the SampleContextExtractor passed to
+     * HeapProfiler::StartSamplingHeapProfiler, or nullptr if none was
+     * installed. The embedder is responsible for any pointee lifetime required
+     * when using it; V8 never dereferences it.
+     */
+    void* context = nullptr;
   };
 
   /**
@@ -900,8 +998,27 @@ class V8_EXPORT EmbedderGraph {
   /**
    * Returns a node corresponding to the given V8 value. Ownership is not
    * transferred. The result pointer is valid while the graph is alive.
+   *
+   * For now the variant that takes v8::Data is not marked as abstract for
+   * compatibility, but embedders who subclass EmbedderGraph are expected to
+   * implement it. Then in the implementation of the variant that takes
+   * v8::Value, they can simply forward the call to the one that takes
+   * v8::Local<v8::Data>.
    */
   virtual Node* V8Node(const v8::Local<v8::Value>& value) = 0;
+
+  /**
+   * Returns a node corresponding to the given V8 value. Ownership is not
+   * transferred. The result pointer is valid while the graph is alive.
+   *
+   * For API compatibility, this default implementation just checks that the
+   * data is a v8::Value and forward it to the variant that takes v8::Value,
+   * which is currently required to be implemented. In the future we'll remove
+   * the v8::Value variant, and make this variant that takes v8::Data abstract
+   * instead. If the embedder subclasses v8::EmbedderGraph and also use
+   * v8::TracedReference<v8::Data>, they must override this variant.
+   */
+  virtual Node* V8Node(const v8::Local<v8::Data>& value);
 
   /**
    * Adds the given node to the graph and takes ownership of the node.
@@ -919,7 +1036,34 @@ class V8_EXPORT EmbedderGraph {
    */
   virtual void AddEdge(Node* from, Node* to, const char* name = nullptr) = 0;
 
+  /**
+   * Adds an edge that represents a weak reference from the given
+   * node |from| to the given node |to|. The nodes must be added to the graph
+   * before calling this function.
+   *
+   * If name is nullptr, the edge will have auto-increment indexes, otherwise
+   * it will be named accordingly.
+   */
+  virtual void AddWeakEdge(Node* from, Node* to, const char* name = nullptr) {
+    AddEdge(from, to, name);
+  }
+
+  /**
+   * Adds a count of bytes that are not associated with any particular Node.
+   * An embedder may use this to represent the size of nodes which were omitted
+   * from this EmbedderGraph despite being retained by the graph, or other
+   * overhead costs. This number will contribute to the total size in a heap
+   * snapshot, without being represented in the object graph.
+   */
+  virtual void AddNativeSize(size_t size) {}
+
   virtual ~EmbedderGraph() = default;
+};
+
+class QueryObjectPredicate {
+ public:
+  virtual ~QueryObjectPredicate() = default;
+  virtual bool Filter(v8::Local<v8::Object> object) = 0;
 };
 
 /**
@@ -928,6 +1072,10 @@ class V8_EXPORT EmbedderGraph {
  */
 class V8_EXPORT HeapProfiler {
  public:
+  void QueryObjects(v8::Local<v8::Context> context,
+                    QueryObjectPredicate* predicate,
+                    std::vector<v8::Global<v8::Object>>* objects);
+
   enum SamplingFlags {
     kSamplingNoFlags = 0,
     kSamplingForceGC = 1 << 0,
@@ -947,7 +1095,7 @@ class V8_EXPORT HeapProfiler {
 
   /**
    * Callback function invoked during heap snapshot generation to retrieve
-   * the detachedness state of an object referenced by a TracedReference.
+   * the detachedness state of a JS object referenced by a TracedReference.
    *
    * The callback takes Local<Value> as parameter to allow the embedder to
    * unpack the TracedReference into a Local and reuse that Local for different
@@ -997,8 +1145,11 @@ class V8_EXPORT HeapProfiler {
 
   /**
    * Callback interface for retrieving user friendly names of global objects.
+   *
+   * This interface will soon be deprecated in favour of ContextNameResolver.
    */
-  class ObjectNameResolver {
+  class V8_DEPRECATE_SOON("Use ContextNameResolver instead.")
+      ObjectNameResolver {
    public:
     /**
      * Returns name to be used in the heap snapshot for given node. Returned
@@ -1008,6 +1159,23 @@ class V8_EXPORT HeapProfiler {
 
    protected:
     virtual ~ObjectNameResolver() = default;
+  };
+
+  /**
+   * Callback interface for retrieving user friendly names of a V8::Context
+   * objects.
+   */
+  class ContextNameResolver {
+   public:
+    /**
+     * Returns name to be used in the heap snapshot for given node. Returned
+     * string must stay alive until snapshot collection is completed.
+     * If no user friendly name is available return nullptr.
+     */
+    virtual const char* GetName(Local<Context> context) = 0;
+
+   protected:
+    virtual ~ContextNameResolver() = default;
   };
 
   enum class HeapSnapshotMode {
@@ -1044,9 +1212,10 @@ class V8_EXPORT HeapProfiler {
      */
     ActivityControl* control = nullptr;
     /**
-     * The resolver used by the snapshot generator to get names for V8 objects.
+     * The resolver used by the snapshot generator to get names for v8::Context
+     * objects.
      */
-    ObjectNameResolver* global_object_name_resolver = nullptr;
+    ContextNameResolver* context_name_resolver = nullptr;
     /**
      * Mode for taking the snapshot, see `HeapSnapshotMode`.
      */
@@ -1076,10 +1245,16 @@ class V8_EXPORT HeapProfiler {
    *
    * \returns the snapshot.
    */
-  const HeapSnapshot* TakeHeapSnapshot(
-      ActivityControl* control,
-      ObjectNameResolver* global_object_name_resolver = nullptr,
-      bool hide_internals = true, bool capture_numeric_value = false);
+  const HeapSnapshot* TakeHeapSnapshot(ActivityControl* control,
+                                       ContextNameResolver* resolver = nullptr,
+                                       bool hide_internals = true,
+                                       bool capture_numeric_value = false);
+
+  /**
+   * Obtains list of Detached JS Wrapper Objects. This functon calls garbage
+   * collection, then iterates over traced handles in the isolate
+   */
+  std::vector<v8::Local<v8::Value>> GetDetachedJSWrapperObjects();
 
   /**
    * Starts tracking of heap objects population statistics. After calling
@@ -1138,16 +1313,40 @@ class V8_EXPORT HeapProfiler {
    * Objects allocated before the sampling is started will not be included in
    * the profile.
    *
+   * If |sample_context_extractor| is set, it is called on the isolate's thread
+   * for each sampled allocation, and its result is stored in
+   * AllocationProfile::Sample::context. Because it runs while the allocation is
+   * being sampled, it MUST NOT run JavaScript, allocate on a managed heap
+   * (including cppgc) or call into the HeapProfiler. It may create local
+   * handles. It may use Map::Get(Local<Value>, bool*) to read a Map.
+   *
    * Returns false if a sampling heap profiler is already running.
    */
-  bool StartSamplingHeapProfiler(uint64_t sample_interval = 512 * 1024,
-                                 int stack_depth = 16,
-                                 SamplingFlags flags = kSamplingNoFlags);
+  bool StartSamplingHeapProfiler(
+      uint64_t sample_interval = 512 * 1024, int stack_depth = 16,
+      SamplingFlags flags = kSamplingNoFlags,
+      SampleContextExtractor sample_context_extractor = nullptr);
 
   /**
    * Stops the sampling heap profile and discards the current profile.
    */
   void StopSamplingHeapProfiler();
+
+  /**
+   * Updates the sampling interval for a currently running sampling heap
+   * profiler. The new interval is used for future sample scheduling.
+   *
+   * No-op if the sampling heap profiler is not running.
+   */
+  void SetSamplingHeapProfilerInterval(uint64_t sample_interval);
+
+  /**
+   * Returns the currently retained allocation samples without materializing
+   * the full allocation profile tree.
+   *
+   * Returns an empty vector if the sampling heap profiler is not running.
+   */
+  std::vector<AllocationProfile::Sample> GetSamplingHeapProfilerSamples();
 
   /**
    * Returns the sampled profile of allocations allocated (and still live) since
@@ -1169,6 +1368,18 @@ class V8_EXPORT HeapProfiler {
                                         void* data);
 
   void SetGetDetachednessCallback(GetDetachednessCallback callback, void* data);
+
+  /**
+   * Returns whether the heap profiler is currently taking a snapshot.
+   */
+  bool IsTakingSnapshot();
+
+  /**
+   * Allocates a copy of the provided string within the heap snapshot generator
+   * and returns a pointer to the copy. May only be called during heap snapshot
+   * generation.
+   */
+  const char* CopyNameForHeapSnapshot(const char* name);
 
   /**
    * Default value of persistent handle class ID. Must not be used to

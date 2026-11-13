@@ -53,6 +53,48 @@ const char src_simple[] = "function foo() { var x = 2 * a() + b; }";
 // names. That should have the same result, but has much nicer error messaages.
 #define CHECK_TOK(a, b) CHECK_EQ(Token::Name(a), Token::Name(b))
 
+TEST_F(ScannerTest, HasImmediateCommaOrRightBracket) {
+  const struct {
+    const char* source;
+    Token::Value literal;
+    Token::Value following;
+    bool is_immediate_delimiter;
+  } cases[] = {
+      {"1,2", Token::kSmi, Token::kComma, true},
+      {"1]", Token::kSmi, Token::kRightBracket, true},
+      {"1 ,2", Token::kSmi, Token::kComma, false},
+      {"1\n]", Token::kSmi, Token::kRightBracket, false},
+      {"1/*comment*/,2", Token::kSmi, Token::kComma, false},
+      {"1//comment\n]", Token::kSmi, Token::kRightBracket, false},
+      {"1n]", Token::kBigInt, Token::kRightBracket, true},
+      {"'s',2", Token::kString, Token::kComma, true},
+      {"null]", Token::kNullLiteral, Token::kRightBracket, true},
+      {"1", Token::kSmi, Token::kEos, false},
+      {"1/*", Token::kSmi, Token::kIllegal, false},
+      {"1+2]", Token::kSmi, Token::kAdd, false},
+      {"1/*]*/+2", Token::kSmi, Token::kAdd, false},
+      {"'s'.length]", Token::kString, Token::kPeriod, false},
+  };
+  for (const auto& test_case : cases) {
+    for (int lookahead = 0; lookahead < 3; ++lookahead) {
+      auto scanner = make_scanner(test_case.source);
+      if (lookahead > 0) scanner->PeekAhead();
+      if (lookahead > 1) scanner->PeekAheadAhead();
+      CHECK_EQ(test_case.is_immediate_delimiter && lookahead == 0,
+               scanner->HasImmediateCommaOrRightBracket());
+      CHECK_TOK(test_case.literal, scanner->Next());
+      CHECK_TOK(test_case.following, scanner->Next());
+
+      auto error_scanner = make_scanner(test_case.source);
+      if (lookahead > 0) error_scanner->PeekAhead();
+      if (lookahead > 1) error_scanner->PeekAheadAhead();
+      error_scanner->set_parser_error();
+      CHECK(!error_scanner->HasImmediateCommaOrRightBracket());
+      CHECK_TOK(Token::kIllegal, error_scanner->Next());
+    }
+  }
+}
+
 TEST_F(ScannerTest, Bookmarks) {
   // Scan through the given source and record the tokens for use as reference
   // below.
@@ -61,7 +103,7 @@ TEST_F(ScannerTest, Bookmarks) {
     auto scanner = make_scanner(src_simple);
     do {
       tokens.push_back(scanner->Next());
-    } while (scanner->current_token() != Token::EOS);
+    } while (scanner->current_token() != Token::kEos);
   }
 
   // For each position:
@@ -94,20 +136,65 @@ TEST_F(ScannerTest, AllThePushbacks) {
     const char* src;
     const Token::Value tokens[5];  // Large enough for any of the test cases.
   } test_cases[] = {
-      {"<-x", {Token::LT, Token::SUB, Token::IDENTIFIER, Token::EOS}},
-      {"<!x", {Token::LT, Token::NOT, Token::IDENTIFIER, Token::EOS}},
+      {"<-x", {Token::kLessThan, Token::kSub, Token::kIdentifier, Token::kEos}},
+      {"<!x", {Token::kLessThan, Token::kNot, Token::kIdentifier, Token::kEos}},
       {"<!-x",
-       {Token::LT, Token::NOT, Token::SUB, Token::IDENTIFIER, Token::EOS}},
-      {"<!-- xx -->\nx", {Token::IDENTIFIER, Token::EOS}},
+       {Token::kLessThan, Token::kNot, Token::kSub, Token::kIdentifier,
+        Token::kEos}},
+      {"<!-- xx -->\nx", {Token::kIdentifier, Token::kEos}},
   };
 
   for (const auto& test_case : test_cases) {
     auto scanner = make_scanner(test_case.src);
-    for (size_t i = 0; test_case.tokens[i] != Token::EOS; i++) {
+    for (size_t i = 0; test_case.tokens[i] != Token::kEos; i++) {
       CHECK_TOK(test_case.tokens[i], scanner->Next());
     }
-    CHECK_TOK(Token::EOS, scanner->Next());
+    CHECK_TOK(Token::kEos, scanner->Next());
   }
+}
+
+TEST_F(ScannerTest, PeekAheadAheadAwaitUsingDeclaration) {
+  const char src[] = "await using a = 2;";
+
+  std::vector<Token::Value> tokens;
+  {
+    auto scanner = make_scanner(src);
+    do {
+      tokens.push_back(scanner->Next());
+    } while (scanner->current_token() != Token::kEos);
+  }
+
+  auto scanner = make_scanner(src);
+  Scanner::BookmarkScope bookmark(scanner.get());
+  bookmark.Set(scanner->peek_location().beg_pos);
+  bookmark.Apply();
+
+  CHECK_TOK(tokens[0], scanner->Next());
+  CHECK_TOK(tokens[1], scanner->peek());
+  CHECK_TOK(tokens[2], scanner->PeekAhead());
+  CHECK_TOK(tokens[3], scanner->PeekAheadAhead());
+}
+
+TEST_F(ScannerTest, PeekAheadAheadAwaitExpression) {
+  const char src[] = "await using + 5;";
+
+  std::vector<Token::Value> tokens;
+  {
+    auto scanner = make_scanner(src);
+    do {
+      tokens.push_back(scanner->Next());
+    } while (scanner->current_token() != Token::kEos);
+  }
+
+  auto scanner = make_scanner(src);
+  Scanner::BookmarkScope bookmark(scanner.get());
+  bookmark.Set(scanner->peek_location().beg_pos);
+  bookmark.Apply();
+
+  CHECK_TOK(tokens[0], scanner->Next());
+  CHECK_TOK(tokens[1], scanner->peek());
+  CHECK_TOK(tokens[2], scanner->PeekAhead());
+  CHECK_TOK(tokens[3], scanner->PeekAheadAhead());
 }
 
 }  // namespace internal

@@ -87,10 +87,10 @@ TEST(InitGoogleMockTest, ParsesSingleFlag) {
 
 TEST(InitGoogleMockTest, ParsesMultipleFlags) {
   int old_default_behavior = GMOCK_FLAG_GET(default_mock_behavior);
-  const wchar_t* argv[] = {L"foo.exe", L"--gmock_verbose=info",
-                           L"--gmock_default_mock_behavior=2", nullptr};
+  const char* argv[] = {"foo.exe", "--gmock_verbose=info",
+                        "--gmock_default_mock_behavior=2", nullptr};
 
-  const wchar_t* new_argv[] = {L"foo.exe", nullptr};
+  const char* new_argv[] = {"foo.exe", nullptr};
 
   TestInitGoogleMock(argv, new_argv, "info");
   EXPECT_EQ(2, GMOCK_FLAG_GET(default_mock_behavior));
@@ -114,6 +114,8 @@ TEST(InitGoogleMockTest, ParsesGoogleMockFlagAndUnrecognizedFlag) {
 
   TestInitGoogleMock(argv, new_argv, "error");
 }
+
+#if GTEST_HAS_STD_WSTRING
 
 TEST(WideInitGoogleMockTest, ParsesInvalidCommandLine) {
   const wchar_t* argv[] = {nullptr};
@@ -168,12 +170,13 @@ TEST(WideInitGoogleMockTest, ParsesGoogleMockFlagAndUnrecognizedFlag) {
 
   TestInitGoogleMock(argv, new_argv, "error");
 }
+#endif  // GTEST_HAS_STD_WSTRING
 
 #endif  // !defined(GTEST_CUSTOM_INIT_GOOGLE_TEST_FUNCTION_)
 
 // Makes sure Google Mock flags can be accessed in code.
 TEST(FlagTest, IsAccessibleInCode) {
   bool dummy =
-      GMOCK_FLAG_GET(catch_leaked_mocks) && GMOCK_FLAG_GET(verbose) == "";
+      GMOCK_FLAG_GET(catch_leaked_mocks) && GMOCK_FLAG_GET(verbose).empty();
   (void)dummy;  // Avoids the "unused local variable" warning.
 }

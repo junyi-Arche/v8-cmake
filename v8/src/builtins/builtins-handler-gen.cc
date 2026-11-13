@@ -2,10 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#include "src/base/optional.h"
 #include "src/builtins/builtins-utils-gen.h"
 #include "src/builtins/builtins.h"
-#include "src/codegen/code-stub-assembler.h"
+#include "src/codegen/code-stub-assembler-inl.h"
 #include "src/ic/ic.h"
 #include "src/ic/keyed-store-generic.h"
 #include "src/objects/objects-inl.h"
@@ -13,6 +12,8 @@
 
 namespace v8 {
 namespace internal {
+
+#include "src/codegen/define-code-stub-assembler-macros.inc"
 
 class HandlerBuiltinsAssembler : public CodeStubAssembler {
  public:
@@ -55,7 +56,7 @@ TF_BUILTIN(LoadIC_StringWrapperLength, CodeStubAssembler) {
 
 void Builtins::Generate_KeyedStoreIC_Megamorphic(
     compiler::CodeAssemblerState* state) {
-  KeyedStoreGenericGenerator::Generate(state);
+  KeyedStoreMegamorphicGenerator::Generate(state);
 }
 
 void Builtins::Generate_DefineKeyedOwnIC_Megamorphic(
@@ -68,6 +69,8 @@ void Builtins::Generate_StoreIC_NoFeedback(
   StoreICNoFeedbackGenerator::Generate(state);
 }
 
+// For the "no feedback" case, we don't need to distinguish between "in literal"
+// and "not in literal".
 void Builtins::Generate_DefineNamedOwnIC_NoFeedback(
     compiler::CodeAssemblerState* state) {
   DefineNamedOwnICNoFeedbackGenerator::Generate(state);
@@ -159,7 +162,7 @@ void HandlerBuiltinsAssembler::Generate_ElementsTransitionAndStore(
     // TODO(v8:8481): Pass from_kind and to_kind in feedback vector slots.
     DispatchForElementsKindTransition(
         LoadElementsKind(receiver), LoadMapElementsKind(map),
-        [=, &miss](ElementsKind from_kind, ElementsKind to_kind) {
+        [=, this, &miss](ElementsKind from_kind, ElementsKind to_kind) {
           TransitionElementsKind(receiver, map, from_kind, to_kind, &miss);
           EmitElementStore(receiver, key, value, to_kind, store_mode, &miss,
                            context, nullptr);
@@ -172,23 +175,24 @@ void HandlerBuiltinsAssembler::Generate_ElementsTransitionAndStore(
                   receiver, key, value, map, slot, vector);
 }
 
-TF_BUILTIN(ElementsTransitionAndStore_Standard, HandlerBuiltinsAssembler) {
-  Generate_ElementsTransitionAndStore(STANDARD_STORE);
+TF_BUILTIN(ElementsTransitionAndStore_InBounds, HandlerBuiltinsAssembler) {
+  Generate_ElementsTransitionAndStore(KeyedAccessStoreMode::kInBounds);
 }
 
-TF_BUILTIN(ElementsTransitionAndStore_GrowNoTransitionHandleCOW,
+TF_BUILTIN(ElementsTransitionAndStore_NoTransitionGrowAndHandleCOW,
            HandlerBuiltinsAssembler) {
-  Generate_ElementsTransitionAndStore(STORE_AND_GROW_HANDLE_COW);
+  Generate_ElementsTransitionAndStore(KeyedAccessStoreMode::kGrowAndHandleCOW);
 }
 
-TF_BUILTIN(ElementsTransitionAndStore_NoTransitionIgnoreOOB,
+TF_BUILTIN(ElementsTransitionAndStore_NoTransitionIgnoreTypedArrayOOB,
            HandlerBuiltinsAssembler) {
-  Generate_ElementsTransitionAndStore(STORE_IGNORE_OUT_OF_BOUNDS);
+  Generate_ElementsTransitionAndStore(
+      KeyedAccessStoreMode::kIgnoreTypedArrayOOB);
 }
 
 TF_BUILTIN(ElementsTransitionAndStore_NoTransitionHandleCOW,
            HandlerBuiltinsAssembler) {
-  Generate_ElementsTransitionAndStore(STORE_HANDLE_COW);
+  Generate_ElementsTransitionAndStore(KeyedAccessStoreMode::kHandleCOW);
 }
 
 // All elements kinds handled by EmitElementStore. Specifically, this includes
@@ -199,7 +203,6 @@ TF_BUILTIN(ElementsTransitionAndStore_NoTransitionHandleCOW,
   V(PACKED_ELEMENTS)                 \
   V(PACKED_NONEXTENSIBLE_ELEMENTS)   \
   V(PACKED_SEALED_ELEMENTS)          \
-  V(SHARED_ARRAY_ELEMENTS)           \
   V(HOLEY_ELEMENTS)                  \
   V(HOLEY_NONEXTENSIBLE_ELEMENTS)    \
   V(HOLEY_SEALED_ELEMENTS)           \
@@ -211,6 +214,7 @@ TF_BUILTIN(ElementsTransitionAndStore_NoTransitionHandleCOW,
   V(INT16_ELEMENTS)                  \
   V(UINT32_ELEMENTS)                 \
   V(INT32_ELEMENTS)                  \
+  V(FLOAT16_ELEMENTS)                \
   V(FLOAT32_ELEMENTS)                \
   V(FLOAT64_ELEMENTS)                \
   V(UINT8_CLAMPED_ELEMENTS)          \
@@ -222,6 +226,7 @@ TF_BUILTIN(ElementsTransitionAndStore_NoTransitionHandleCOW,
   V(RAB_GSAB_INT16_ELEMENTS)         \
   V(RAB_GSAB_UINT32_ELEMENTS)        \
   V(RAB_GSAB_INT32_ELEMENTS)         \
+  V(RAB_GSAB_FLOAT16_ELEMENTS)       \
   V(RAB_GSAB_FLOAT32_ELEMENTS)       \
   V(RAB_GSAB_FLOAT64_ELEMENTS)       \
   V(RAB_GSAB_UINT8_CLAMPED_ELEMENTS) \
@@ -255,20 +260,16 @@ void HandlerBuiltinsAssembler::DispatchByElementsKind(
   Switch(elements_kind, &if_unknown_type, elements_kinds, elements_kind_labels,
          arraysize(elements_kinds));
 
-#define ELEMENTS_KINDS_CASE(KIND)                                   \
-  BIND(&if_##KIND);                                                 \
-  {                                                                 \
-    if (!v8_flags.enable_sealed_frozen_elements_kind &&             \
-        IsAnyNonextensibleElementsKindUnchecked(KIND)) {            \
-      /* Disable support for frozen or sealed elements kinds. */    \
-      Unreachable();                                                \
-    } else if (!handle_typed_elements_kind &&                       \
-               IsTypedArrayOrRabGsabTypedArrayElementsKind(KIND)) { \
-      Unreachable();                                                \
-    } else {                                                        \
-      case_function(KIND);                                          \
-      Goto(&next);                                                  \
-    }                                                               \
+#define ELEMENTS_KINDS_CASE(KIND)                            \
+  BIND(&if_##KIND);                                          \
+  {                                                          \
+    if (!handle_typed_elements_kind &&                       \
+        IsTypedArrayOrRabGsabTypedArrayElementsKind(KIND)) { \
+      Unreachable();                                         \
+    } else {                                                 \
+      case_function(KIND);                                   \
+      Goto(&next);                                           \
+    }                                                        \
   }
   ELEMENTS_KINDS(ELEMENTS_KINDS_CASE)
 #undef ELEMENTS_KINDS_CASE
@@ -295,8 +296,6 @@ void HandlerBuiltinsAssembler::Generate_StoreFastElementIC(
 
   Label miss(this);
 
-  bool handle_typed_elements_kind =
-      store_mode == STANDARD_STORE || store_mode == STORE_IGNORE_OUT_OF_BOUNDS;
   // For typed arrays maybe_converted_value contains the value obtained after
   // calling ToNumber. We should pass the converted value to the runtime to
   // avoid doing the user visible conversion again.
@@ -304,11 +303,11 @@ void HandlerBuiltinsAssembler::Generate_StoreFastElementIC(
   // TODO(v8:8481): Pass elements_kind in feedback vector slots.
   DispatchByElementsKind(
       LoadElementsKind(receiver),
-      [=, &miss, &maybe_converted_value](ElementsKind elements_kind) {
+      [=, this, &miss, &maybe_converted_value](ElementsKind elements_kind) {
         EmitElementStore(receiver, key, value, elements_kind, store_mode, &miss,
                          context, &maybe_converted_value);
       },
-      handle_typed_elements_kind);
+      StoreModeSupportsTypeArray(store_mode));
   Return(value);
 
   BIND(&miss);
@@ -316,21 +315,42 @@ void HandlerBuiltinsAssembler::Generate_StoreFastElementIC(
                   maybe_converted_value.value(), slot, vector, receiver, key);
 }
 
-TF_BUILTIN(StoreFastElementIC_Standard, HandlerBuiltinsAssembler) {
-  Generate_StoreFastElementIC(STANDARD_STORE);
+#if V8_ENABLE_GEARBOX
+TF_BUILTIN(StoreFastElementIC_InBounds, HandlerBuiltinsAssembler) {
+  // TODO(Wenqin): we may not generate StoreFastElementIC_InBounds builtin,
+  // but generate another Code object which just share the instruction start,
+  // size, meta data size and etc.
+  Unreachable();
 }
 
-TF_BUILTIN(StoreFastElementIC_GrowNoTransitionHandleCOW,
+TF_BUILTIN(StoreFastElementIC_InBounds_Generic, HandlerBuiltinsAssembler) {
+  Generate_StoreFastElementIC(KeyedAccessStoreMode::kInBounds);
+}
+
+TF_BUILTIN(StoreFastElementIC_InBounds_ISX, HandlerBuiltinsAssembler) {
+  Generate_StoreFastElementIC(KeyedAccessStoreMode::kInBounds);
+}
+
+#else
+
+TF_BUILTIN(StoreFastElementIC_InBounds, HandlerBuiltinsAssembler) {
+  Generate_StoreFastElementIC(KeyedAccessStoreMode::kInBounds);
+}
+
+#endif  // V8_ENABLE_GEARBOX
+
+TF_BUILTIN(StoreFastElementIC_NoTransitionGrowAndHandleCOW,
            HandlerBuiltinsAssembler) {
-  Generate_StoreFastElementIC(STORE_AND_GROW_HANDLE_COW);
+  Generate_StoreFastElementIC(KeyedAccessStoreMode::kGrowAndHandleCOW);
 }
 
-TF_BUILTIN(StoreFastElementIC_NoTransitionIgnoreOOB, HandlerBuiltinsAssembler) {
-  Generate_StoreFastElementIC(STORE_IGNORE_OUT_OF_BOUNDS);
+TF_BUILTIN(StoreFastElementIC_NoTransitionIgnoreTypedArrayOOB,
+           HandlerBuiltinsAssembler) {
+  Generate_StoreFastElementIC(KeyedAccessStoreMode::kIgnoreTypedArrayOOB);
 }
 
 TF_BUILTIN(StoreFastElementIC_NoTransitionHandleCOW, HandlerBuiltinsAssembler) {
-  Generate_StoreFastElementIC(STORE_HANDLE_COW);
+  Generate_StoreFastElementIC(KeyedAccessStoreMode::kHandleCOW);
 }
 
 TF_BUILTIN(LoadIC_FunctionPrototype, CodeStubAssembler) {
@@ -385,7 +405,7 @@ void HandlerBuiltinsAssembler::Generate_KeyedStoreIC_SloppyArguments() {
   using Descriptor = StoreWithVectorDescriptor;
   auto receiver = Parameter<JSObject>(Descriptor::kReceiver);
   auto key = Parameter<Object>(Descriptor::kName);
-  auto value = Parameter<Object>(Descriptor::kValue);
+  auto value = Parameter<JSAny>(Descriptor::kValue);
   auto slot = Parameter<Smi>(Descriptor::kSlot);
   auto vector = Parameter<HeapObject>(Descriptor::kVector);
   auto context = Parameter<Context>(Descriptor::kContext);
@@ -400,16 +420,16 @@ void HandlerBuiltinsAssembler::Generate_KeyedStoreIC_SloppyArguments() {
                   receiver, key);
 }
 
-TF_BUILTIN(KeyedStoreIC_SloppyArguments_Standard, HandlerBuiltinsAssembler) {
+TF_BUILTIN(KeyedStoreIC_SloppyArguments_InBounds, HandlerBuiltinsAssembler) {
   Generate_KeyedStoreIC_SloppyArguments();
 }
 
-TF_BUILTIN(KeyedStoreIC_SloppyArguments_GrowNoTransitionHandleCOW,
+TF_BUILTIN(KeyedStoreIC_SloppyArguments_NoTransitionGrowAndHandleCOW,
            HandlerBuiltinsAssembler) {
   Generate_KeyedStoreIC_SloppyArguments();
 }
 
-TF_BUILTIN(KeyedStoreIC_SloppyArguments_NoTransitionIgnoreOOB,
+TF_BUILTIN(KeyedStoreIC_SloppyArguments_NoTransitionIgnoreTypedArrayOOB,
            HandlerBuiltinsAssembler) {
   Generate_KeyedStoreIC_SloppyArguments();
 }
@@ -472,6 +492,8 @@ TF_BUILTIN(HasIndexedInterceptorIC, CodeStubAssembler) {
   TailCallRuntime(Runtime::kKeyedHasIC_Miss, context, receiver, key, slot,
                   vector);
 }
+
+#include "src/codegen/undef-code-stub-assembler-macros.inc"
 
 }  // namespace internal
 }  // namespace v8

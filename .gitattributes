@@ -1,0 +1,4 @@
+# Keep patch files byte-exact. CRLF in a .patch file makes `git apply`
+# fail to match context inside this repository after update_v8.py re-exports
+# the (LF) V8 source tree.
+patches/*.patch -text

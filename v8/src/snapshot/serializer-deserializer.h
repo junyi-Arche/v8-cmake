@@ -5,13 +5,16 @@
 #ifndef V8_SNAPSHOT_SERIALIZER_DESERIALIZER_H_
 #define V8_SNAPSHOT_SERIALIZER_DESERIALIZER_H_
 
+#include <type_traits>
+
+#include "src/base/discriminated-union.h"
+#include "src/codegen/external-reference-encoder.h"
 #include "src/objects/visitors.h"
 #include "src/snapshot/references.h"
 
 namespace v8 {
 namespace internal {
 
-class CallHandlerInfo;
 class Isolate;
 
 // The Serializer/Deserializer class is a common superclass for Serializer and
@@ -29,49 +32,18 @@ class SerializerDeserializer : public RootVisitor {
     kAnySlot,
     kMapSlot,
   };
-  static bool CanBeDeferred(HeapObject o, SlotType slot_type);
+  static bool CanBeDeferred(Tagged<HeapObject> o, SlotType slot_type);
 
-  void RestoreExternalReferenceRedirector(Isolate* isolate,
-                                          AccessorInfo accessor_info);
-  void RestoreExternalReferenceRedirector(Isolate* isolate,
-                                          CallHandlerInfo call_handler_info);
-
-// clang-format off
+  // clang-format off
 #define UNUSED_SERIALIZER_BYTE_CODES(V)                           \
-  /* Free range 0x10..0x1f */                                     \
-  V(0x1a) V(0x1b) V(0x1c) V(0x1d) V(0x1e) V(0x1f)                 \
-  /* Free range 0x20..0x2f */                                     \
-  V(0x20) V(0x21) V(0x22) V(0x23) V(0x24) V(0x25) V(0x26) V(0x27) \
-  V(0x28) V(0x29) V(0x2a) V(0x2b) V(0x2c) V(0x2d) V(0x2e) V(0x2f) \
-  /* Free range 0x30..0x3f */                                     \
-  V(0x30) V(0x31) V(0x32) V(0x33) V(0x34) V(0x35) V(0x36) V(0x37) \
-  V(0x38) V(0x39) V(0x3a) V(0x3b) V(0x3c) V(0x3d) V(0x3e) V(0x3f) \
-  /* Free range 0x97..0x9f */                                     \
-  V(0x98) V(0x99) V(0x9a) V(0x9b) V(0x9c) V(0x9d) V(0x9e) V(0x9f) \
-  /* Free range 0xa0..0xaf */                                     \
-  V(0xa0) V(0xa1) V(0xa2) V(0xa3) V(0xa4) V(0xa5) V(0xa6) V(0xa7) \
-  V(0xa8) V(0xa9) V(0xaa) V(0xab) V(0xac) V(0xad) V(0xae) V(0xaf) \
-  /* Free range 0xb0..0xbf */                                     \
-  V(0xb0) V(0xb1) V(0xb2) V(0xb3) V(0xb4) V(0xb5) V(0xb6) V(0xb7) \
-  V(0xb8) V(0xb9) V(0xba) V(0xbb) V(0xbc) V(0xbd) V(0xbe) V(0xbf) \
-  /* Free range 0xc0..0xcf */                                     \
-  V(0xc0) V(0xc1) V(0xc2) V(0xc3) V(0xc4) V(0xc5) V(0xc6) V(0xc7) \
-  V(0xc8) V(0xc9) V(0xca) V(0xcb) V(0xcc) V(0xcd) V(0xce) V(0xcf) \
-  /* Free range 0xd0..0xdf */                                     \
-  V(0xd0) V(0xd1) V(0xd2) V(0xd3) V(0xd4) V(0xd5) V(0xd6) V(0xd7) \
-  V(0xd8) V(0xd9) V(0xda) V(0xdb) V(0xdc) V(0xdd) V(0xde) V(0xdf) \
-  /* Free range 0xe0..0xef */                                     \
-  V(0xe0) V(0xe1) V(0xe2) V(0xe3) V(0xe4) V(0xe5) V(0xe6) V(0xe7) \
-  V(0xe8) V(0xe9) V(0xea) V(0xeb) V(0xec) V(0xed) V(0xee) V(0xef) \
-  /* Free range 0xf0..0xff */                                     \
-  V(0xf0) V(0xf1) V(0xf2) V(0xf3) V(0xf4) V(0xf5) V(0xf6) V(0xf7) \
-  V(0xf8) V(0xf9) V(0xfa) V(0xfb) V(0xfc) V(0xfd) V(0xfe) V(0xff)
+  /* Free range 0x28..0x2f */                                     \
+  V(0x28) V(0x29) V(0x2a) V(0x2b) V(0x2c) V(0x2d) V(0x2e) V(0x2f)
   // clang-format on
 
   // The static assert below will trigger when the number of preallocated spaces
   // changed. If that happens, update the kNewObject and kBackref bytecode
   // ranges in the comments below.
-  static_assert(3 == kNumberOfSnapshotSpaces);
+  static_assert(4 == kNumberOfSnapshotSpaces);
 
   // First 32 root array items.
   static const int kRootArrayConstantsCount = 0x20;
@@ -79,20 +51,20 @@ class SerializerDeserializer : public RootVisitor {
   // 32 common raw data lengths.
   static const int kFixedRawDataCount = 0x20;
   // 16 repeats lengths.
-  static const int kFixedRepeatCount = 0x10;
+  static const int kFixedRepeatRootCount = 0x10;
 
-  // 8 hot (recently seen or back-referenced) objects with optional skip.
-  static const int kHotObjectCount = 8;
+  // Top 128 back-referenced objects.
+  static const int kFixedBackrefCount = 0x80;
 
   enum Bytecode : uint8_t {
     //
-    // ---------- byte code range 0x00..0x1f ----------
+    // ---------- byte code range 0x00..0x27 ----------
     //
 
     // 0x00..0x03  Allocate new object, in specified space.
     kNewObject = 0x00,
     // Reference to previously allocated object.
-    kBackref = 0x03,
+    kBackref = 0x04,
     // Reference to an object in the read only heap.
     kReadOnlyHeapRef,
     // Object in the startup object cache.
@@ -111,13 +83,15 @@ class SerializerDeserializer : public RootVisitor {
     // Examine the build process for architecture, version or configuration
     // mismatches.
     kSynchronize,
-    // Repeats of variable length.
-    kVariableRepeat,
+    // Repeats of variable length of a root.
+    kVariableRepeatRoot,
     // Used for embedder-allocated backing stores for TypedArrays.
     kOffHeapBackingStore,
     kOffHeapResizableBackingStore,
     // Used for embedder-provided serialization data for embedder fields.
     kEmbedderFieldsData,
+    // Used for embedder-provided serialziation data for API wrappers.
+    kApiWrapperFieldsData,
     // Raw data of variable length.
     kVariableRawData,
     // Used to encode external references provided through the API.
@@ -140,17 +114,61 @@ class SerializerDeserializer : public RootVisitor {
     // Resolves an existing "pending" forward reference to point to the current
     // object.
     kResolvePendingForwardRef,
-    // Special construction bytecode for the metamap. In theory we could re-use
-    // forward-references for this, but then the forward reference would be
-    // registered during object map deserialization, before the object is
+    // Special construction bytecodes for the metamaps. In theory we could
+    // reuse forward-references for this, but then the forward reference would
+    // be registered during object map deserialization, before the object is
     // allocated, so there wouldn't be a allocated object whose map field we can
     // register as the pending field. We could either hack around this, or
     // simply introduce this new bytecode.
-    kNewMetaMap,
+    kNewContextlessMetaMap,
+    kNewContextfulMetaMap,
+    // Extended maps store their actual size in bit_field_ex_, which would be
+    // written after tagged fields without special handling. As a result
+    // during deserialization of those tagged fields GC might happen and
+    // observe an extended map with not-yet initialized size.
+    // This bytecode must be serialized right after the map field.
+    kExtendedMapBitFieldEx,
+    // When the sandbox is enabled, a prefix indicating that the following
+    // object is referenced through an indirect pointer, i.e. through an entry
+    // in a pointer table.
+    kTrustedPointerPrefix,
+    // When the sandbox is enabled, this bytecode instructs the deserializer to
+    // initialize the "self" indirect pointer of trusted objects, which
+    // references the object's pointer table entry. As the "self" indirect
+    // pointer is always the first field after the map word, it is guaranteed
+    // that it will be deserialized before any inner objects, which may require
+    // the pointer table entry for back reference to the trusted object.
+    kInitializeSelfTrustedPointer,
+    // This bytecode instructs the deserializer to allocate an entry in the
+    // JSDispatchTable for the host object and store the corresponding dispatch
+    // handle into the current slot.
+    kAllocateJSDispatchEntry,
+    // A back-reference to the already allocated n-th dispatch entry.
+    kJSDispatchEntry,
+    // A prefix indicating that the following object is referenced through a
+    // protected pointer, i.e. a pointer from one trusted object to another.
+    kProtectedPointerPrefix,
+    // Reference to the n-th object exported by the trusted section.
+    kTrustedExportRef,
+    // Back reference to an object in the untrusted section.
+    kUntrustedRef,
+    // Reference to the n-th external reference in the trusted section.
+    kTrustedExternalRef,
+    // Reference to previously allocated object, also registering it in the
+    // fixed backref table for subsequent 1-byte kFixedBackref references.
+    kRegisterFixedBackref,
+    // The host external string's resource, as an index into the API external
+    // references. The deserializer stores a newly allocated cppgc wrapper for
+    // it. Trusted sections only; an untrusted section refers to the resource
+    // through the trusted section's table instead (kTrustedExternalRef).
+    kExternalStringResource,
 
     //
-    // ---------- byte code range 0x40..0x7f ----------
+    // ---------- byte code range 0x30..0x7f ----------
     //
+
+    // 0x30..0x3f
+    kFixedRepeatRoot = 0x30,
 
     // 0x40..0x5f
     kRootArrayConstants = 0x40,
@@ -159,15 +177,65 @@ class SerializerDeserializer : public RootVisitor {
     kFixedRawData = 0x60,
 
     //
-    // ---------- byte code range 0x80..0x9f ----------
+    // ---------- byte code range 0x80..0xff ----------
     //
 
-    // 0x80..0x8f
-    kFixedRepeat = 0x80,
-
-    // 0x90..0x97
-    kHotObject = 0x90,
+    // 0x80..0xff
+    kFixedBackref = 0x80,
   };
+
+  // Bytecodes that could corrupt memory outside the sandbox, which the
+  // deserializer only accepts in trusted sections. There is no default case,
+  // so that every new bytecode has to be classified here.
+  static constexpr bool IsTrustedBytecode(Bytecode bytecode) {
+    switch (bytecode) {
+      case kApiReference:
+      case kExternalReference:
+      case kSandboxedApiReference:
+      case kSandboxedExternalReference:
+      case kSandboxedRawExternalReference:
+      case kInitializeSelfTrustedPointer:
+      case kAllocateJSDispatchEntry:
+      case kJSDispatchEntry:
+      case kProtectedPointerPrefix:
+      case kExternalStringResource:
+        return true;
+      case kNewObject:
+      case kBackref:
+      case kReadOnlyHeapRef:
+      case kStartupObjectCache:
+      case kRootArray:
+      case kAttachedReference:
+      case kSharedHeapObjectCache:
+      case kNop:
+      case kSynchronize:
+      case kVariableRepeatRoot:
+      case kOffHeapBackingStore:
+      case kOffHeapResizableBackingStore:
+      case kEmbedderFieldsData:
+      case kApiWrapperFieldsData:
+      case kVariableRawData:
+      case kClearedWeakReference:
+      case kWeakPrefix:
+      case kRegisterPendingForwardRef:
+      case kResolvePendingForwardRef:
+      case kNewContextlessMetaMap:
+      case kNewContextfulMetaMap:
+      case kExtendedMapBitFieldEx:
+      case kTrustedPointerPrefix:
+      case kTrustedExportRef:
+      case kUntrustedRef:
+      case kTrustedExternalRef:
+      case kRegisterFixedBackref:
+      case kRootArrayConstants:
+      case kFixedRawData:
+      case kFixedRepeatRoot:
+      case kFixedBackref:
+        return false;
+    }
+    // The rest of a bytecode range, or an unused bytecode.
+    return false;
+  }
 
   // Helper class for encoding and decoding a value into and from a bytecode.
   //
@@ -224,43 +292,118 @@ class SerializerDeserializer : public RootVisitor {
                            kLastEncodableFixedRawDataSize>;
 
   // Repeat count encoding helpers.
-  static const int kFirstEncodableRepeatCount = 2;
-  static const int kLastEncodableFixedRepeatCount =
-      kFirstEncodableRepeatCount + kFixedRepeatCount - 1;
-  static const int kFirstEncodableVariableRepeatCount =
-      kLastEncodableFixedRepeatCount + 1;
+  static const int kFirstEncodableRepeatRootCount = 2;
+  static const int kLastEncodableFixedRepeatRootCount =
+      kFirstEncodableRepeatRootCount + kFixedRepeatRootCount - 1;
+  static const int kFirstEncodableVariableRepeatRootCount =
+      kLastEncodableFixedRepeatRootCount + 1;
 
-  using FixedRepeatWithCount =
-      BytecodeValueEncoder<kFixedRepeat, kFirstEncodableRepeatCount,
-                           kLastEncodableFixedRepeatCount>;
+  using FixedRepeatRootWithCount =
+      BytecodeValueEncoder<kFixedRepeatRoot, kFirstEncodableRepeatRootCount,
+                           kLastEncodableFixedRepeatRootCount>;
 
   // Encodes/decodes repeat count into a serialized variable repeat count
   // value.
-  struct VariableRepeatCount {
+  struct VariableRepeatRootCount {
     static constexpr bool IsEncodable(int repeat_count) {
-      return repeat_count >= kFirstEncodableVariableRepeatCount;
+      return repeat_count >= kFirstEncodableVariableRepeatRootCount;
     }
 
     static constexpr int Encode(int repeat_count) {
       DCHECK(IsEncodable(repeat_count));
-      return repeat_count - kFirstEncodableVariableRepeatCount;
+      return repeat_count - kFirstEncodableVariableRepeatRootCount;
     }
 
     static constexpr int Decode(int value) {
-      return value + kFirstEncodableVariableRepeatCount;
+      return value + kFirstEncodableVariableRepeatRootCount;
     }
   };
 
   using RootArrayConstant =
       BytecodeValueEncoder<kRootArrayConstants, 0, kRootArrayConstantsCount - 1,
                            RootIndex>;
-  using HotObject = BytecodeValueEncoder<kHotObject, 0, kHotObjectCount - 1>;
+  using FixedBackref =
+      BytecodeValueEncoder<kFixedBackref, 0, kFixedBackrefCount - 1>;
 
   // This backing store reference value represents empty backing stores during
   // serialization/deserialization.
   static const uint32_t kEmptyBackingStoreRefSentinel = 0;
+
+  // Number of bits used to encode the aligned chunk offset in kReadOnlyHeapRef.
+  static constexpr int kReadOnlyHeapRefOffsetBits =
+      kPageSizeBits - kObjectAlignmentBits;
+
+  // The kinds of entries in the table of external references at the start of
+  // the trusted section, see kTrustedExternalRef. The kind says which pointer
+  // table the deserializer adds an entry to.
+  enum class ExternalReferenceKind : uint8_t {
+    kExternalPointer,
+    kCppHeapPointer,
+    kJSDispatch,
+  };
+  // An EncodedExternalReference should take at most 8 bytes and have no
+  // padding, so each entry is packed into exactly 7 bytes besides the uint8_t
+  // kind.
+  static constexpr size_t kEncodedExternalReferenceSize = 8;
+  static constexpr size_t kEncodedEntrySize =
+      kEncodedExternalReferenceSize - sizeof(ExternalReferenceKind);
+  struct __attribute__((packed)) EncodedExternalPointer {
+    uint32_t index;
+    ExternalPointerTag tag;
+    bool is_api_reference;
+  };
+  struct __attribute__((packed)) EncodedCppHeapPointer {
+    uint32_t index;
+    CppHeapPointerTag tag;
+    bool is_api_reference;
+  };
+  struct __attribute__((packed)) EncodedJSDispatchEntry {
+    uint16_t builtin;
+    uint16_t parameter_count;
+    uint8_t padding[3] = {};
+  };
+  static_assert(sizeof(EncodedExternalPointer) == kEncodedEntrySize);
+  static_assert(sizeof(EncodedCppHeapPointer) == kEncodedEntrySize);
+  static_assert(sizeof(EncodedJSDispatchEntry) == kEncodedEntrySize);
+  using EncodedExternalReference =
+      base::DiscriminatedUnion<ExternalReferenceKind, EncodedExternalPointer,
+                               EncodedCppHeapPointer, EncodedJSDispatchEntry>;
+  static_assert(sizeof(EncodedExternalReference) ==
+                kEncodedExternalReferenceSize);
+  static_assert(std::is_trivially_copyable_v<EncodedExternalReference>);
 };
 
+struct SerializeEmbedderFieldsCallback {
+  explicit SerializeEmbedderFieldsCallback(
+      v8::SerializeInternalFieldsCallback js_cb =
+          v8::SerializeInternalFieldsCallback(),
+      v8::SerializeContextDataCallback context_cb =
+          v8::SerializeContextDataCallback(),
+      v8::SerializeAPIWrapperCallback api_wrapper_cb =
+          v8::SerializeAPIWrapperCallback())
+      : js_object_callback(js_cb),
+        context_callback(context_cb),
+        api_wrapper_callback(api_wrapper_cb) {}
+  v8::SerializeInternalFieldsCallback js_object_callback;
+  v8::SerializeContextDataCallback context_callback;
+  v8::SerializeAPIWrapperCallback api_wrapper_callback;
+};
+
+struct DeserializeEmbedderFieldsCallback {
+  explicit DeserializeEmbedderFieldsCallback(
+      v8::DeserializeInternalFieldsCallback js_cb =
+          v8::DeserializeInternalFieldsCallback(),
+      v8::DeserializeContextDataCallback context_cb =
+          v8::DeserializeContextDataCallback(),
+      v8::DeserializeAPIWrapperCallback api_wrapper_cb =
+          v8::DeserializeAPIWrapperCallback())
+      : js_object_callback(js_cb),
+        context_callback(context_cb),
+        api_wrapper_callback(api_wrapper_cb) {}
+  v8::DeserializeInternalFieldsCallback js_object_callback;
+  v8::DeserializeContextDataCallback context_callback;
+  v8::DeserializeAPIWrapperCallback api_wrapper_callback;
+};
 }  // namespace internal
 }  // namespace v8
 

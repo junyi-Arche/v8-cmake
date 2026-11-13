@@ -5,11 +5,10 @@
 #include "src/compiler/wasm-load-elimination.h"
 
 #include "src/compiler/common-operator.h"
-#include "src/compiler/graph.h"
 #include "src/compiler/js-graph.h"
-#include "src/compiler/node-matchers.h"
 #include "src/compiler/node-properties.h"
 #include "src/compiler/simplified-operator.h"
+#include "src/compiler/turbofan-graph.h"
 #include "src/wasm/struct-types.h"
 #include "src/wasm/wasm-subtyping.h"
 
@@ -18,11 +17,17 @@ namespace v8::internal::compiler {
 /**** Helpers ****/
 
 namespace {
+bool TypesUnrelated(wasm::ValueType type1, wasm::ValueType type2,
+                    const wasm::WasmModule* module) {
+  return !wasm::IsSubtypeOf(type1, type2, module) &&
+         !wasm::IsSubtypeOf(type2, type1, module);
+}
+
 bool TypesUnrelated(Node* lhs, Node* rhs) {
   wasm::TypeInModule type1 = NodeProperties::GetType(lhs).AsWasm();
   wasm::TypeInModule type2 = NodeProperties::GetType(rhs).AsWasm();
-  return wasm::TypesUnrelated(type1.type, type2.type, type1.module,
-                              type2.module);
+  DCHECK_EQ(type1.module, type2.module);
+  return TypesUnrelated(type1.type, type2.type, type1.module);
 }
 
 bool IsFresh(Node* node) {
@@ -59,7 +64,7 @@ Node* ResolveAliases(Node* node) {
 constexpr int kArrayLengthFieldIndex = -1;
 constexpr int kStringPrepareForGetCodeunitIndex = -2;
 constexpr int kStringAsWtf16Index = -3;
-constexpr int kExternInternalizeIndex = -4;
+constexpr int kAnyConvertExternIndex = -4;
 }  // namespace
 
 Reduction WasmLoadElimination::UpdateState(Node* node,
@@ -79,7 +84,40 @@ Reduction WasmLoadElimination::UpdateState(Node* node,
 std::tuple<Node*, Node*> WasmLoadElimination::TruncateAndExtendOrType(
     Node* value, Node* effect, Node* control, wasm::ValueType field_type,
     bool is_signed) {
+  if (value->opcode() == IrOpcode::kDead ||
+      value->opcode() == IrOpcode::kDeadValue) {
+    return {dead(), dead()};
+  }
+
+  // The value might be untyped or have a non-Wasm type (e.g. Type::None() from
+  // DeadCodeElimination, or a JS node in case of Wasm inlined into JS). Without
+  // a concrete Wasm type we cannot verify representation compatibility.
+  if (!NodeProperties::IsTyped(value)) {
+    return {nullptr, nullptr};
+  }
+
+  Type value_type = NodeProperties::GetType(value);
+  if (!value_type.IsWasm()) {
+    return {nullptr, nullptr};
+  }
+
+  wasm::TypeInModule node_type = value_type.AsWasm();
+  if (node_type.type.is_top()) {
+    return {nullptr, nullptr};
+  }
+
+  wasm::ValueType unpacked_field_type = field_type.Unpacked();
+  if (node_type.type.is_uninhabited() ||
+      TypesUnrelated(node_type.type, unpacked_field_type, node_type.module)) {
+    // Uninhabited or unrelated types can occur as a result of unreachable code.
+    // Example: Storing a value x of type A in a struct, then casting the struct
+    // to a different struct type to then load type B from the same offset
+    // results in trying to replace the load with value x.
+    return {dead(), dead()};
+  }
+
   if (field_type == wasm::kWasmI8 || field_type == wasm::kWasmI16) {
+    DCHECK_EQ(node_type.type, wasm::kWasmI32);
     Node* ret = nullptr;
     if (is_signed) {
       int shift = 32 - 8 * field_type.value_kind_size();
@@ -93,19 +131,10 @@ std::tuple<Node*, Node*> WasmLoadElimination::TruncateAndExtendOrType(
                              jsgraph()->Int32Constant(mask));
     }
 
-    NodeProperties::SetType(ret, NodeProperties::GetType(value));
+    NodeProperties::SetType(ret, value_type);
     return {ret, effect};
   }
 
-  // The value might be untyped in case of wasm inlined into JS if the value
-  // comes from a JS node.
-  if (!NodeProperties::IsTyped(value)) {
-    return {value, effect};
-  }
-
-  wasm::TypeInModule node_type = NodeProperties::GetType(value).AsWasm();
-
-  // TODO(12166): Adapt this if cross-module inlining is allowed.
   if (!wasm::IsSubtypeOf(node_type.type, field_type, node_type.module)) {
     Type type = Type::Wasm({field_type, node_type.module}, graph()->zone());
     Node* ret =
@@ -136,8 +165,8 @@ Reduction WasmLoadElimination::Reduce(Node* node) {
       return ReduceStringPrepareForGetCodeunit(node);
     case IrOpcode::kStringAsWtf16:
       return ReduceStringAsWtf16(node);
-    case IrOpcode::kWasmExternInternalize:
-      return ReduceExternInternalize(node);
+    case IrOpcode::kWasmAnyConvertExtern:
+      return ReduceAnyConvertExtern(node);
     case IrOpcode::kEffectPhi:
       return ReduceEffectPhi(node);
     case IrOpcode::kDead:
@@ -163,11 +192,20 @@ Reduction WasmLoadElimination::ReduceWasmStructGet(Node* node) {
   const WasmFieldInfo& field_info = OpParameter<WasmFieldInfo>(node->op());
   bool is_mutable = field_info.type->mutability(field_info.field_index);
 
+  if (!NodeProperties::IsTyped(input_struct) ||
+      !NodeProperties::GetType(input_struct).IsWasm()) {
+    // The input should always be typed.  https://crbug.com/1507106 reported
+    // that we can end up with Type None here instead of a wasm type.
+    // In the worst case this only means that we miss a potential optimization,
+    // still the assumption is that all inputs into StructGet should be typed.
+    return NoChange();
+  }
   // Skip reduction if the input type is nullref. in this case, the struct get
   // will always trap.
   wasm::ValueType struct_type =
       NodeProperties::GetType(input_struct).AsWasm().type;
-  if (struct_type == wasm::kWasmNullRef) {
+  if (struct_type == wasm::kWasmNullRef ||
+      struct_type == wasm::kWasmSharedNullRef) {
     return NoChange();
   }
   // The node is in unreachable code if its input is uninhabitable (bottom or
@@ -180,9 +218,8 @@ Reduction WasmLoadElimination::ReduceWasmStructGet(Node* node) {
            .LookupField(field_info.field_index, object)
            .IsEmpty()) {
     ReplaceWithValue(node, dead(), dead(), dead());
-    NodeProperties::MergeControlToEnd(
-        graph(), common(),
-        graph()->NewNode(common()->Throw(), effect, control));
+    MergeControlToEnd(graph(), common(),
+                      graph()->NewNode(common()->Throw(), effect, control));
     node->Kill();
     return Replace(dead());
   }
@@ -200,10 +237,21 @@ Reduction WasmLoadElimination::ReduceWasmStructGet(Node* node) {
     std::tuple<Node*, Node*> replacement = TruncateAndExtendOrType(
         lookup_result.value, effect, control,
         field_info.type->field(field_info.field_index), field_info.is_signed);
-    ReplaceWithValue(node, std::get<0>(replacement), std::get<1>(replacement),
-                     control);
-    node->Kill();
-    return Replace(std::get<0>(replacement));
+    if (std::get<0>(replacement) == dead()) {
+      // If the value is dead (unreachable), this whole code path is unreachable
+      // and we can mark this control flow path as dead.
+      ReplaceWithValue(node, dead(), dead(), dead());
+      MergeControlToEnd(graph(), common(),
+                        graph()->NewNode(common()->Throw(), effect, control));
+      node->Kill();
+      return Replace(dead());
+    }
+    if (std::get<0>(replacement) != nullptr) {
+      ReplaceWithValue(node, std::get<0>(replacement), std::get<1>(replacement),
+                       control);
+      node->Kill();
+      return Replace(std::get<0>(replacement));
+    }
   }
 
   half_state = half_state->AddField(field_info.field_index, object, node);
@@ -228,11 +276,25 @@ Reduction WasmLoadElimination::ReduceWasmStructSet(Node* node) {
   AbstractState const* state = node_states_.Get(effect);
   if (state == nullptr) return NoChange();
 
+  if (!NodeProperties::IsTyped(input_struct) ||
+      !NodeProperties::GetType(input_struct).IsWasm()) {
+    // Also see the same pattern in ReduceWasmStructGet. Note that this is
+    // reached for cases where the StructSet has a value input that is
+    // DeadValue(). Above we check for `object->opcode() == IrOpcode::kDead.
+    // As an alternative that check could be extended to also check for
+    // ... || object->opcode() == IrOpcode::kDeadValue.
+    // It seems that the DeadValue may be caused by
+    // DeadCodeElimination::ReducePureNode. If that finds any input that is a
+    // Dead() node, it will replace that input with a DeadValue().
+    return NoChange();
+  }
+
   // Skip reduction if the input type is nullref. in this case, the struct get
   // will always trap.
   wasm::ValueType struct_type =
       NodeProperties::GetType(input_struct).AsWasm().type;
-  if (struct_type == wasm::kWasmNullRef) {
+  if (struct_type == wasm::kWasmNullRef ||
+      struct_type == wasm::kWasmSharedNullRef) {
     return NoChange();
   }
 
@@ -249,9 +311,8 @@ Reduction WasmLoadElimination::ReduceWasmStructSet(Node* node) {
            .LookupField(field_info.field_index, object)
            .IsEmpty()) {
     ReplaceWithValue(node, dead(), dead(), dead());
-    NodeProperties::MergeControlToEnd(
-        graph(), common(),
-        graph()->NewNode(common()->Throw(), effect, control));
+    MergeControlToEnd(graph(), common(),
+                      graph()->NewNode(common()->Throw(), effect, control));
     node->Kill();
     return Replace(dead());
   }
@@ -374,12 +435,12 @@ Reduction WasmLoadElimination::ReduceStringAsWtf16(Node* node) {
   return ReduceLoadLikeFromImmutable(node, kStringAsWtf16Index);
 }
 
-Reduction WasmLoadElimination::ReduceExternInternalize(Node* node) {
-  DCHECK_EQ(node->opcode(), IrOpcode::kWasmExternInternalize);
+Reduction WasmLoadElimination::ReduceAnyConvertExtern(Node* node) {
+  DCHECK_EQ(node->opcode(), IrOpcode::kWasmAnyConvertExtern);
   // An externref is not immutable meaning it could change. However, the values
-  // relevant for extern.internalize (null, HeapNumber, Smi) are immutable, so
+  // relevant for any.convert_extern (null, HeapNumber, Smi) are immutable, so
   // we can treat the externref as immutable.
-  return ReduceLoadLikeFromImmutable(node, kExternInternalizeIndex);
+  return ReduceLoadLikeFromImmutable(node, kAnyConvertExternIndex);
 }
 
 Reduction WasmLoadElimination::ReduceOtherNode(Node* node) {
@@ -395,11 +456,11 @@ Reduction WasmLoadElimination::ReduceOtherNode(Node* node) {
   // without {kNoWrite}), set its state to the immutable half-state of its
   // input state, otherwise to its input state.
   // Any cached StringPrepareForGetCodeUnit nodes must be killed at any point
-  // that can cause internalization of strings (i.e. that can turn sequential
-  // strings into thin strings). Currently, that can only happen in JS, so
-  // from Wasm's point of view only in calls.
-  return UpdateState(node, node->opcode() == IrOpcode::kCall &&
-                                   !node->op()->HasProperty(Operator::kNoWrite)
+  // that can cause internalization or externalization of strings (i.e. that
+  // can turn sequential strings into thin strings, or move characters
+  // off-heap). Currently, that can only happen in JS, so from Wasm's point
+  // of view only in calls.
+  return UpdateState(node, !node->op()->HasProperty(Operator::kNoWrite)
                                ? zone()->New<AbstractState>(
                                      HalfState(zone()), state->immutable_state)
                                : state);
@@ -477,8 +538,7 @@ WasmLoadElimination::AbstractState const* WasmLoadElimination::ComputeLoopState(
   DCHECK_EQ(node->opcode(), IrOpcode::kEffectPhi);
   if (state->mutable_state.IsEmpty()) return state;
   std::queue<Node*> queue;
-  AccountingAllocator allocator;
-  Zone temp_set_zone(&allocator, ZONE_NAME);
+  Zone temp_set_zone(zone()->allocator(), ZONE_NAME);
   ZoneUnorderedSet<Node*> visited(&temp_set_zone);
   visited.insert(node);
   for (int i = 1; i < node->InputCount() - 1; ++i) {
@@ -490,6 +550,12 @@ WasmLoadElimination::AbstractState const* WasmLoadElimination::ComputeLoopState(
     if (visited.insert(current).second) {
       if (current->opcode() == IrOpcode::kWasmStructSet) {
         Node* object = NodeProperties::GetValueInput(current, 0);
+        if (object->opcode() == IrOpcode::kDead ||
+            object->opcode() == IrOpcode::kDeadValue) {
+          // We are in dead code. Bail out with no mutable state.
+          return zone()->New<AbstractState>(HalfState(zone()),
+                                            state->immutable_state);
+        }
         WasmFieldInfo field_info = OpParameter<WasmFieldInfo>(current->op());
         bool is_mutable = field_info.type->mutability(field_info.field_index);
         if (is_mutable) {
@@ -500,8 +566,7 @@ WasmLoadElimination::AbstractState const* WasmLoadElimination::ComputeLoopState(
         } else {
           // TODO(manoskouk): DCHECK
         }
-      } else if (current->opcode() == IrOpcode::kCall &&
-                 !current->op()->HasProperty(Operator::kNoWrite)) {
+      } else if (!current->op()->HasProperty(Operator::kNoWrite)) {
         return zone()->New<AbstractState>(HalfState(zone()),
                                           state->immutable_state);
       }
@@ -546,7 +611,7 @@ MachineOperatorBuilder* WasmLoadElimination::machine() const {
   return jsgraph()->machine();
 }
 
-Graph* WasmLoadElimination::graph() const { return jsgraph()->graph(); }
+TFGraph* WasmLoadElimination::graph() const { return jsgraph()->graph(); }
 
 Isolate* WasmLoadElimination::isolate() const { return jsgraph()->isolate(); }
 

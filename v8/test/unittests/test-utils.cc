@@ -4,13 +4,18 @@
 
 #include "test/unittests/test-utils.h"
 
+#include <optional>
+
 #include "include/libplatform/libplatform.h"
+#include "include/v8-initialization.h"
 #include "include/v8-isolate.h"
+#include "include/v8-locker.h"
 #include "src/api/api-inl.h"
 #include "src/base/platform/time.h"
 #include "src/execution/isolate.h"
 #include "src/flags/flags.h"
 #include "src/heap/cppgc-js/cpp-heap.h"
+#include "src/heap/local-heap-inl.h"
 #include "src/init/v8.h"
 #include "src/objects/objects-inl.h"
 #include "test/unittests/heap/heap-utils.h"
@@ -24,13 +29,19 @@ namespace {
 CounterMap* kCurrentCounterMap = nullptr;
 }  // namespace
 
-IsolateWrapper::IsolateWrapper(CountersMode counters_mode)
+std::unique_ptr<CppHeap> IsolateWrapper::cpp_heap_;
+
+IsolateWrapper::IsolateWrapper(CountersMode counters_mode,
+                               bool use_statically_set_cpp_heap)
     : array_buffer_allocator_(
           v8::ArrayBuffer::Allocator::NewDefaultAllocator()) {
   CHECK_NULL(kCurrentCounterMap);
 
   v8::Isolate::CreateParams create_params;
   create_params.array_buffer_allocator = array_buffer_allocator_.get();
+  if (use_statically_set_cpp_heap) {
+    create_params.cpp_heap = cpp_heap_.release();
+  }
 
   if (counters_mode == kEnableCounters) {
     counter_map_ = std::make_unique<CounterMap>();
@@ -55,9 +66,14 @@ IsolateWrapper::IsolateWrapper(CountersMode counters_mode)
 IsolateWrapper::~IsolateWrapper() {
   v8::Platform* platform = internal::V8::GetCurrentPlatform();
   CHECK_NOT_NULL(platform);
+  std::optional<v8::Locker> locker;
+  if (i_isolate()->was_locker_ever_used()) {
+    locker.emplace(isolate_);
+  }
   isolate_->Enter();
   while (platform::PumpMessageLoop(platform, isolate())) continue;
   isolate_->Exit();
+  locker.reset();
   isolate_->Dispose();
   if (counter_map_) {
     CHECK_EQ(kCurrentCounterMap, counter_map_.get());
@@ -67,25 +83,81 @@ IsolateWrapper::~IsolateWrapper() {
   }
 }
 
-namespace internal {
-
-SaveFlags::SaveFlags() {
-  // For each flag, save the current flag value.
-#define FLAG_MODE_APPLY(ftype, ctype, nam, def, cmt) \
-  SAVED_##nam = v8_flags.nam.value();
-#include "src/flags/flag-definitions.h"
-#undef FLAG_MODE_APPLY
+// static
+void StreamerThread::StartThreadForTaskAndJoin(
+    v8::ScriptCompiler::ScriptStreamingTask* task, i::Isolate* i_isolate) {
+  StreamerThread thread(task);
+  CHECK(thread.Start());
+  i_isolate->main_thread_local_heap()->ExecuteWhileParked(
+      [&thread]() { thread.Join(); });
 }
 
-SaveFlags::~SaveFlags() {
-  // For each flag, set back the old flag value if it changed (don't write the
-  // flag if it didn't change, to keep TSAN happy).
-#define FLAG_MODE_APPLY(ftype, ctype, nam, def, cmt) \
-  if (SAVED_##nam != v8_flags.nam.value()) {         \
-    v8_flags.nam = SAVED_##nam;                      \
+namespace internal {
+
+namespace {
+CrashKeyStore* g_current_crash_key_store = nullptr;
+}  // namespace
+
+CrashKeyStore::CrashKeyStore() {
+  CHECK_NULL(g_current_crash_key_store);
+  g_current_crash_key_store = this;
+  v8::V8::SetCrashKeyCallbacks(&CrashKeyStore::AllocateCallback,
+                               &CrashKeyStore::SetCallback);
+}
+
+CrashKeyStore::~CrashKeyStore() {
+  CHECK_EQ(this, g_current_crash_key_store);
+  v8::V8::SetCrashKeyCallbacks(nullptr, nullptr);
+  g_current_crash_key_store = nullptr;
+}
+
+// static
+CrashKey CrashKeyStore::AllocateCallback(const char key[], CrashKeySize size) {
+  CHECK_NOT_NULL(g_current_crash_key_store);
+  return g_current_crash_key_store->AllocateKey(key, size);
+}
+
+// static
+void CrashKeyStore::SetCallback(CrashKey crash_key, std::string_view value) {
+  CHECK_NOT_NULL(g_current_crash_key_store);
+  g_current_crash_key_store->SetValue(crash_key, value);
+}
+
+std::unordered_set<std::string> CrashKeyStore::KeyNames() const {
+  base::MutexGuard guard(&mutex_);
+  std::unordered_set<std::string> names;
+  names.reserve(entries_.size());
+  for (const auto& [name, unused] : entries_) {
+    static_cast<void>(unused);
+    names.insert(name);
   }
-#include "src/flags/flag-definitions.h"  // NOLINT
-#undef FLAG_MODE_APPLY
+  return names;
+}
+
+CrashKey CrashKeyStore::AllocateKey(const char key[], CrashKeySize size) {
+  base::MutexGuard guard(&mutex_);
+  auto [it, inserted] = entries_.emplace(key, nullptr);
+  if (inserted || it->second == nullptr) {
+    it->second = std::make_unique<Entry>();
+  }
+  Entry* entry_ptr = it->second.get();
+  entry_ptr->size = size;
+  entry_ptr->value.clear();
+  return static_cast<CrashKey>(entry_ptr);
+}
+
+void CrashKeyStore::SetValue(CrashKey crash_key, std::string_view value) {
+  base::MutexGuard guard(&mutex_);
+  Entry* entry = static_cast<Entry*>(crash_key);
+  bool found = false;
+  for (const auto& [name, entry_holder] : entries_) {
+    if (entry_holder.get() == entry) {
+      found = true;
+      break;
+    }
+  }
+  CHECK(found);
+  entry->value.assign(value.begin(), value.end());
 }
 
 }  // namespace internal

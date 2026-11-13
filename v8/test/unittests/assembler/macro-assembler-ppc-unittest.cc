@@ -6,6 +6,7 @@
 #include "src/codegen/ppc/assembler-ppc-inl.h"
 #include "src/execution/simulator.h"
 #include "test/common/assembler-tester.h"
+#include "test/common/flag-utils.h"
 #include "test/unittests/test-utils.h"
 #include "testing/gtest-support.h"
 
@@ -20,9 +21,15 @@ namespace internal {
 
 class MacroAssemblerTest : public TestWithIsolate {};
 
+const char* ErrorMessage(const char* msg) {
+  // We only print the abort reason if debug code is enabled. Otherwise we just
+  // stop execution. Return an empty string in that case.
+  return v8_flags.debug_code ? msg : "";
+}
+
 TEST_F(MacroAssemblerTest, TestHardAbort) {
   auto buffer = AllocateAssemblerBuffer();
-  MacroAssembler masm(isolate(), AssemblerOptions{}, CodeObjectRequired::kNo,
+  MacroAssembler masm(isolate(), AssemblerOptions{}, CodeObjectRequired{false},
                       buffer->CreateView());
   __ set_root_array_available(false);
   __ set_abort_hard(true);
@@ -35,12 +42,13 @@ TEST_F(MacroAssemblerTest, TestHardAbort) {
   // We need an isolate here to execute in the simulator.
   auto f = GeneratedCode<void>::FromBuffer(isolate(), buffer->start());
 
-  ASSERT_DEATH_IF_SUPPORTED({ f.Call(); }, "abort: no reason");
+  ASSERT_DEATH_IF_SUPPORTED(
+      { f.Call(); }, v8_flags.debug_code ? "abort: no reason" : "");
 }
 
 TEST_F(MacroAssemblerTest, TestCheck) {
   auto buffer = AllocateAssemblerBuffer();
-  MacroAssembler masm(isolate(), AssemblerOptions{}, CodeObjectRequired::kNo,
+  MacroAssembler masm(isolate(), AssemblerOptions{}, CodeObjectRequired{false},
                       buffer->CreateView());
   __ set_root_array_available(false);
   __ set_abort_hard(true);
@@ -59,8 +67,44 @@ TEST_F(MacroAssemblerTest, TestCheck) {
 
   f.Call(0);
   f.Call(18);
-  ASSERT_DEATH_IF_SUPPORTED({ f.Call(17); }, "abort: no reason");
+  ASSERT_DEATH_IF_SUPPORTED(
+      { f.Call(17); }, v8_flags.debug_code ? "abort: no reason" : "");
 }
+
+#ifdef V8_ENABLE_DEBUG_CODE
+TEST_F(MacroAssemblerTest, TestAssertZeroExtended) {
+  FLAG_SCOPE(debug_code);
+
+  auto buffer = AllocateAssemblerBuffer();
+  MacroAssembler masm(isolate(), AssemblerOptions{}, CodeObjectRequired{false},
+                      buffer->CreateView());
+  __ set_root_array_available(false);
+  __ set_abort_hard(true);
+
+  __ AssertZeroExtended(r3);  // 1st parameter is in {r3}.
+  __ Ret();
+
+  CodeDesc desc;
+  masm.GetCode(isolate(), &desc);
+  buffer->MakeExecutable();
+  // We need an isolate here to execute in the simulator.
+  auto f =
+      GeneratedCode<void, uint64_t>::FromBuffer(isolate(), buffer->start());
+
+  f.Call(0);
+  f.Call(42);
+  f.Call(0xFFFFFFFFULL);
+  ASSERT_DEATH_IF_SUPPORTED(
+      { f.Call(0x100000000ULL); },
+      ErrorMessage("abort: 32 bit value in register is not zero-extended"));
+  ASSERT_DEATH_IF_SUPPORTED(
+      { f.Call(0xFFFFFFFFFFFFFFFFULL); },
+      ErrorMessage("abort: 32 bit value in register is not zero-extended"));
+  ASSERT_DEATH_IF_SUPPORTED(
+      { f.Call(0x8000000000000000ULL); },
+      ErrorMessage("abort: 32 bit value in register is not zero-extended"));
+}
+#endif  // V8_ENABLE_DEBUG_CODE
 
 TEST_F(MacroAssemblerTest, ReverseBitsU64) {
   struct {
@@ -79,13 +123,11 @@ TEST_F(MacroAssemblerTest, ReverseBitsU64) {
       {0xe060a020c04080ff, 0xff01020304050607},
   };
   auto buffer = AllocateAssemblerBuffer();
-  MacroAssembler masm(isolate(), AssemblerOptions{}, CodeObjectRequired::kNo,
+  MacroAssembler masm(isolate(), AssemblerOptions{}, CodeObjectRequired{false},
                       buffer->CreateView());
   __ set_root_array_available(false);
   __ set_abort_hard(true);
-  __ Push(r4, r5);
-  __ ReverseBitsU64(r3, r3, r4, r5);
-  __ Pop(r4, r5);
+  __ ReverseBitsU64(r3, r3);
   __ Ret();
   CodeDesc desc;
   masm.GetCode(isolate(), &desc);
@@ -107,13 +149,11 @@ TEST_F(MacroAssemblerTest, ReverseBitsU32) {
       {0x22334455, 0xaa22cc44}, {0xaa22cc44, 0x22334455},
   };
   auto buffer = AllocateAssemblerBuffer();
-  MacroAssembler masm(isolate(), AssemblerOptions{}, CodeObjectRequired::kNo,
+  MacroAssembler masm(isolate(), AssemblerOptions{}, CodeObjectRequired{false},
                       buffer->CreateView());
   __ set_root_array_available(false);
   __ set_abort_hard(true);
-  __ Push(r4, r5);
-  __ ReverseBitsU32(r3, r3, r4, r5);
-  __ Pop(r4, r5);
+  __ ReverseBitsU32(r3, r3);
   __ Ret();
   CodeDesc desc;
   masm.GetCode(isolate(), &desc);

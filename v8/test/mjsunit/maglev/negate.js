@@ -15,7 +15,7 @@ function test_negate_int32(value, expected) {
   negate(1, -1);
   %OptimizeMaglevOnNextCall(negate);
   assertEquals(expected, negate(value));
-  assertTrue(isMaglevved(negate));
+  assertMaglevved(negate);
 
   %DeoptimizeFunction(negate);
   assertEquals(expected, negate(value));
@@ -33,7 +33,7 @@ function test_negate_float(value, expected) {
   negate(1.1, -1.1);
   %OptimizeMaglevOnNextCall(negate);
   assertEquals(expected, negate(value));
-  assertTrue(isMaglevved(negate));
+  assertMaglevved(negate);
 
   %DeoptimizeFunction(negate);
   assertEquals(expected, negate(value));
@@ -56,12 +56,24 @@ function test_negate_int32_expect_deopt(value, expected) {
   negate(12, -12);
   %OptimizeMaglevOnNextCall(negate);
   assertEquals(expected, negate(value));
-  assertFalse(isMaglevved(negate));
+  assertNotMaglevved(negate);
 }
 
+// -0 is not an int32
 test_negate_int32_expect_deopt(0, -0);
 test_negate_int32_expect_deopt(-0, 0);
+
+// -int32_min doesn't fit inside an int32
+assertTrue(-int32_min > int32_max)
 test_negate_int32_expect_deopt(int32_min, -int32_min);
 test_negate_int32_expect_deopt(-int32_min, int32_min);
-test_negate_int32_expect_deopt(int32_max, -int32_max);
-test_negate_int32_expect_deopt(-int32_max, int32_max);
+
+// -int32_max does fit inside an int32, but might not fit inside a Smi
+assertTrue(-int32_max >= int32_min)
+if (%IsSmi(-int32_max)) {
+  test_negate_int32(int32_max, -int32_max);
+  test_negate_int32(-int32_max, int32_max);
+} else {
+  test_negate_int32_expect_deopt(int32_max, -int32_max);
+  test_negate_int32_expect_deopt(-int32_max, int32_max);
+}

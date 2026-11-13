@@ -30,14 +30,12 @@ import argparse
 import datetime
 from distutils.version import LooseVersion
 import glob
-import imp
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-import textwrap
 import time
 import urllib
 
@@ -131,7 +129,7 @@ def NormalizeVersionTags(version_tags):
   # Remove tags/ prefix because of packed refs.
   for current_tag in version_tags:
     version_tag = SanitizeVersionTag(current_tag)
-    if version_tag != None:
+    if version_tag is not None:
       normalized_version_tags.append(version_tag)
 
   return normalized_version_tags
@@ -552,7 +550,15 @@ class Step(GitRecipesMixin):
     all_tags = self.vc.GetTags()
     only_version_tags = NormalizeVersionTags(all_tags)
 
-    version = sorted(only_version_tags,
+    def patched_dev_version(tag):
+      """True if this tag represents a patched dev or mini branch."""
+      parts = tag.split('.')
+      return len(parts) >= 3 and int(parts[2]) > 999
+
+    filtered_version_tags = [
+      tag for tag in only_version_tags if not patched_dev_version(tag)]
+
+    version = sorted(filtered_version_tags,
                      key=LooseVersion, reverse=True)[0]
     self["latest_version"] = version
     return version
@@ -618,16 +624,16 @@ class Step(GitRecipesMixin):
     output = ""
     for line in FileToText(version_file).splitlines():
       if line.startswith("#define V8_MAJOR_VERSION"):
-        line = re.sub("\d+$", self[prefix + "major"], line)
+        line = re.sub(r"\d+$", self[prefix + "major"], line)
       elif line.startswith("#define V8_MINOR_VERSION"):
-        line = re.sub("\d+$", self[prefix + "minor"], line)
+        line = re.sub(r"\d+$", self[prefix + "minor"], line)
       elif line.startswith("#define V8_BUILD_NUMBER"):
-        line = re.sub("\d+$", self[prefix + "build"], line)
+        line = re.sub(r"\d+$", self[prefix + "build"], line)
       elif line.startswith("#define V8_PATCH_LEVEL"):
-        line = re.sub("\d+$", self[prefix + "patch"], line)
+        line = re.sub(r"\d+$", self[prefix + "patch"], line)
       elif (self[prefix + "candidate"] and
             line.startswith("#define V8_IS_CANDIDATE_VERSION")):
-        line = re.sub("\d+$", self[prefix + "candidate"], line)
+        line = re.sub(r"\d+$", self[prefix + "candidate"], line)
       output += "%s\n" % line
     TextToFile(output, version_file)
 
@@ -645,7 +651,9 @@ class BootstrapStep(Step):
     if not os.path.exists(self._options.work_dir):
       os.makedirs(self._options.work_dir)
     if not os.path.exists(self.default_cwd):
-      self.Command("fetch", "v8", cwd=self._options.work_dir)
+      self.Git("cl creds-check", pipe=False, cwd=self._options.work_dir)
+      self.Git("clone https://chromium.googlesource.com/v8/v8",
+               cwd=self._options.work_dir)
 
 
 class UploadStep(Step):
@@ -657,12 +665,7 @@ class UploadStep(Step):
       print("Using account %s for review." % self._options.reviewer)
       reviewer = self._options.reviewer
 
-    tbr_reviewer = None
-    if self._options.tbr_reviewer:
-      print("Using account %s for TBR review." % self._options.tbr_reviewer)
-      tbr_reviewer = self._options.tbr_reviewer
-
-    if not reviewer and not tbr_reviewer:
+    if not reviewer:
       print(
         "Please enter the email address of a V8 reviewer for your patch: ",
         end=' ')
@@ -670,8 +673,7 @@ class UploadStep(Step):
       reviewer = self.ReadLine()
 
     self.GitUpload(reviewer, self._options.force_upload,
-                   bypass_hooks=self._options.bypass_upload_hooks,
-                   tbr_reviewer=tbr_reviewer)
+                   bypass_hooks=self._options.bypass_upload_hooks)
 
 
 def MakeStep(step_class=Step, number=0, state=None, config=None,
@@ -728,8 +730,6 @@ class ScriptsBase(object):
                         help="File to write results summary to.")
     parser.add_argument("-r", "--reviewer", default="",
                         help="The account name to be used for reviews.")
-    parser.add_argument("--tbr-reviewer", "--tbr", default="",
-                        help="The account name to be used for TBR reviews.")
     parser.add_argument("-s", "--step",
         help="Specify the step where to start work. Default: 0.",
         default=0, type=int)

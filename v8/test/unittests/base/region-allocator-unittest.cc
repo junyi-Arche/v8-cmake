@@ -3,8 +3,10 @@
 // found in the LICENSE file.
 
 #include "src/base/region-allocator.h"
-#include "test/unittests/test-utils.h"
 
+#include <limits>
+
+#include "test/unittests/test-utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
 namespace v8 {
@@ -107,7 +109,7 @@ TEST(RegionAllocatorTest, AllocateRegionRandom) {
   const Address kBegin = static_cast<Address>(153 * MB);
   const Address kEnd = kBegin + kSize;
 
-  base::RandomNumberGenerator rng(::testing::FLAGS_gtest_random_seed);
+  base::RandomNumberGenerator rng(GTEST_FLAG_GET(random_seed));
   RegionAllocator ra(kBegin, kSize, kPageSize);
 
   std::set<Address> allocated_pages;
@@ -208,7 +210,7 @@ TEST(RegionAllocatorTest, MergeLeftToRightCoalecsingRegions) {
 }
 
 TEST(RegionAllocatorTest, MergeRightToLeftCoalecsingRegions) {
-  base::RandomNumberGenerator rng(::testing::FLAGS_gtest_random_seed);
+  base::RandomNumberGenerator rng(GTEST_FLAG_GET(random_seed));
   const size_t kPageSize = 4 * KB;
   const size_t kPageCountLog = 10;
   const size_t kPageCount = (size_t{1} << kPageCountLog);
@@ -372,6 +374,127 @@ TEST(RegionAllocatorTest, TrimRegion) {
   CHECK_EQ(ra.AllocateRegion(kSize), kBegin);
 }
 
+TEST(RegionAllocatorTest, FreeRegionReportsMergedFreeRegion) {
+  const size_t kPageSize = 4 * KB;
+  const size_t kPageCount = 8;
+  const size_t kSize = kPageSize * kPageCount;
+  const Address kBegin = static_cast<Address>(kPageSize * 153);
+
+  RegionAllocator ra(kBegin, kSize, kPageSize);
+
+  // Allocate the whole region page by page.
+  for (size_t i = 0; i < kPageCount; i++) {
+    CHECK_EQ(ra.AllocateRegion(kPageSize), kBegin + kPageSize * i);
+  }
+
+  // A freed page with allocated neighbours is a free region of its own.
+  AddressRegion free_region;
+  CHECK_EQ(ra.FreeRegion(kBegin + 3 * kPageSize, &free_region), kPageSize);
+  CHECK_EQ(free_region, AddressRegion(kBegin + 3 * kPageSize, kPageSize));
+
+  // Freeing its neighbours merges them into it, on either side.
+  CHECK_EQ(ra.FreeRegion(kBegin + 4 * kPageSize, &free_region), kPageSize);
+  CHECK_EQ(free_region, AddressRegion(kBegin + 3 * kPageSize, 2 * kPageSize));
+  CHECK_EQ(ra.FreeRegion(kBegin + 2 * kPageSize, &free_region), kPageSize);
+  CHECK_EQ(free_region, AddressRegion(kBegin + 2 * kPageSize, 3 * kPageSize));
+
+  // Freeing the page between two free regions merges all three.
+  CHECK_EQ(ra.FreeRegion(kBegin + 6 * kPageSize, &free_region), kPageSize);
+  CHECK_EQ(free_region, AddressRegion(kBegin + 6 * kPageSize, kPageSize));
+  CHECK_EQ(ra.FreeRegion(kBegin + 5 * kPageSize, &free_region), kPageSize);
+  CHECK_EQ(free_region, AddressRegion(kBegin + 2 * kPageSize, 5 * kPageSize));
+
+  // Nothing to free: the out parameter is left alone.
+  CHECK_EQ(ra.FreeRegion(kBegin + 5 * kPageSize, &free_region), 0);
+  CHECK_EQ(free_region, AddressRegion(kBegin + 2 * kPageSize, 5 * kPageSize));
+}
+
+TEST(RegionAllocatorTest, TryGrowRegion) {
+  const size_t kPageSize = 4 * KB;
+  const size_t kPageCount = 60;
+  const size_t kSize = kPageSize * kPageCount;
+  const Address kBegin = static_cast<Address>(kPageSize * 153);
+
+  RegionAllocator ra(kBegin, kSize, kPageSize);
+
+  // Allocate the main region in the middle of the reservation initially.
+  Address address = kBegin + 10 * kPageSize;
+  size_t size = 10 * kPageSize;
+  CHECK(ra.AllocateRegionAt(address, size));
+
+  // Grow the allocation to 1 page before the end.
+  CHECK(ra.TryGrowRegion(address, 49 * kPageSize));
+  CHECK_EQ(ra.free_size(), 11 * kPageSize);
+
+  // Allocate in the free regions before and after the main allocation.
+  CHECK_EQ(ra.AllocateRegion(10 * kPageSize), kBegin);
+  CHECK_EQ(ra.AllocateRegion(kPageSize), kBegin + 59 * kPageSize);
+
+  // Free the regions around the main region again.
+  CHECK_EQ(ra.FreeRegion(kBegin), 10 * kPageSize);
+  CHECK_EQ(ra.free_size(), 10 * kPageSize);
+
+  CHECK_EQ(ra.FreeRegion(kBegin + 59 * kPageSize), kPageSize);
+  CHECK_EQ(ra.free_size(), 11 * kPageSize);
+
+  // Try to grow the region on purpose beyond the reservation.
+  CHECK(!ra.TryGrowRegion(address, 51 * kPageSize));
+  CHECK_EQ(ra.FreeRegion(address), 49 * kPageSize);
+  CHECK_EQ(ra.free_size(), 60 * kPageSize);
+}
+
+TEST(RegionAllocatorTest, TryGrowRegionLimitedByOtherRegion) {
+  const size_t kPageSize = 4 * KB;
+  const size_t kPageCount = 60;
+  const size_t kSize = kPageSize * kPageCount;
+  const Address kBegin = static_cast<Address>(kPageSize * 153);
+
+  RegionAllocator ra(kBegin, kSize, kPageSize);
+
+  // Allocate the main region in the middle of the reservation initially.
+  Address address = kBegin + 10 * kPageSize;
+  size_t size = 10 * kPageSize;
+  CHECK(ra.AllocateRegionAt(address, size));
+
+  // Place a barrier to growth, such that the previous region cannot be made
+  // larger than 30 pages.
+  CHECK(ra.AllocateRegionAt(kBegin + 40 * kPageSize, 10 * kPageSize));
+
+  // Growing to 31 pages should fail.
+  CHECK(!ra.TryGrowRegion(address, 31 * kPageSize));
+
+  // Grow region to 30 pages.
+  CHECK(ra.TryGrowRegion(address, 30 * kPageSize));
+  CHECK_EQ(ra.FreeRegion(address), 30 * kPageSize);
+  CHECK_EQ(ra.free_size(), 50 * kPageSize);
+}
+
+TEST(RegionAllocatorTest, AllocatRegionWithGrowingHint) {
+  const size_t kPageSize = 4 * KB;
+  const size_t kPageCount = 80;
+  const size_t kSize = kPageSize * kPageCount;
+  const Address kBegin = static_cast<Address>(kPageSize * 153);
+
+  RegionAllocator ra(kBegin, kSize, kPageSize);
+
+  // Perform some allocations to split address space.
+  // Address space: 10 free | 10 allocated | 20 free | 10 allocated | 30 free
+  CHECK(ra.AllocateRegionAt(kBegin + 10 * kPageSize, 10 * kPageSize));
+  CHECK(ra.AllocateRegionAt(kBegin + 40 * kPageSize, 10 * kPageSize));
+
+  // Regular allocations will happen in the first large enough region.
+  CHECK_EQ(ra.AllocateRegion(10 * kPageSize), kBegin);
+  CHECK_EQ(ra.FreeRegion(kBegin), 10 * kPageSize);
+
+  // Now perform some allocation with growing hint to allocate in the largest
+  // free region:
+  CHECK_EQ(ra.AllocateRegion(10 * kPageSize,
+                             RegionAllocator::AllocationStrategy::kLargestFit),
+           kBegin + 50 * kPageSize);
+  CHECK(ra.TryGrowRegion(kBegin + 50 * kPageSize, 30 * kPageSize));
+  CHECK(!ra.TryGrowRegion(kBegin + 50 * kPageSize, 31 * kPageSize));
+}
+
 TEST(RegionAllocatorTest, AllocateExcluded) {
   const size_t kPageSize = 4 * KB;
   const size_t kPageCount = 64;
@@ -394,6 +517,91 @@ TEST(RegionAllocatorTest, AllocateExcluded) {
   // It's not possible to free or trim an excluded region.
   CHECK_EQ(ra.FreeRegion(address), 0);
   CHECK_EQ(ra.TrimRegion(address, kPageSize), 0);
+}
+
+TEST(RegionAllocatorTest, GetLargestFreeRegionSize) {
+  const size_t kPageSize = 4 * KB;
+  const size_t kPageCount = 10;
+  const size_t kSize = kPageSize * kPageCount;
+  const Address kBegin = static_cast<Address>(0);
+
+  RegionAllocator ra(kBegin, kSize, kPageSize);
+  CHECK_EQ(ra.GetLargestFreeRegionSize(), 10 * kPageSize);
+
+  ra.AllocateRegionAt(8 * kPageSize, kPageSize);
+  CHECK_EQ(ra.GetLargestFreeRegionSize(), 8 * kPageSize);
+
+  ra.AllocateRegionAt(1 * kPageSize, kPageSize);
+  CHECK_EQ(ra.GetLargestFreeRegionSize(), 6 * kPageSize);
+
+  ra.AllocateRegionAt(5 * kPageSize, kPageSize);
+  CHECK_EQ(ra.GetLargestFreeRegionSize(), 3 * kPageSize);
+
+  ra.FreeRegion(5 * kPageSize);
+  CHECK_EQ(ra.GetLargestFreeRegionSize(), 6 * kPageSize);
+}
+
+TEST(RegionAllocatorTest, InvalidAllocationSizes) {
+  const size_t kPageSize = 4 * KB;
+  const size_t kPageCount = 16;
+  const size_t kSize = kPageSize * kPageCount;
+  const Address kBegin = static_cast<Address>(kPageSize * 153);
+
+  RegionAllocator ra(kBegin, kSize, kPageSize);
+  base::RandomNumberGenerator rng(12345);
+
+  const size_t invalid_sizes[] = {
+      0, kSize + kPageSize, std::numeric_limits<size_t>::max(),
+      static_cast<size_t>(-static_cast<intptr_t>(kPageSize))};
+
+  for (size_t invalid_size : invalid_sizes) {
+    CHECK_EQ(ra.AllocateRegion(invalid_size),
+             RegionAllocator::kAllocationFailure);
+    CHECK_EQ(ra.AllocateRegion(&rng, invalid_size),
+             RegionAllocator::kAllocationFailure);
+    CHECK(!ra.AllocateRegionAt(kBegin, invalid_size));
+    CHECK_EQ(ra.AllocateAlignedRegion(invalid_size, kPageSize),
+             RegionAllocator::kAllocationFailure);
+    CHECK_EQ(ra.AllocateRegion(kBegin, invalid_size, kPageSize),
+             RegionAllocator::kAllocationFailure);
+  }
+
+  // The allocator should remain fully functional and uncorrupted.
+  CHECK_EQ(ra.free_size(), kSize);
+  Address addr = ra.AllocateRegion(kPageSize);
+  CHECK_NE(addr, RegionAllocator::kAllocationFailure);
+  CHECK_EQ(ra.FreeRegion(addr), kPageSize);
+}
+
+TEST(RegionAllocatorTest, InvalidTrimAndGrow) {
+  const size_t kPageSize = 4 * KB;
+  const size_t kPageCount = 16;
+  const size_t kSize = kPageSize * kPageCount;
+  const Address kBegin = static_cast<Address>(kPageSize * 153);
+
+  RegionAllocator ra(kBegin, kSize, kPageSize);
+
+  Address addr = ra.AllocateRegion(4 * kPageSize);
+  CHECK_NE(addr, RegionAllocator::kAllocationFailure);
+
+  // Trimming to current or larger size should return 0.
+  CHECK_EQ(ra.TrimRegion(addr, 4 * kPageSize), 0);
+  CHECK_EQ(ra.TrimRegion(addr, 5 * kPageSize), 0);
+  CHECK_EQ(ra.TrimRegion(addr, kSize + kPageSize), 0);
+  CHECK_EQ(ra.TrimRegion(addr, std::numeric_limits<size_t>::max()), 0);
+
+  // Growing to current, smaller, or out-of-bounds size should return false.
+  CHECK(!ra.TryGrowRegion(addr, 0));
+  CHECK(!ra.TryGrowRegion(addr, 2 * kPageSize));
+  CHECK(!ra.TryGrowRegion(addr, 4 * kPageSize));
+  CHECK(!ra.TryGrowRegion(addr, kSize + kPageSize));
+  CHECK(!ra.TryGrowRegion(addr, std::numeric_limits<size_t>::max()));
+
+  // Valid trim and grow should still work.
+  CHECK_EQ(ra.TrimRegion(addr, 2 * kPageSize), 2 * kPageSize);
+  CHECK(ra.TryGrowRegion(addr, 3 * kPageSize));
+  CHECK_EQ(ra.FreeRegion(addr), 3 * kPageSize);
+  CHECK_EQ(ra.free_size(), kSize);
 }
 
 }  // namespace base

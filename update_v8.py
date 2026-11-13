@@ -5,8 +5,10 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tarfile
 
 DATABASE = 'update_v8.json'
 
@@ -126,15 +128,52 @@ def update_all():
       update_one(dep)
 
   arg = '-n' if dry_run else '-q'
-  git('rm', arg, '-r', 'v8')
+  # -f is needed when the previous update left staged changes in the index;
+  # `git rm -r` otherwise refuses to remove the vendored tree.
+  git('rm', arg, '-f', '-r', 'v8')
 
   for dep in deps:
-    cmd = '(cd {} && {} archive --format=tar --prefix=v8/{}/ {}) | {} x'.format(
-        repodir(dep), options.git, dep['path'], dep['commit'], options.tar)
+    archive_cmd = [
+        options.git, 'archive', '--format=tar',
+        '--prefix=v8/{}/'.format(dep['path']), dep['commit']]
     if dry_run:
-      print(cmd)
+      print('(cd {} && {}) | {} x'.format(
+          repodir(dep), ' '.join(archive_cmd), options.tar))
     else:
-      subprocess.check_call([cmd], shell=True)
+      # Extract the archive in Python rather than through a shell pipeline.
+      # cmd.exe cannot parse "(cd ... && ...) | tar x", and Windows tar
+      # cannot create git symlinks (ittapi has four) without extra privileges.
+      # Writing a symlink's target as a plain text file matches what git does
+      # on Windows with core.symlinks=false, so the tree stays byte-identical.
+      source = subprocess.Popen(
+          archive_cmd, cwd=repodir(dep), stdout=subprocess.PIPE)
+      try:
+        with tarfile.open(fileobj=source.stdout, mode='r|') as tf:
+          for member in tf:
+            parts = [p for p in member.name.replace('\\', '/').split('/')
+                     if p not in ('', '.')]
+            if not parts or '..' in parts:
+              continue
+            target = os.path.join(*parts)
+            parent = os.path.dirname(target)
+            if parent:
+              os.makedirs(parent, exist_ok=True)
+            if member.isdir():
+              os.makedirs(target, exist_ok=True)
+            elif member.issym() or member.islnk():
+              with open(target, 'wb') as fp:
+                fp.write(member.linkname.encode('utf-8'))
+            elif member.isfile():
+              src = tf.extractfile(member)
+              if src is None:
+                continue
+              with src, open(target, 'wb') as fp:
+                shutil.copyfileobj(src, fp)
+      finally:
+        source.stdout.close()
+        rc = source.wait()
+      if rc:
+        raise Exception('git archive failed for {}: {}'.format(dep['path'], rc))
 
   for filename in sorted(os.listdir('patches')):
     if filename.endswith('.patch'):

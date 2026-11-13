@@ -35,6 +35,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#include "include/cppgc/macros.h"
 #include "include/v8-exception.h"
 #include "include/v8-local-handle.h"
 #include "include/v8-persistent-handle.h"
@@ -51,8 +52,8 @@ class RemoteObjectId;
 class V8InspectorImpl;
 class V8InspectorSessionImpl;
 class ValueMirror;
+struct CustomPreviewBudget;
 
-using protocol::Maybe;
 using protocol::Response;
 
 class EvaluateCallback {
@@ -60,7 +61,7 @@ class EvaluateCallback {
   static void sendSuccess(
       std::weak_ptr<EvaluateCallback> callback, InjectedScript* injectedScript,
       std::unique_ptr<protocol::Runtime::RemoteObject> result,
-      protocol::Maybe<protocol::Runtime::ExceptionDetails> exceptionDetails);
+      std::unique_ptr<protocol::Runtime::ExceptionDetails> exceptionDetails);
   static void sendFailure(std::weak_ptr<EvaluateCallback> callback,
                           InjectedScript* injectedScript,
                           const protocol::DispatchResponse& response);
@@ -70,7 +71,7 @@ class EvaluateCallback {
  private:
   virtual void sendSuccess(
       std::unique_ptr<protocol::Runtime::RemoteObject> result,
-      protocol::Maybe<protocol::Runtime::ExceptionDetails>
+      std::unique_ptr<protocol::Runtime::ExceptionDetails>
           exceptionDetails) = 0;
   virtual void sendFailure(const protocol::DispatchResponse& response) = 0;
 };
@@ -83,6 +84,7 @@ class InjectedScript final {
   InjectedScript& operator=(const InjectedScript&) = delete;
 
   InspectedContext* context() const { return m_context; }
+  int sessionId() const { return m_sessionId; }
 
   Response getProperties(
       v8::Local<v8::Object>, const String16& groupName, bool ownProperties,
@@ -90,7 +92,7 @@ class InjectedScript final {
       const WrapOptions& wrapOptions,
       std::unique_ptr<protocol::Array<protocol::Runtime::PropertyDescriptor>>*
           result,
-      Maybe<protocol::Runtime::ExceptionDetails>*);
+      std::unique_ptr<protocol::Runtime::ExceptionDetails>*);
 
   Response getInternalAndPrivateProperties(
       v8::Local<v8::Value>, const String16& groupName,
@@ -110,12 +112,13 @@ class InjectedScript final {
   Response wrapObject(v8::Local<v8::Value>, const String16& groupName,
                       const WrapOptions& wrapOptions,
                       v8::MaybeLocal<v8::Value> customPreviewConfig,
-                      int maxCustomPreviewDepth,
+                      int maxCustomPreviewDepth, CustomPreviewBudget* budget,
                       std::unique_ptr<protocol::Runtime::RemoteObject>* result);
   Response wrapObjectMirror(
       const ValueMirror& mirror, const String16& groupName,
       const WrapOptions& wrapOptions,
       v8::MaybeLocal<v8::Value> customPreviewConfig, int maxCustomPreviewDepth,
+      CustomPreviewBudget* budget,
       std::unique_ptr<protocol::Runtime::RemoteObject>* result);
   std::unique_ptr<protocol::Runtime::RemoteObject> wrapTable(
       v8::Local<v8::Object> table, v8::MaybeLocal<v8::Array> columns);
@@ -124,7 +127,7 @@ class InjectedScript final {
                           v8::MaybeLocal<v8::Value> value,
                           const String16& objectGroup,
                           std::unique_ptr<WrapOptions> wrapOptions,
-                          bool replMode, bool throwOnSideEffect,
+                          bool replMode,
                           std::shared_ptr<EvaluateCallback> callback);
 
   Response findObject(const RemoteObjectId&, v8::Local<v8::Value>*) const;
@@ -136,30 +139,32 @@ class InjectedScript final {
 
   Response createExceptionDetails(
       const v8::TryCatch&, const String16& groupName,
-      Maybe<protocol::Runtime::ExceptionDetails>* result);
+      std::unique_ptr<protocol::Runtime::ExceptionDetails>* result);
   Response createExceptionDetails(
       v8::Local<v8::Message> message, v8::Local<v8::Value> exception,
       const String16& groupName,
-      Maybe<protocol::Runtime::ExceptionDetails>* result);
+      std::unique_ptr<protocol::Runtime::ExceptionDetails>* result);
 
   Response wrapEvaluateResult(
       v8::MaybeLocal<v8::Value> maybeResultValue, const v8::TryCatch&,
       const String16& objectGroup, const WrapOptions& wrapOptions,
       bool throwOnSideEffect,
       std::unique_ptr<protocol::Runtime::RemoteObject>* result,
-      Maybe<protocol::Runtime::ExceptionDetails>*);
+      std::unique_ptr<protocol::Runtime::ExceptionDetails>*);
   v8::Local<v8::Value> lastEvaluationResult() const;
-  void setLastEvaluationResult(v8::Local<v8::Value> result);
 
   class Scope {
+    CPPGC_STACK_ALLOCATED();
+
    public:
     Response initialize();
     void installCommandLineAPI();
     void ignoreExceptionsAndMuteConsole();
     void pretendUserGesture();
     void allowCodeGenerationFromStrings();
+    void setTryCatchVerbose();
     v8::Local<v8::Context> context() const { return m_context; }
-    InjectedScript* injectedScript() const { return m_injectedScript; }
+    InjectedScript* injectedScript() const { return m_injectedScript.get(); }
     const v8::TryCatch& tryCatch() const { return m_tryCatch; }
     V8InspectorImpl* inspector() const { return m_inspector; }
 
@@ -169,7 +174,8 @@ class InjectedScript final {
     virtual Response findInjectedScript(V8InspectorSessionImpl*) = 0;
 
     V8InspectorImpl* m_inspector;
-    InjectedScript* m_injectedScript;
+    std::shared_ptr<InjectedScript> m_injectedScript;
+    std::shared_ptr<InspectedContext> m_inspectedContext;
 
    private:
     void cleanup();
@@ -188,8 +194,9 @@ class InjectedScript final {
     int m_sessionId;
   };
 
-  class ContextScope : public Scope,
-                       public V8InspectorSession::CommandLineAPIScope {
+  class ContextScope : public Scope {
+    CPPGC_STACK_ALLOCATED();
+
    public:
     ContextScope(V8InspectorSessionImpl*, int executionContextId);
     ~ContextScope() override;
@@ -202,6 +209,8 @@ class InjectedScript final {
   };
 
   class ObjectScope : public Scope {
+    CPPGC_STACK_ALLOCATED();
+
    public:
     ObjectScope(V8InspectorSessionImpl*, const String16& remoteObjectId);
     ~ObjectScope() override;
@@ -218,6 +227,8 @@ class InjectedScript final {
   };
 
   class CallFrameScope : public Scope {
+    CPPGC_STACK_ALLOCATED();
+
    public:
     CallFrameScope(V8InspectorSessionImpl*, const String16& remoteCallFrameId);
     ~CallFrameScope() override;
@@ -234,8 +245,10 @@ class InjectedScript final {
 
  private:
   friend class EvaluateCallback;
+  friend class PromiseHandlerTracker;
 
   v8::Local<v8::Object> commandLineAPI();
+  uint64_t isolateId() const;
   void unbindObject(int id);
 
   static Response bindRemoteObjectIfNeeded(
@@ -260,6 +273,56 @@ class InjectedScript final {
   std::unordered_map<String16, std::vector<int>> m_nameToObjectGroup;
   std::unordered_set<std::shared_ptr<EvaluateCallback>> m_evaluateCallbacks;
   bool m_customPreviewEnabled = false;
+};
+
+// Owns and tracks the life-time of {ProtocolPromiseHandler} instances.
+// Each Runtime#evaluate, Runtime#awaitPromise or Runtime#callFunctionOn
+// can create a {ProtocolPromiseHandler} to send the CDP response once it's
+// ready.
+//
+// A {ProtocolPromiseHandler} can be destroyed by various events:
+//
+//   1) The evaluation promise fulfills (and we send the CDP response).
+//   2) The evaluation promise gets GC'ed
+//   3) The {PromiseHandlerTracker} owning the {ProtocolPromiseHandler} dies.
+//
+// We keep the logic of {PromiseHandlerTracker} separate so it's
+// easier to move it. E.g. we could keep it on the inspector, session or
+// inspected context level.
+class PromiseHandlerTracker {
+ public:
+  PromiseHandlerTracker();
+  PromiseHandlerTracker(const PromiseHandlerTracker&) = delete;
+  void operator=(const PromiseHandlerTracker&) = delete;
+  ~PromiseHandlerTracker();
+
+  // Any reason other then kFulfilled will send a CDP error response as to
+  // not keep the request pending forever. Depending on when the
+  // {PromiseHandlerTracker} is destructed, the {EvaluateCallback} might
+  // already be dead and we can't send the error response (but that's fine).
+  enum class DiscardReason {
+    kFulfilled,
+    kPromiseCollected,
+    kTearDown,
+  };
+  using Id = int64_t;
+
+  template <typename... Args>
+  Id create(Args&&... args);
+  void discard(Id id, DiscardReason reason);
+  InjectedScript::ProtocolPromiseHandler* get(Id id) const;
+  void makeWeakForContext(int executionContextId);
+  void makeWeakForObjectGroup(int sessionId, const String16& objectGroup);
+  void makeWeakForSession(int sessionId);
+
+ private:
+  void sendFailure(InjectedScript::ProtocolPromiseHandler* handler,
+                   const protocol::DispatchResponse& response) const;
+  void discardAll();
+
+  std::map<Id, std::unique_ptr<InjectedScript::ProtocolPromiseHandler>>
+      m_promiseHandlers;
+  Id m_lastUsedId = 1;
 };
 
 }  // namespace v8_inspector

@@ -5,6 +5,7 @@
 #ifndef V8_SNAPSHOT_EMBEDDED_EMBEDDED_FILE_WRITER_H_
 #define V8_SNAPSHOT_EMBEDDED_EMBEDDED_FILE_WRITER_H_
 
+#include <array>
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
@@ -39,9 +40,6 @@ class EmbeddedFileWriter : public EmbeddedFileWriterInterface {
   int GetExternallyCompiledFilenameCount() const override;
 
   void PrepareBuiltinSourcePositionMap(Builtins* builtins) override;
-
-  void PrepareBuiltinLabelInfoMap(int create_offset,
-                                  int invoke_create) override;
 
 #if defined(V8_OS_WIN64)
   void SetBuiltinUnwindData(
@@ -83,13 +81,15 @@ class EmbeddedFileWriter : public EmbeddedFileWriterInterface {
     WriteExternalFilenames(writer.get());
     WriteDataSection(writer.get(), blob);
     WriteCodeSection(writer.get(), blob);
+    WriteDebugSection(writer.get(), blob);
     WriteFileEpilogue(writer.get(), blob);
 
     base::Fclose(fp);
   }
 
   static FILE* GetFileDescriptorOrDie(const char* filename) {
-    FILE* fp = v8::base::OS::FOpen(filename, "wb");
+    FILE* fp = v8::base::OS::FOpen(filename, "w");
+
     if (fp == nullptr) {
       i::PrintF("Unable to open file \"%s\" for writing.\n", filename);
       exit(1);
@@ -126,19 +126,17 @@ class EmbeddedFileWriter : public EmbeddedFileWriterInterface {
   static constexpr int kTemporaryStringLength = 256;
 
   std::string EmbeddedBlobCodeSymbol() const {
-    base::EmbeddedVector<char, kTemporaryStringLength>
-        embedded_blob_code_symbol;
+    std::array<char, kTemporaryStringLength> embedded_blob_code_symbol;
     base::SNPrintF(embedded_blob_code_symbol, "v8_%s_embedded_blob_code_",
                    embedded_variant_);
-    return std::string{embedded_blob_code_symbol.begin()};
+    return std::string{embedded_blob_code_symbol.data()};
   }
 
   std::string EmbeddedBlobDataSymbol() const {
-    base::EmbeddedVector<char, kTemporaryStringLength>
-        embedded_blob_data_symbol;
+    std::array<char, kTemporaryStringLength> embedded_blob_data_symbol;
     base::SNPrintF(embedded_blob_data_symbol, "v8_%s_embedded_blob_data_",
                    embedded_variant_);
-    return std::string{embedded_blob_data_symbol.begin()};
+    return std::string{embedded_blob_data_symbol.data()};
   }
 
   void WriteDataSection(PlatformEmbeddedFileWriterBase* w,
@@ -147,9 +145,12 @@ class EmbeddedFileWriter : public EmbeddedFileWriterInterface {
     w->SectionRoData();
     w->AlignToDataAlignment();
     w->DeclareSymbolGlobal(EmbeddedBlobDataSymbol().c_str());
+    w->DeclareLabelProlog(EmbeddedBlobDataSymbol().c_str());
     w->DeclareLabel(EmbeddedBlobDataSymbol().c_str());
 
     WriteBinaryContentsAsInlineAssembly(w, blob->data(), blob->data_size());
+    w->DeclareLabelEpilogue();
+    w->Newline();
   }
 
   void WriteBuiltin(PlatformEmbeddedFileWriterBase* w,
@@ -160,6 +161,9 @@ class EmbeddedFileWriter : public EmbeddedFileWriterInterface {
 
   void WriteCodeSection(PlatformEmbeddedFileWriterBase* w,
                         const i::EmbeddedData* blob) const;
+
+  void WriteDebugSection(PlatformEmbeddedFileWriterBase* w,
+                         const i::EmbeddedData* blob) const;
 
   void WriteFileEpilogue(PlatformEmbeddedFileWriterBase* w,
                          const i::EmbeddedData* blob) const;
@@ -183,6 +187,7 @@ class EmbeddedFileWriter : public EmbeddedFileWriterInterface {
 
  private:
   std::vector<uint8_t> source_positions_[Builtins::kBuiltinCount];
+  std::vector<uint8_t> code_comments_[Builtins::kBuiltinCount];
   std::vector<LabelInfo> label_info_[Builtins::kBuiltinCount];
 
 #if defined(V8_OS_WIN64)
@@ -191,6 +196,9 @@ class EmbeddedFileWriter : public EmbeddedFileWriterInterface {
 
   std::map<const char*, int> external_filenames_;
   std::vector<const char*> external_filenames_by_index_;
+
+  // Filename to use when source locations are missing.
+  int builtin_marker_sources_id_ = 0;
 
   // The file to generate or nullptr.
   const char* embedded_src_path_ = nullptr;

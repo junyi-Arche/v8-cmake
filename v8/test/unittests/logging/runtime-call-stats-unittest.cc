@@ -16,6 +16,7 @@
 #include "src/logging/counters.h"
 #include "src/objects/objects-inl.h"
 #include "src/tracing/tracing-category-observer.h"
+#include "test/unittests/heap/heap-utils.h"
 #include "test/unittests/test-utils.h"
 #include "testing/gtest/include/gtest/gtest.h"
 
@@ -48,6 +49,7 @@ class RuntimeCallStatsTest : public TestWithNativeContext {
     // Disable RuntimeCallStats before tearing down the isolate to prevent
     // printing the tests table. Comment the following line for debugging
     // purposes.
+    isolate()->AbortConcurrentOptimization(BlockingBehavior::kBlock);
     TracingFlags::runtime_stats.store(0, std::memory_order_relaxed);
   }
 
@@ -472,8 +474,8 @@ static void CustomCallback(const v8::FunctionCallbackInfo<v8::Value>& info) {
 }  // namespace
 
 TEST_F(RuntimeCallStatsTest, CallbackFunction) {
-  v8_flags.allow_natives_syntax = true;
-  v8_flags.incremental_marking = false;
+  v8_flags.allow_natives_syntax.Set(true);
+  v8_flags.incremental_marking.Set(false);
 
   RuntimeCallCounter* callback_counter =
       stats()->GetCounter(RuntimeCallCounterId::kFunctionCallback);
@@ -551,8 +553,8 @@ TEST_F(RuntimeCallStatsTest, CallbackFunction) {
 }
 
 TEST_F(RuntimeCallStatsTest, ApiGetter) {
-  v8_flags.allow_natives_syntax = true;
-  v8_flags.incremental_marking = false;
+  v8_flags.allow_natives_syntax.Set(true);
+  v8_flags.incremental_marking.Set(false);
 
   RuntimeCallCounter* callback_counter =
       stats()->GetCounter(RuntimeCallCounterId::kFunctionCallback);
@@ -640,13 +642,14 @@ TEST_F(RuntimeCallStatsTest, ApiGetter) {
 
 TEST_F(RuntimeCallStatsTest, GarbageCollection) {
   if (v8_flags.stress_incremental_marking) return;
-  v8_flags.expose_gc = true;
+  v8_flags.expose_gc.Set(true);
   // Disable concurrent GC threads because otherwise they may continue
   // running after this test completes and race with is_runtime_stats_enabled()
   // updates.
-  v8_flags.single_threaded_gc = true;
+  v8_flags.single_threaded_gc.Set(true);
 
   FlagList::EnforceFlagImplications();
+  ManualGCScope manual_gc_scope(i_isolate());
   v8::Isolate* isolate = v8_isolate();
   RunJS(
       "let root = [];"

@@ -8,21 +8,31 @@
 #include <stddef.h>
 
 #include <memory>
+#include <span>
 
 #include "v8-local-handle.h"  // NOLINT(build/include_directory)
 #include "v8-object.h"        // NOLINT(build/include_directory)
+#include "v8-platform.h"      // NOLINT(build/include_directory)
 #include "v8config.h"         // NOLINT(build/include_directory)
 
 namespace v8 {
 
+class ArrayBuffer;
 class SharedArrayBuffer;
 
+#if defined(V8_COMPRESS_POINTERS) && \
+    !defined(V8_COMPRESS_POINTERS_IN_SHARED_CAGE)
+class IsolateGroup;
+#endif
+
 #ifndef V8_ARRAY_BUFFER_INTERNAL_FIELD_COUNT
-// The number of required internal fields can be defined by embedder.
+// Defined using gn arg `v8_array_buffer_internal_field_count`.
 #define V8_ARRAY_BUFFER_INTERNAL_FIELD_COUNT 2
 #endif
 
 enum class ArrayBufferCreationMode { kInternalized, kExternalized };
+enum class BackingStoreInitializationMode { kZeroInitialized, kUninitialized };
+enum class BackingStoreOnFailureMode { kReturnNull, kOutOfMemory };
 
 /**
  * A wrapper around the backing store (i.e. the raw memory) of an array buffer.
@@ -54,6 +64,11 @@ class V8_EXPORT BackingStore : public v8::internal::BackingStoreBase {
   size_t ByteLength() const;
 
   /**
+   * Returns the contents of this backing store as a span of bytes.
+   */
+  std::span<uint8_t> ByteSpan() const;
+
+  /**
    * The maximum length (in bytes) that this backing store may grow to.
    *
    * If this backing store was created for a resizable ArrayBuffer or a growable
@@ -69,6 +84,11 @@ class V8_EXPORT BackingStore : public v8::internal::BackingStoreBase {
   bool IsShared() const;
 
   /**
+   * Indicates whether the backing store is immutable.
+   */
+  bool IsImmutable() const;
+
+  /**
    * Indicates whether the backing store was created for a resizable ArrayBuffer
    * or a growable SharedArrayBuffer, and thus may be resized by user JavaScript
    * code.
@@ -81,15 +101,6 @@ class V8_EXPORT BackingStore : public v8::internal::BackingStoreBase {
    * internal BackingStore object.
    */
   void operator delete(void* ptr) { ::operator delete(ptr); }
-
-  /**
-   * Wrapper around ArrayBuffer::Allocator::Reallocate that preserves IsShared.
-   * Assumes that the backing_store was allocated by the ArrayBuffer allocator
-   * of the given isolate.
-   */
-  static std::unique_ptr<BackingStore> Reallocate(
-      v8::Isolate* isolate, std::unique_ptr<BackingStore> backing_store,
-      size_t byte_length);
 
   /**
    * This callback is used only if the memory block for a BackingStore cannot be
@@ -126,9 +137,111 @@ using BackingStoreDeleterCallback = void (*)(void* data, size_t length,
 #endif
 
 /**
+ * A base class for an instance of the built-in ArrayBuffer or SharedArrayBuffer
+ * constructor.
+ */
+class V8_EXPORT ArrayBufferBase : public Object {
+ public:
+  /**
+   * Data length in bytes.
+   */
+  size_t ByteLength() const;
+
+  /**
+   * Maximum length in bytes.
+   */
+  size_t MaxByteLength() const;
+
+  /**
+   * Returns true if this is a SharedArrayBuffer, false if it is an ArrayBuffer.
+   */
+  bool IsShared() const;
+
+  /**
+   * Returns true if this ArrayBuffer may be detached. Always false for
+   * SharedArrayBuffer.
+   */
+  bool IsDetachable() const;
+
+  /**
+   * Returns true if this ArrayBuffer has been detached. Always false for
+   * SharedArrayBuffer.
+   */
+  bool WasDetached() const;
+
+  /**
+   * Returns true if this ArrayBuffer is immutable. Always false for
+   * SharedArrayBuffer.
+   */
+  bool IsImmutable() const;
+
+  /**
+   * Copy up to |bytes_to_copy| bytes from this ArrayBufferBase starting at
+   * position |source_start| to the target ArrayBufferBase starting at position
+   * |target_start|. Nothing is copied if the source or target ArrayBuffer is
+   * detached, or if the target ArrayBuffer is immutable.
+   * Returns the number of bytes actually copied.
+   */
+  size_t CopyArrayBufferBytes(size_t source_start, size_t bytes_to_copy,
+                              Local<ArrayBufferBase> target,
+                              size_t target_start) const;
+
+  /**
+   * Get a shared pointer to the backing store of this array buffer. This
+   * pointer coordinates the lifetime management of the internal storage
+   * with any live ArrayBuffers on the heap, even across isolates. The embedder
+   * should not attempt to manage lifetime of the storage through other means.
+   *
+   * The returned shared pointer will not be empty, even if the ArrayBuffer has
+   * been detached. Use |WasDetached| to tell if it has been detached instead.
+   */
+  std::shared_ptr<BackingStore> GetBackingStore();
+
+  /**
+   * More efficient shortcut for
+   * GetBackingStore()->IsResizableByUserJavaScript().
+   */
+  bool IsResizableByUserJavaScript() const;
+
+  /**
+   * More efficient shortcut for GetBackingStore()->Data(). The returned pointer
+   * is valid as long as the ArrayBuffer is alive.
+   */
+  void* Data() const;
+
+  V8_INLINE static ArrayBufferBase* Cast(Value* value) {
+#ifdef V8_ENABLE_CHECKS
+    CheckCast(value);
+#endif
+    return static_cast<ArrayBufferBase*>(value);
+  }
+
+  static constexpr int kInternalFieldCount =
+      V8_ARRAY_BUFFER_INTERNAL_FIELD_COUNT;
+  static constexpr int kEmbedderFieldCount = kInternalFieldCount;
+
+#if V8_ENABLE_SANDBOX
+  static constexpr size_t kMaxByteLength =
+      internal::kMaxSafeBufferSizeForSandbox;
+#elif V8_HOST_ARCH_32_BIT
+  static constexpr size_t kMaxByteLength = std::numeric_limits<int>::max();
+#else
+  // The maximum safe integer (2^53 - 1).
+  static constexpr size_t kMaxByteLength =
+      static_cast<size_t>((uint64_t{1} << 53) - 1);
+#endif
+
+ private:
+  ArrayBufferBase();
+  static void CheckCast(Value* obj);
+  friend class ArrayBuffer;
+  friend class SharedArrayBuffer;
+};
+
+/**
  * An instance of the built-in ArrayBuffer constructor (ES6 draft 15.13.5).
  */
-class V8_EXPORT ArrayBuffer : public Object {
+class V8_EXPORT ArrayBuffer : public ArrayBufferBase {
  public:
   /**
    * A thread-safe allocator that V8 uses to allocate |ArrayBuffer|'s memory.
@@ -168,18 +281,13 @@ class V8_EXPORT ArrayBuffer : public Object {
     virtual void Free(void* data, size_t length) = 0;
 
     /**
-     * Reallocate the memory block of size |old_length| to a memory block of
-     * size |new_length| by expanding, contracting, or copying the existing
-     * memory block. If |new_length| > |old_length|, then the new part of
-     * the memory must be initialized to zeros. Return nullptr if reallocation
-     * is not successful.
-     *
-     * The caller guarantees that the memory block was previously allocated
-     * using Allocate or AllocateUninitialized.
-     *
-     * The default implementation allocates a new block and copies data.
+     * Returns a size_t that determines the largest ArrayBuffer that can be
+     * allocated.  Override if your Allocator is more restrictive than the
+     * default.  Will only be called once, and the value returned will be
+     * cached.
+     * Should not return a value that is larger than kMaxByteLength.
      */
-    virtual void* Reallocate(void* data, size_t old_length, size_t new_length);
+    virtual size_t MaxAllocationSize() const { return kMaxByteLength; }
 
     /**
      * ArrayBuffer allocation mode. kNormal is a malloc/free style allocation,
@@ -189,10 +297,36 @@ class V8_EXPORT ArrayBuffer : public Object {
     enum class AllocationMode { kNormal, kReservation };
 
     /**
+     * Returns page allocator used by this Allocator instance.
+     *
+     * When the sandbox used by Allocator it is expected that this returns
+     * sandbox's page allocator.
+     * Otherwise, it should return system page allocator.
+     */
+    virtual PageAllocator* GetPageAllocator() { return nullptr; }
+
+#if defined(V8_COMPRESS_POINTERS) && \
+    !defined(V8_COMPRESS_POINTERS_IN_SHARED_CAGE)
+    /**
      * Convenience allocator.
      *
      * When the sandbox is enabled, this allocator will allocate its backing
-     * memory inside the sandbox. Otherwise, it will rely on malloc/free.
+     * memory inside the sandbox that belongs to the passed isolate group.
+     * Otherwise, it will rely on malloc/free.
+     *
+     * Caller takes ownership, i.e. the returned object needs to be freed using
+     * |delete allocator| once it is no longer in use.
+     */
+    static Allocator* NewDefaultAllocator(const IsolateGroup& group);
+#endif  // defined(V8_COMPRESS_POINTERS) &&
+        // !defined(V8_COMPRESS_POINTERS_IN_SHARED_CAGE)
+
+    /**
+     * Convenience allocator.
+     *
+     * When the sandbox is enabled, this allocator will allocate its backing
+     * memory inside the default global sandbox. Otherwise, it will rely on
+     * malloc/free.
      *
      * Caller takes ownership, i.e. the returned object needs to be freed using
      * |delete allocator| once it is no longer in use.
@@ -201,22 +335,27 @@ class V8_EXPORT ArrayBuffer : public Object {
   };
 
   /**
-   * Data length in bytes.
-   */
-  size_t ByteLength() const;
-
-  /**
-   * Maximum length in bytes.
-   */
-  size_t MaxByteLength() const;
-
-  /**
-   * Create a new ArrayBuffer. Allocate |byte_length| bytes.
+   * Attempt to create a new ArrayBuffer. Allocate |byte_length| bytes.
    * Allocated memory will be owned by a created ArrayBuffer and
    * will be deallocated when it is garbage-collected,
+   * unless the object is externalized. If allocation fails, the Maybe
+   * returned will be empty.
+   */
+  static MaybeLocal<ArrayBuffer> MaybeNew(
+      Isolate* isolate, size_t byte_length,
+      BackingStoreInitializationMode initialization_mode =
+          BackingStoreInitializationMode::kZeroInitialized);
+
+  /**
+   * Create a new ArrayBuffer. Allocate |byte_length| bytes, which are either
+   * zero-initialized or uninitialized. Allocated memory will be owned by a
+   * created ArrayBuffer and will be deallocated when it is garbage-collected,
    * unless the object is externalized.
    */
-  static Local<ArrayBuffer> New(Isolate* isolate, size_t byte_length);
+  static Local<ArrayBuffer> New(
+      Isolate* isolate, size_t byte_length,
+      BackingStoreInitializationMode initialization_mode =
+          BackingStoreInitializationMode::kZeroInitialized);
 
   /**
    * Create a new ArrayBuffer with an existing backing store.
@@ -235,15 +374,26 @@ class V8_EXPORT ArrayBuffer : public Object {
 
   /**
    * Returns a new standalone BackingStore that is allocated using the array
-   * buffer allocator of the isolate. The result can be later passed to
+   * buffer allocator of the isolate. The allocation can either be zero
+   * initialized, or uninitialized. The result can be later passed to
    * ArrayBuffer::New.
    *
    * If the allocator returns nullptr, then the function may cause GCs in the
-   * given isolate and re-try the allocation. If GCs do not help, then the
+   * given isolate and re-try the allocation.
+   *
+   * If GCs do not help and on_failure is kOutOfMemory, then the
    * function will crash with an out-of-memory error.
+   *
+   * Otherwise if GCs do not help (or the allocation is too large for GCs to
+   * help) and on_failure is kReturnNull, then a null result is returned.
    */
-  static std::unique_ptr<BackingStore> NewBackingStore(Isolate* isolate,
-                                                       size_t byte_length);
+  static std::unique_ptr<BackingStore> NewBackingStore(
+      Isolate* isolate, size_t byte_length,
+      BackingStoreInitializationMode initialization_mode =
+          BackingStoreInitializationMode::kZeroInitialized,
+      BackingStoreOnFailureMode on_failure =
+          BackingStoreOnFailureMode::kOutOfMemory);
+
   /**
    * Returns a new standalone BackingStore that takes over the ownership of
    * the given buffer. The destructor of the BackingStore invokes the given
@@ -272,22 +422,12 @@ class V8_EXPORT ArrayBuffer : public Object {
       size_t byte_length, size_t max_byte_length);
 
   /**
-   * Returns true if this ArrayBuffer may be detached.
-   */
-  bool IsDetachable() const;
-
-  /**
-   * Returns true if this ArrayBuffer has been detached.
-   */
-  bool WasDetached() const;
-
-  /**
    * Detaches this ArrayBuffer and all its views (typed arrays).
    * Detaching sets the byte length of the buffer and all typed arrays to zero,
    * preventing JavaScript from ever accessing underlying backing store.
    * ArrayBuffer should have been externalized and must be detachable.
    */
-  V8_DEPRECATE_SOON(
+  V8_DEPRECATED(
       "Use the version which takes a key parameter (passing a null handle is "
       "ok).")
   void Detach();
@@ -307,23 +447,6 @@ class V8_EXPORT ArrayBuffer : public Object {
    */
   void SetDetachKey(v8::Local<v8::Value> key);
 
-  /**
-   * Get a shared pointer to the backing store of this array buffer. This
-   * pointer coordinates the lifetime management of the internal storage
-   * with any live ArrayBuffers on the heap, even across isolates. The embedder
-   * should not attempt to manage lifetime of the storage through other means.
-   *
-   * The returned shared pointer will not be empty, even if the ArrayBuffer has
-   * been detached. Use |WasDetached| to tell if it has been detached instead.
-   */
-  std::shared_ptr<BackingStore> GetBackingStore();
-
-  /**
-   * More efficient shortcut for GetBackingStore()->Data(). The returned pointer
-   * is valid as long as the ArrayBuffer is alive.
-   */
-  void* Data() const;
-
   V8_INLINE static ArrayBuffer* Cast(Value* value) {
 #ifdef V8_ENABLE_CHECKS
     CheckCast(value);
@@ -331,16 +454,14 @@ class V8_EXPORT ArrayBuffer : public Object {
     return static_cast<ArrayBuffer*>(value);
   }
 
-  static const int kInternalFieldCount = V8_ARRAY_BUFFER_INTERNAL_FIELD_COUNT;
-  static const int kEmbedderFieldCount = V8_ARRAY_BUFFER_INTERNAL_FIELD_COUNT;
-
  private:
   ArrayBuffer();
   static void CheckCast(Value* obj);
+  friend class TypedArray;
 };
 
 #ifndef V8_ARRAY_BUFFER_VIEW_INTERNAL_FIELD_COUNT
-// The number of required internal fields can be defined by embedder.
+// Defined using gn arg `v8_array_buffer_view_internal_field_count`.
 #define V8_ARRAY_BUFFER_VIEW_INTERNAL_FIELD_COUNT 2
 #endif
 
@@ -353,7 +474,12 @@ class V8_EXPORT ArrayBufferView : public Object {
   /**
    * Returns underlying ArrayBuffer.
    */
+  V8_DEPRECATED("Use GetBuffer instead")
   Local<ArrayBuffer> Buffer();
+  /**
+   * Returns underlying ArrayBuffer or SharedArrayBuffer.
+   */
+  Local<ArrayBufferBase> GetBuffer();
   /**
    * Byte offset in |Buffer|.
    */
@@ -375,6 +501,16 @@ class V8_EXPORT ArrayBufferView : public Object {
   size_t CopyContents(void* dest, size_t byte_length);
 
   /**
+   * Returns the contents of the ArrayBufferView's buffer as a std::span. If
+   * the contents are on the V8 heap, they get copied into `storage`. Otherwise
+   * a view into the off-heap backing store is returned. The provided storage
+   * should be at least as large as the maximum on-heap size of a TypedArray,
+   * was defined in gn with `typed_array_max_size_in_heap`. The default value is
+   * 64 bytes.
+   */
+  std::span<uint8_t> GetContents(std::span<uint8_t> storage);
+
+  /**
    * Returns true if ArrayBufferView's backing ArrayBuffer has already been
    * allocated.
    */
@@ -387,10 +523,9 @@ class V8_EXPORT ArrayBufferView : public Object {
     return static_cast<ArrayBufferView*>(value);
   }
 
-  static const int kInternalFieldCount =
+  static constexpr int kInternalFieldCount =
       V8_ARRAY_BUFFER_VIEW_INTERNAL_FIELD_COUNT;
-  static const int kEmbedderFieldCount =
-      V8_ARRAY_BUFFER_VIEW_INTERNAL_FIELD_COUNT;
+  static const int kEmbedderFieldCount = kInternalFieldCount;
 
  private:
   ArrayBufferView();
@@ -402,9 +537,7 @@ class V8_EXPORT ArrayBufferView : public Object {
  */
 class V8_EXPORT DataView : public ArrayBufferView {
  public:
-  static Local<DataView> New(Local<ArrayBuffer> array_buffer,
-                             size_t byte_offset, size_t length);
-  static Local<DataView> New(Local<SharedArrayBuffer> shared_array_buffer,
+  static Local<DataView> New(Local<ArrayBufferBase> array_buffer,
                              size_t byte_offset, size_t length);
   V8_INLINE static DataView* Cast(Value* value) {
 #ifdef V8_ENABLE_CHECKS
@@ -421,25 +554,30 @@ class V8_EXPORT DataView : public ArrayBufferView {
 /**
  * An instance of the built-in SharedArrayBuffer constructor.
  */
-class V8_EXPORT SharedArrayBuffer : public Object {
+class V8_EXPORT SharedArrayBuffer : public ArrayBufferBase {
  public:
   /**
-   * Data length in bytes.
+   * Create a new SharedArrayBuffer. Allocate |byte_length| bytes, which are
+   * either zero-initialized or uninitialized. Allocated memory will be owned by
+   * a created SharedArrayBuffer and will be deallocated when it is
+   * garbage-collected, unless the object is externalized.
    */
-  size_t ByteLength() const;
+  static Local<SharedArrayBuffer> New(
+      Isolate* isolate, size_t byte_length,
+      BackingStoreInitializationMode initialization_mode =
+          BackingStoreInitializationMode::kZeroInitialized);
 
   /**
-   * Maximum length in bytes.
+   * Create a new SharedArrayBuffer. Allocate |byte_length| bytes, which are
+   * either zero-initialized or uninitialized. Allocated memory will be owned by
+   * a created SharedArrayBuffer and will be deallocated when it is
+   * garbage-collected, unless the object is externalized.  If allocation
+   * fails, the Maybe returned will be empty.
    */
-  size_t MaxByteLength() const;
-
-  /**
-   * Create a new SharedArrayBuffer. Allocate |byte_length| bytes.
-   * Allocated memory will be owned by a created SharedArrayBuffer and
-   * will be deallocated when it is garbage-collected,
-   * unless the object is externalized.
-   */
-  static Local<SharedArrayBuffer> New(Isolate* isolate, size_t byte_length);
+  static MaybeLocal<SharedArrayBuffer> MaybeNew(
+      Isolate* isolate, size_t byte_length,
+      BackingStoreInitializationMode initialization_mode =
+          BackingStoreInitializationMode::kZeroInitialized);
 
   /**
    * Create a new SharedArrayBuffer with an existing backing store.
@@ -458,15 +596,27 @@ class V8_EXPORT SharedArrayBuffer : public Object {
 
   /**
    * Returns a new standalone BackingStore that is allocated using the array
-   * buffer allocator of the isolate. The result can be later passed to
+   * buffer allocator of the isolate. The allocation can either be zero
+   * initialized, or uninitialized. The result can be later passed to
    * SharedArrayBuffer::New.
    *
    * If the allocator returns nullptr, then the function may cause GCs in the
-   * given isolate and re-try the allocation. If GCs do not help, then the
-   * function will crash with an out-of-memory error.
+   * given isolate and re-try the allocation.
+   *
+   * If on_failure is kOutOfMemory and GCs do not help, then the function will
+   * crash with an out-of-memory error.
+   *
+   * Otherwise, if on_failure is kReturnNull and GCs do not help (or the
+   * byte_length is so large that the allocation cannot succeed), then a null
+   * result is returned.
    */
-  static std::unique_ptr<BackingStore> NewBackingStore(Isolate* isolate,
-                                                       size_t byte_length);
+  static std::unique_ptr<BackingStore> NewBackingStore(
+      Isolate* isolate, size_t byte_length,
+      BackingStoreInitializationMode initialization_mode =
+          BackingStoreInitializationMode::kZeroInitialized,
+      BackingStoreOnFailureMode on_failure =
+          BackingStoreOnFailureMode::kOutOfMemory);
+
   /**
    * Returns a new standalone BackingStore that takes over the ownership of
    * the given buffer. The destructor of the BackingStore invokes the given
@@ -479,28 +629,12 @@ class V8_EXPORT SharedArrayBuffer : public Object {
       void* data, size_t byte_length, v8::BackingStore::DeleterCallback deleter,
       void* deleter_data);
 
-  /**
-   * Get a shared pointer to the backing store of this array buffer. This
-   * pointer coordinates the lifetime management of the internal storage
-   * with any live ArrayBuffers on the heap, even across isolates. The embedder
-   * should not attempt to manage lifetime of the storage through other means.
-   */
-  std::shared_ptr<BackingStore> GetBackingStore();
-
-  /**
-   * More efficient shortcut for GetBackingStore()->Data(). The returned pointer
-   * is valid as long as the ArrayBuffer is alive.
-   */
-  void* Data() const;
-
   V8_INLINE static SharedArrayBuffer* Cast(Value* value) {
 #ifdef V8_ENABLE_CHECKS
     CheckCast(value);
 #endif
     return static_cast<SharedArrayBuffer*>(value);
   }
-
-  static const int kInternalFieldCount = V8_ARRAY_BUFFER_INTERNAL_FIELD_COUNT;
 
  private:
   SharedArrayBuffer();

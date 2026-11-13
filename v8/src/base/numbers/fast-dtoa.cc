@@ -6,11 +6,12 @@
 
 #include <stdint.h>
 
+#include <span>
+
 #include "src/base/logging.h"
 #include "src/base/numbers/cached-powers.h"
 #include "src/base/numbers/diy-fp.h"
 #include "src/base/numbers/double.h"
-#include "src/base/v8-fallthrough.h"
 
 namespace v8 {
 namespace base {
@@ -153,7 +154,7 @@ static bool RoundWeed(char* last_digit, uint64_t distance_too_high_w,
 // unambiguously determined.
 //
 // Precondition: rest < ten_kappa.
-static bool RoundWeedCounted(Vector<char> buffer, int length, uint64_t rest,
+static bool RoundWeedCounted(std::span<char> buffer, int length, uint64_t rest,
                              uint64_t ten_kappa, uint64_t unit, int* kappa) {
   DCHECK(rest < ten_kappa);
   // The following tests are done in a specific order to avoid overflows. They
@@ -265,7 +266,7 @@ static inline void BiggestPowerTen(uint32_t number, int number_bits,
         *exponent = 9;
         break;
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case 29:
     case 28:
     case 27:
@@ -274,7 +275,7 @@ static inline void BiggestPowerTen(uint32_t number, int number_bits,
         *exponent = 8;
         break;
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case 26:
     case 25:
     case 24:
@@ -283,7 +284,7 @@ static inline void BiggestPowerTen(uint32_t number, int number_bits,
         *exponent = 7;
         break;
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case 23:
     case 22:
     case 21:
@@ -293,7 +294,7 @@ static inline void BiggestPowerTen(uint32_t number, int number_bits,
         *exponent = 6;
         break;
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case 19:
     case 18:
     case 17:
@@ -302,7 +303,7 @@ static inline void BiggestPowerTen(uint32_t number, int number_bits,
         *exponent = 5;
         break;
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case 16:
     case 15:
     case 14:
@@ -311,7 +312,7 @@ static inline void BiggestPowerTen(uint32_t number, int number_bits,
         *exponent = 4;
         break;
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case 13:
     case 12:
     case 11:
@@ -321,7 +322,7 @@ static inline void BiggestPowerTen(uint32_t number, int number_bits,
         *exponent = 3;
         break;
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case 9:
     case 8:
     case 7:
@@ -330,7 +331,7 @@ static inline void BiggestPowerTen(uint32_t number, int number_bits,
         *exponent = 2;
         break;
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case 6:
     case 5:
     case 4:
@@ -339,7 +340,7 @@ static inline void BiggestPowerTen(uint32_t number, int number_bits,
         *exponent = 1;
         break;
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case 3:
     case 2:
     case 1:
@@ -348,7 +349,7 @@ static inline void BiggestPowerTen(uint32_t number, int number_bits,
         *exponent = 0;
         break;
       }
-      V8_FALLTHROUGH;
+      [[fallthrough]];
     case 0:
       *power = 0;
       *exponent = -1;
@@ -527,8 +528,8 @@ static bool DigitGen(DiyFp low, DiyFp w, DiyFp high, char** outptr,
 //   numbers. If the precision is not enough to guarantee all the postconditions
 //   then false is returned. This usually happens rarely, but the failure-rate
 //   increases with higher requested_digits.
-static bool DigitGenCounted(DiyFp w, int requested_digits, Vector<char> buffer,
-                            int* length, int* kappa) {
+static bool DigitGenCounted(DiyFp w, int requested_digits,
+                            std::span<char> buffer, int* length, int* kappa) {
   DCHECK(kMinimalTargetExponent <= w.e() && w.e() <= kMaximalTargetExponent);
   DCHECK_GE(kMinimalTargetExponent, -60);
   DCHECK_LE(kMaximalTargetExponent, -32);
@@ -672,8 +673,9 @@ static bool Grisu3(double v, char** outptr, int* decimal_exponent) {
 // and with enough requested digits 0.1 will at some point print as 0.9999999...
 // Grisu3 is too imprecise for real halfway cases (1.5 will not work) and
 // therefore the rounding strategy for halfway cases is irrelevant.
-static bool Grisu3Counted(double v, int requested_digits, Vector<char> buffer,
-                          int* length, int* decimal_exponent) {
+static bool Grisu3Counted(double v, int requested_digits,
+                          std::span<char> buffer, int* length,
+                          int* decimal_exponent) {
   DiyFp w = Double(v).AsNormalizedDiyFp();
   DiyFp ten_mk;  // Cached power of ten: 10^-k
   int mk;        // -k
@@ -712,7 +714,7 @@ static bool Grisu3Counted(double v, int requested_digits, Vector<char> buffer,
 }
 
 bool FastDtoa(double v, FastDtoaMode mode, int requested_digits,
-              Vector<char> buffer, int* length, int* decimal_point) {
+              std::span<char> buffer, int* length, int* decimal_point) {
   DCHECK_GT(v, 0);
   DCHECK(!Double(v).IsSpecial());
 

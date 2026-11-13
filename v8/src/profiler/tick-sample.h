@@ -38,7 +38,9 @@ struct V8_EXPORT TickSample {
   void Init(Isolate* isolate, const v8::RegisterState& state,
             RecordCEntryFrame record_c_entry_frame, bool update_stats,
             bool use_simulator_reg_state = true,
-            base::TimeDelta sampling_interval = base::TimeDelta());
+            base::TimeDelta sampling_interval = base::TimeDelta(),
+            const std::optional<uint64_t> trace_id = std::nullopt,
+            void* sample_context = nullptr);
   /**
    * Get a call stack sample from the isolate.
    * \param isolate The isolate.
@@ -97,6 +99,10 @@ struct V8_EXPORT TickSample {
   bool has_external_callback = false;
   // Whether the sample should update aggregated stats.
   bool update_stats_ = true;
+  // An identifier to associate the sample with a trace event.
+  std::optional<uint64_t> trace_id_;
+  // Embedder-supplied opaque value captured by SampleContextExtractor.
+  void* sample_context_ = nullptr;
 
   void* stack[kMaxFramesCount];  // Call stack.
 };

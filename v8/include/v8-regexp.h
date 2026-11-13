@@ -1,4 +1,3 @@
-
 // Copyright 2021 the V8 project authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
@@ -76,8 +75,11 @@ class V8_EXPORT RegExp : public Object {
    *
    * Note: modifies global context state, accessible e.g. through RegExp.input.
    */
+  V8_DEPRECATED("Use ExecV2 instead")
   V8_WARN_UNUSED_RESULT MaybeLocal<Object> Exec(Local<Context> context,
                                                 Local<String> subject);
+  V8_WARN_UNUSED_RESULT MaybeLocal<Value> ExecV2(Local<Context> context,
+                                                 Local<String> subject);
 
   /**
    * Returns the value of the source property: a string representing

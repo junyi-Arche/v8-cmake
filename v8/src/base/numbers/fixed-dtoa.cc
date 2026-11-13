@@ -7,96 +7,46 @@
 #include <stdint.h>
 
 #include <cmath>
+#include <span>
 
+#include "absl/numeric/int128.h"
 #include "src/base/logging.h"
 #include "src/base/numbers/double.h"
 
 namespace v8 {
 namespace base {
 
-// Represents a 128bit type. This class should be replaced by a native type on
-// platforms that support 128bit integers.
+// Represents a 128bit type. This class wraps abseil's uint128, which is a
+// native type on platforms that support 128bit integers.
 class UInt128 {
  public:
-  UInt128() : high_bits_(0), low_bits_(0) {}
-  UInt128(uint64_t high, uint64_t low) : high_bits_(high), low_bits_(low) {}
+  UInt128() : value_(0) {}
+  UInt128(uint64_t high, uint64_t low) : value_(absl::MakeUint128(high, low)) {}
 
-  void Multiply(uint32_t multiplicand) {
-    uint64_t accumulator;
+  void Multiply(uint32_t multiplicand) { value_ *= multiplicand; }
 
-    accumulator = (low_bits_ & kMask32) * multiplicand;
-    uint32_t part = static_cast<uint32_t>(accumulator & kMask32);
-    accumulator >>= 32;
-    accumulator = accumulator + (low_bits_ >> 32) * multiplicand;
-    low_bits_ = (accumulator << 32) + part;
-    accumulator >>= 32;
-    accumulator = accumulator + (high_bits_ & kMask32) * multiplicand;
-    part = static_cast<uint32_t>(accumulator & kMask32);
-    accumulator >>= 32;
-    accumulator = accumulator + (high_bits_ >> 32) * multiplicand;
-    high_bits_ = (accumulator << 32) + part;
-    DCHECK_EQ(accumulator >> 32, 0);
-  }
-
-  void Shift(int shift_amount) {
-    DCHECK(-64 <= shift_amount && shift_amount <= 64);
-    if (shift_amount == 0) {
-      return;
-    } else if (shift_amount == -64) {
-      high_bits_ = low_bits_;
-      low_bits_ = 0;
-    } else if (shift_amount == 64) {
-      low_bits_ = high_bits_;
-      high_bits_ = 0;
-    } else if (shift_amount <= 0) {
-      high_bits_ <<= -shift_amount;
-      high_bits_ += low_bits_ >> (64 + shift_amount);
-      low_bits_ <<= -shift_amount;
-    } else {
-      low_bits_ >>= shift_amount;
-      low_bits_ += high_bits_ << (64 - shift_amount);
-      high_bits_ >>= shift_amount;
-    }
-  }
+  void Shift(int shift_amount) { value_ >>= shift_amount; }
 
   // Modifies *this to *this MOD (2^power).
   // Returns *this DIV (2^power).
   int DivModPowerOf2(int power) {
-    if (power >= 64) {
-      int result = static_cast<int>(high_bits_ >> (power - 64));
-      high_bits_ -= static_cast<uint64_t>(result) << (power - 64);
-      return result;
-    } else {
-      uint64_t part_low = low_bits_ >> power;
-      uint64_t part_high = high_bits_ << (64 - power);
-      int result = static_cast<int>(part_low + part_high);
-      high_bits_ = 0;
-      low_bits_ -= part_low << power;
-      return result;
-    }
+    absl::uint128 result = value_ >> power;
+    value_ -= result << power;
+    return static_cast<int>(result);
   }
 
-  bool IsZero() const { return high_bits_ == 0 && low_bits_ == 0; }
+  bool IsZero() const { return value_ == 0; }
 
-  int BitAt(int position) {
-    if (position >= 64) {
-      return static_cast<int>(high_bits_ >> (position - 64)) & 1;
-    } else {
-      return static_cast<int>(low_bits_ >> position) & 1;
-    }
-  }
+  int BitAt(int position) { return static_cast<int>(value_ >> position) & 1; }
 
  private:
-  static const uint64_t kMask32 = 0xFFFFFFFF;
-  // Value == (high_bits_ << 64) + low_bits_
-  uint64_t high_bits_;
-  uint64_t low_bits_;
+  absl::uint128 value_;
 };
 
 static const int kDoubleSignificandSize = 53;  // Includes the hidden bit.
 
 static void FillDigits32FixedLength(uint32_t number, int requested_length,
-                                    Vector<char> buffer, int* length) {
+                                    std::span<char> buffer, int* length) {
   for (int i = requested_length - 1; i >= 0; --i) {
     buffer[(*length) + i] = '0' + number % 10;
     number /= 10;
@@ -104,7 +54,7 @@ static void FillDigits32FixedLength(uint32_t number, int requested_length,
   *length += requested_length;
 }
 
-static void FillDigits32(uint32_t number, Vector<char> buffer, int* length) {
+static void FillDigits32(uint32_t number, std::span<char> buffer, int* length) {
   int number_length = 0;
   // We fill the digits in reverse order and exchange them afterwards.
   while (number != 0) {
@@ -127,7 +77,7 @@ static void FillDigits32(uint32_t number, Vector<char> buffer, int* length) {
 }
 
 static void FillDigits64FixedLength(uint64_t number, int requested_length,
-                                    Vector<char> buffer, int* length) {
+                                    std::span<char> buffer, int* length) {
   const uint32_t kTen7 = 10000000;
   // For efficiency cut the number into 3 uint32_t parts, and print those.
   uint32_t part2 = static_cast<uint32_t>(number % kTen7);
@@ -140,7 +90,7 @@ static void FillDigits64FixedLength(uint64_t number, int requested_length,
   FillDigits32FixedLength(part2, 7, buffer, length);
 }
 
-static void FillDigits64(uint64_t number, Vector<char> buffer, int* length) {
+static void FillDigits64(uint64_t number, std::span<char> buffer, int* length) {
   const uint32_t kTen7 = 10000000;
   // For efficiency cut the number into 3 uint32_t parts, and print those.
   uint32_t part2 = static_cast<uint32_t>(number % kTen7);
@@ -160,7 +110,8 @@ static void FillDigits64(uint64_t number, Vector<char> buffer, int* length) {
   }
 }
 
-static void DtoaRoundUp(Vector<char> buffer, int* length, int* decimal_point) {
+static void DtoaRoundUp(std::span<char> buffer, int* length,
+                        int* decimal_point) {
   // An empty buffer represents 0.
   if (*length == 0) {
     buffer[0] = '1';
@@ -201,7 +152,7 @@ static void DtoaRoundUp(Vector<char> buffer, int* length, int* decimal_point) {
 // already contained "199" (thus yielding a buffer of "19999") then a
 // rounding-up will change the contents of the buffer to "20000".
 static void FillFractionals(uint64_t fractionals, int exponent,
-                            int fractional_count, Vector<char> buffer,
+                            int fractional_count, std::span<char> buffer,
                             int* length, int* decimal_point) {
   DCHECK(-128 <= exponent && exponent <= 0);
   // 'fractionals' is a fixed-point number, with binary point at bit
@@ -258,7 +209,7 @@ static void FillFractionals(uint64_t fractionals, int exponent,
 
 // Removes leading and trailing zeros.
 // If leading zeros are removed then the decimal point position is adjusted.
-static void TrimZeros(Vector<char> buffer, int* length, int* decimal_point) {
+static void TrimZeros(std::span<char> buffer, int* length, int* decimal_point) {
   while (*length > 0 && buffer[(*length) - 1] == '0') {
     (*length)--;
   }
@@ -275,7 +226,7 @@ static void TrimZeros(Vector<char> buffer, int* length, int* decimal_point) {
   }
 }
 
-bool FastFixedDtoa(double v, int fractional_count, Vector<char> buffer,
+bool FastFixedDtoa(double v, int fractional_count, std::span<char> buffer,
                    int* length, int* decimal_point) {
   const uint32_t kMaxUInt32 = 0xFFFFFFFF;
   uint64_t significand = Double(v).Significand();

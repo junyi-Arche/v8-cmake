@@ -9,6 +9,7 @@
 #include <iomanip>
 
 #include "src/flags/flags.h"
+#include "src/tracing/traced-value.h"
 #include "src/tracing/tracing-category-observer.h"
 #include "src/utils/ostreams.h"
 
@@ -138,10 +139,10 @@ RuntimeCallStats::RuntimeCallStats(ThreadType thread_type)
 #define CALL_RUNTIME_COUNTER(name) #name,
       FOR_EACH_MANUAL_COUNTER(CALL_RUNTIME_COUNTER)  //
 #undef CALL_RUNTIME_COUNTER
-#define CALL_RUNTIME_COUNTER(name, nargs, ressize) #name,
+#define CALL_RUNTIME_COUNTER(name, nargs, ressize, ...) #name,
       FOR_EACH_INTRINSIC(CALL_RUNTIME_COUNTER)  //
 #undef CALL_RUNTIME_COUNTER
-#define CALL_BUILTIN_COUNTER(name) #name,
+#define CALL_BUILTIN_COUNTER(name, Argc) #name,
       BUILTIN_LIST_C(CALL_BUILTIN_COUNTER)  //
 #undef CALL_BUILTIN_COUNTER
 #define CALL_BUILTIN_COUNTER(name) "API_" #name,
@@ -169,7 +170,7 @@ constexpr RuntimeCallCounterId FirstCounter(RuntimeCallCounterId first, ...) {
   return first;
 }
 
-#define THREAD_SPECIFIC_COUNTER(name) k##name,
+#define THREAD_SPECIFIC_COUNTER(name) RuntimeCallCounterId::k##name,
 constexpr RuntimeCallCounterId kFirstThreadVariantCounter =
     FirstCounter(FOR_EACH_THREAD_SPECIFIC_COUNTER(THREAD_SPECIFIC_COUNTER) 0);
 #undef THREAD_SPECIFIC_COUNTER
@@ -180,7 +181,8 @@ constexpr int kThreadVariantCounterCount =
 #undef THREAD_SPECIFIC_COUNTER
 
 constexpr auto kLastThreadVariantCounter = static_cast<RuntimeCallCounterId>(
-    kFirstThreadVariantCounter + kThreadVariantCounterCount - 1);
+    static_cast<int>(kFirstThreadVariantCounter) + kThreadVariantCounterCount -
+    1);
 }  // namespace
 
 bool RuntimeCallStats::HasThreadSpecificCounterVariants(
@@ -193,7 +195,9 @@ bool RuntimeCallStats::HasThreadSpecificCounterVariants(
 bool RuntimeCallStats::IsBackgroundThreadSpecificVariant(
     RuntimeCallCounterId id) {
   return HasThreadSpecificCounterVariants(id) &&
-         (id - kFirstThreadVariantCounter) % 2 == 1;
+         (static_cast<int>(id) - static_cast<int>(kFirstThreadVariantCounter)) %
+                 2 ==
+             1;
 }
 
 void RuntimeCallStats::Enter(RuntimeCallTimer* timer,
@@ -239,8 +243,8 @@ void RuntimeCallStats::CorrectCurrentCounterId(RuntimeCallCounterId counter_id,
 }
 
 bool RuntimeCallStats::IsCalledOnTheSameThread() {
-  if (thread_id_.IsValid()) return thread_id_ == ThreadId::Current();
-  thread_id_ = ThreadId::Current();
+  if (thread_id_.IsValid()) return thread_id_ == base::ThreadId::Current();
+  thread_id_ = base::ThreadId::Current();
   return true;
 }
 
@@ -286,7 +290,7 @@ void RuntimeCallStats::Dump(v8::tracing::TracedValue* value) {
 }
 
 WorkerThreadRuntimeCallStats::WorkerThreadRuntimeCallStats()
-    : isolate_thread_id_(ThreadId::Current()) {}
+    : isolate_thread_id_(base::ThreadId::Current()) {}
 
 WorkerThreadRuntimeCallStats::~WorkerThreadRuntimeCallStats() {
   if (tls_key_) base::Thread::DeleteThreadLocalKey(*tls_key_);
@@ -294,15 +298,11 @@ WorkerThreadRuntimeCallStats::~WorkerThreadRuntimeCallStats() {
 
 base::Thread::LocalStorageKey WorkerThreadRuntimeCallStats::GetKey() {
   base::MutexGuard lock(&mutex_);
-  DCHECK(TracingFlags::is_runtime_stats_enabled());
   if (!tls_key_) tls_key_ = base::Thread::CreateThreadLocalKey();
   return *tls_key_;
 }
 
 RuntimeCallStats* WorkerThreadRuntimeCallStats::NewTable() {
-  DCHECK(TracingFlags::is_runtime_stats_enabled());
-  // Never create a new worker table on the isolate's main thread.
-  DCHECK_NE(ThreadId::Current(), isolate_thread_id_);
   std::unique_ptr<RuntimeCallStats> new_table =
       std::make_unique<RuntimeCallStats>(RuntimeCallStats::kWorkerThread);
   RuntimeCallStats* result = new_table.get();
@@ -329,6 +329,7 @@ WorkerThreadRuntimeCallStatsScope::WorkerThreadRuntimeCallStatsScope(
   table_ = reinterpret_cast<RuntimeCallStats*>(
       base::Thread::GetThreadLocal(worker_stats->GetKey()));
   if (table_ == nullptr) {
+    if (V8_UNLIKELY(!TracingFlags::is_runtime_stats_enabled())) return;
     table_ = worker_stats->NewTable();
     base::Thread::SetThreadLocal(worker_stats->GetKey(), table_);
   }
