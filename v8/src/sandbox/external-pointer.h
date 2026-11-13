@@ -66,7 +66,7 @@ class ExternalPointerMember {
   inline ExternalPointer_t load_encoded() const;
   inline void store_encoded(ExternalPointer_t value);
 
-#if defined(V8_CC_MSVC)
+#if defined(V8_CC_MSVC) && !defined(__clang__)
   // pyv8web/MSVC port: with the constrained redirection specialisation
   // disabled, these hooks are no-ops (they only matter on simulator builds).
   inline void RemoveCallbackRedirectionForSerialization(IsolateForSandbox) {}
@@ -79,7 +79,7 @@ class ExternalPointerMember {
   }
 
  private:
-#if !defined(V8_CC_MSVC)
+#if !defined(V8_CC_MSVC) || defined(__clang__)
   static_assert(
       ([]() {
         for (int tag = kTagRange.first; tag <= kTagRange.last; ++tag) {
@@ -103,7 +103,7 @@ class ExternalPointerMember {
 // of a constrained class-template partial specialization (C2244/C3864).
 // The redirection path is only active on simulator builds
 // (USE_SIMULATOR_BOOL == true), so on MSVC we use the generic member.
-#if defined(V8_CC_MSVC)
+#if defined(V8_CC_MSVC) && !defined(__clang__)
 template <ExternalPointerTagRange kTagRange>
 concept TagWithRedirection = false;
 #else

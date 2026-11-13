@@ -1103,9 +1103,24 @@ class ScopedVar : public Var<T, Assembler> {
 //       if (...) goto no_change;
 //       ...
 //     }
+#if defined(V8_CC_MSVC) && !defined(__clang__)
+// pyv8web/MSVC port: UNREACHABLE() expands to a do-while *statement* with
+// cl.exe (the GCC/clang branch is the __builtin_unreachable() expression),
+// which cannot appear in the increment clause of a for. Use a flag-based
+// loop with the same shape instead: the body is still skipped unless a
+// `goto label` jumps into it. This drops the "forgot to forward" crash of
+// the fallthrough path, which is only a debugging aid.
+#define LABEL_BLOCK(label)                     \
+  for (bool v8_label_block_done_ = false;;)    \
+    if (v8_label_block_done_++)                \
+      break;                                   \
+    else                                       \
+  label:
+#else
 #define LABEL_BLOCK(label)     \
   for (; false; UNREACHABLE()) \
   label:
+#endif
 
 // EmitProjectionReducer ensures that projections are always emitted right after
 // their input operation. To do so, when an operation with multiple outputs is

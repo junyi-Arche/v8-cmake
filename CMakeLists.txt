@@ -422,6 +422,11 @@ list(REMOVE_ITEM object-sources
   v8/src/objects/js-temporal-objects.cc
   v8/src/objects/js-temporal-zoneinfo64.cc)
 list(REMOVE_ITEM builtin-sources v8/src/builtins/builtins-temporal.cc)
+# 16.0: builtins-number-tsa.cc holds the experimental TSA builtins. Their
+# bodies only compile under V8_ENABLE_EXPERIMENTAL_TSA_BUILTINS (off here),
+# and the surrounding class definition cannot be compiled by cl.exe (C3200
+# on the template-template argument; upstream builds it with clang-cl).
+list(REMOVE_ITEM builtin-sources v8/src/builtins/builtins-number-tsa.cc)
 list(REMOVE_ITEM regexp-sources v8/src/regexp/gen-regexp-special-case.cc)
 list(REMOVE_ITEM runtime-sources v8/src/runtime/runtime-intl.cc)
 list(REMOVE_ITEM snapshot-sources
@@ -675,7 +680,10 @@ add_library(
   v8/src/builtins/builtins-interpreter-gen.cc
   v8/src/builtins/builtins-iterator-gen.cc
   # 16.0 dropped builtins-lazy-gen.cc; added the TSA/Trampoline generators.
-  v8/src/builtins/builtins-number-tsa.cc
+  # builtins-number-tsa.cc is excluded: its experimental TSA builtins are
+  # compiled only under V8_ENABLE_EXPERIMENTAL_TSA_BUILTINS (off here), and
+  # its class definition cannot be compiled by cl.exe (C3200 on the
+  # template-template argument; upstream builds it with clang-cl only).
   v8/src/builtins/builtins-shadow-realm-gen.cc
   v8/src/builtins/builtins-string-tsa.cc
   v8/src/builtins/js-trampoline-assembler.cc

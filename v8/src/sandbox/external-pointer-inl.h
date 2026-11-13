@@ -29,7 +29,7 @@ inline void ExternalPointerMember<kTagRange>::Init(Address host_address,
       host_address, reinterpret_cast<Address>(storage_), isolate, value);
 }
 
-#if !defined(V8_CC_MSVC)
+#if !defined(V8_CC_MSVC) || defined(__clang__)
 template <ExternalPointerTagRange kTagRange>
   requires TagWithRedirection<kTagRange>
 inline void ExternalPointerMember<kTagRange>::Init(Address host_address,
@@ -50,7 +50,7 @@ inline Address ExternalPointerMember<kTagRange>::load(
       reinterpret_cast<Address>(storage_), isolate);
 }
 
-#if !defined(V8_CC_MSVC)
+#if !defined(V8_CC_MSVC) || defined(__clang__)
 template <ExternalPointerTagRange kTagRange>
   requires TagWithRedirection<kTagRange>
 inline Address ExternalPointerMember<kTagRange>::load(
@@ -71,7 +71,7 @@ inline void ExternalPointerMember<kTagRange>::store(IsolateForSandbox isolate,
                                  value);
 }
 
-#if !defined(V8_CC_MSVC)
+#if !defined(V8_CC_MSVC) || defined(__clang__)
 template <ExternalPointerTagRange kTagRange>
   requires TagWithRedirection<kTagRange>
 inline void ExternalPointerMember<kTagRange>::store(IsolateForSandbox isolate,
@@ -89,7 +89,7 @@ inline Address ExternalPointerMember<kTagRange>::exchange(
                                            isolate, value);
 }
 
-#if !defined(V8_CC_MSVC)
+#if !defined(V8_CC_MSVC) || defined(__clang__)
 template <ExternalPointerTagRange kTagRange>
   requires TagWithRedirection<kTagRange>
 inline Address ExternalPointerMember<kTagRange>::load_raw(
@@ -99,7 +99,7 @@ inline Address ExternalPointerMember<kTagRange>::load_raw(
 }
 #endif
 
-#if !defined(V8_CC_MSVC)
+#if !defined(V8_CC_MSVC) || defined(__clang__)
 template <ExternalPointerTagRange kTagRange>
   requires TagWithRedirection<kTagRange>
 inline void ExternalPointerMember<kTagRange>::store_raw(
@@ -121,7 +121,7 @@ inline void ExternalPointerMember<kTagRange>::store_encoded(
   memcpy(storage_, &value, sizeof(ExternalPointer_t));
 }
 
-#if !defined(V8_CC_MSVC)
+#if !defined(V8_CC_MSVC) || defined(__clang__)
 template <ExternalPointerTagRange kTagRange>
   requires TagWithRedirection<kTagRange>
 inline ExternalPointer_t ExternalPointerMember<kTagRange>::load_encoded()
@@ -130,7 +130,7 @@ inline ExternalPointer_t ExternalPointerMember<kTagRange>::load_encoded()
 }
 #endif
 
-#if !defined(V8_CC_MSVC)
+#if !defined(V8_CC_MSVC) || defined(__clang__)
 template <ExternalPointerTagRange kTagRange>
   requires TagWithRedirection<kTagRange>
 inline void ExternalPointerMember<kTagRange>::store_encoded(
@@ -139,7 +139,7 @@ inline void ExternalPointerMember<kTagRange>::store_encoded(
 }
 #endif
 
-#if !defined(V8_CC_MSVC)
+#if !defined(V8_CC_MSVC) || defined(__clang__)
 template <ExternalPointerTagRange kTagRange>
   requires TagWithRedirection<kTagRange>
 inline void
@@ -150,7 +150,7 @@ ExternalPointerMember<kTagRange>::RemoveCallbackRedirectionForSerialization(
 }
 #endif
 
-#if !defined(V8_CC_MSVC)
+#if !defined(V8_CC_MSVC) || defined(__clang__)
 template <ExternalPointerTagRange kTagRange>
   requires TagWithRedirection<kTagRange>
 inline void ExternalPointerMember<kTagRange>::
@@ -160,7 +160,7 @@ inline void ExternalPointerMember<kTagRange>::
 }
 #endif
 
-#if !defined(V8_CC_MSVC)
+#if !defined(V8_CC_MSVC) || defined(__clang__)
 template <ExternalPointerTagRange kTagRange>
   requires TagWithRedirection<kTagRange>
 inline Address ExternalPointerMember<kTagRange>::RedirectValue(

@@ -179,7 +179,16 @@ class GeneratedCode {
   }
 #else
 
-  __attribute__((nodebug)) DISABLE_CFI_ICALL Return Call(Args... args) {
+// pyv8web/MSVC port: nodebug is a GNU/clang attribute that suppresses debug
+// info for the generated-code trampoline; cl.exe has no equivalent and the
+// plain attribute syntax is a syntax error.
+#if defined(__clang__) || defined(__GNUC__)
+#define V8_GENERATED_CODE_NODEBUG __attribute__((nodebug))
+#else
+#define V8_GENERATED_CODE_NODEBUG
+#endif
+
+  V8_GENERATED_CODE_NODEBUG DISABLE_CFI_ICALL Return Call(Args... args) {
     // When running without a simulator we call the entry directly.
 // Starboard is a platform abstraction interface that also include Windows
 // platforms like UWP.
@@ -223,13 +232,15 @@ class GeneratedCode {
   }
 #endif  // USE_SIMULATOR
 
-  __attribute__((nodebug)) DISABLE_CFI_ICALL Return
+  V8_GENERATED_CODE_NODEBUG DISABLE_CFI_ICALL Return
   CallSandboxed(Args... args) {
     EnterSandboxScope sandboxed;
     return Call(args...);
   }
 
  private:
+#undef V8_GENERATED_CODE_NODEBUG
+
   friend class GeneratedCode<Return(Args...)>;
   Isolate* isolate_;
   Signature* fn_ptr_;

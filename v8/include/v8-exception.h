@@ -48,9 +48,14 @@ class V8_EXPORT Exception {
   static Local<Value> WasmSuspendError(Local<String> message,
                                        Local<Value> options = {});
   static Local<Value> Error(Local<String> message, Local<Value> options = {});
-  static Local<Value> HierarchyRequestError(Local<String> message);
-  static Local<Value> DataCloneError(Local<String> message);
-  static Local<Value> NotSupportedError(Local<String> message);
+  // pyv8web: 16.0's DEFINE_ERROR takes (message, options); keep the
+  // declarations in sync with the definitions in api.cc.
+  static Local<Value> HierarchyRequestError(Local<String> message,
+                                            Local<Value> options = {});
+  static Local<Value> DataCloneError(Local<String> message,
+                                     Local<Value> options = {});
+  static Local<Value> NotSupportedError(Local<String> message,
+                                        Local<Value> options = {});
 
   /**
    * Creates an error message for the given exception.

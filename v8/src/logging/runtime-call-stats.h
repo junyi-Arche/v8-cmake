@@ -60,6 +60,7 @@ namespace v8::internal {
   V(Context_New)                                           \
   V(Context_NewRemoteContext)                              \
   V(DataView_New)                                          \
+  V(DataCloneError_New)                                    \
   V(Date_New)                                              \
   V(Date_Parse)                                            \
   V(Debug_Call)                                            \
@@ -68,6 +69,8 @@ namespace v8::internal {
   V(DictionaryTemplate_NewInstance)                        \
   V(Error_New)                                             \
   V(Exception_CaptureStackTrace)                           \
+  V(HierarchyRequestError_New)                             \
+  V(NotSupportedError_New)                                 \
   V(External_New)                                          \
   V(Float16Array_New)                                      \
   V(Float32Array_New)                                      \

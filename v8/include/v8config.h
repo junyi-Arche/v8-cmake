@@ -750,7 +750,7 @@ path. Add it with -I<path> to the command line
 // pyv8web/MSVC port: cl.exe has no __attribute__((packed)). A push/pop pair
 // around the struct is the MSVC equivalent (pack(push) does work inside a
 // class body as long as it is not preceded by a pack(pop)).
-#if defined(V8_CC_MSVC)
+#if defined(V8_CC_MSVC) && !defined(__clang__)
 #define V8_STRUCT_PACKED_BEGIN __pragma(pack(push, 1))
 #define V8_STRUCT_PACKED_END __pragma(pack(pop))
 #else
@@ -763,10 +763,14 @@ path. Add it with -I<path> to the command line
 // evaluates to 0 and V8 silently falls back to a no-op. Without the attribute
 // the zero-sized IsolateData padding members each occupy one byte and every
 // generated-code offset is wrong. Force the MSVC attribute directly.
-#if defined(V8_CC_MSVC)
+#if defined(V8_CC_MSVC) && !defined(__clang__)
 #define V8_NO_UNIQUE_ADDRESS [[msvc::no_unique_address]]
 #elif V8_HAS_CPP_ATTRIBUTE_NO_UNIQUE_ADDRESS
+#if defined(V8_CC_MSVC) && V8_HAS_CPP_ATTRIBUTE(msvc::no_unique_address)
+#define V8_NO_UNIQUE_ADDRESS [[msvc::no_unique_address]]
+#else
 #define V8_NO_UNIQUE_ADDRESS [[no_unique_address]]
+#endif
 #else
 #define V8_NO_UNIQUE_ADDRESS /* NOT SUPPORTED */
 #endif

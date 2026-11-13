@@ -344,7 +344,21 @@ consteval bool is_subtype_helper() {
     return is_subtype_helper<typename Derived::value_type, Base>();
   } else {
     // Fallback to base_of.
+#if defined(V8_CC_MSVC) && !defined(__clang__)
+    // pyv8web/MSVC port: cl.exe rejects __is_base_of on incomplete types
+    // (C2139) and instantiates these traits earlier than GCC/clang do --
+    // before the hole sentinels (TheHole, HashTableHole, ...) are defined.
+    // Those sentinels ARE Object subclasses and the embedder relies on
+    // Handle<hole> -> Handle<Object> staying valid, so answer true while a
+    // type is still incomplete instead of leaving the relation undecided.
+    if constexpr (!is_complete<Derived> || !is_complete<Base>) {
+      return true;
+    } else {
+      return is_base_of_v<Base, Derived>;
+    }
+#else
     return is_base_of_v<Base, Derived>;
+#endif
   }
 }
 }  // namespace detail

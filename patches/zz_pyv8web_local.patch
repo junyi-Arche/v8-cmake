@@ -1,70 +1,75 @@
 diff --git a/v8/include/v8-exception.h b/v8/include/v8-exception.h
-index 74f57311..86f04648 100644
+index 74f57311a..870aa579d 100644
 --- a/v8/include/v8-exception.h
 +++ b/v8/include/v8-exception.h
-@@ -48,6 +48,9 @@ class V8_EXPORT Exception {
+@@ -48,6 +48,14 @@ class V8_EXPORT Exception {
    static Local<Value> WasmSuspendError(Local<String> message,
                                         Local<Value> options = {});
    static Local<Value> Error(Local<String> message, Local<Value> options = {});
-+  static Local<Value> HierarchyRequestError(Local<String> message);
-+  static Local<Value> DataCloneError(Local<String> message);
-+  static Local<Value> NotSupportedError(Local<String> message);
++  // pyv8web: 16.0's DEFINE_ERROR takes (message, options); keep the
++  // declarations in sync with the definitions in api.cc.
++  static Local<Value> HierarchyRequestError(Local<String> message,
++                                            Local<Value> options = {});
++  static Local<Value> DataCloneError(Local<String> message,
++                                     Local<Value> options = {});
++  static Local<Value> NotSupportedError(Local<String> message,
++                                        Local<Value> options = {});
  
    /**
     * Creates an error message for the given exception.
 diff --git a/v8/include/v8config.h b/v8/include/v8config.h
-index 49993653..2b316273 100644
+index 499936539..df5885764 100644
 --- a/v8/include/v8config.h
 +++ b/v8/include/v8config.h
-@@ -747,16 +747,26 @@ path. Add it with -I<path> to the command line
+@@ -747,12 +747,26 @@ path. Add it with -I<path> to the command line
  //
  // [[no_unique_address]] comes in C++20 but supported in clang with
  // -std >= c++11.
 -#if V8_HAS_CPP_ATTRIBUTE_NO_UNIQUE_ADDRESS
--#if defined(V8_CC_MSVC) && V8_HAS_CPP_ATTRIBUTE(msvc::no_unique_address)
--// Unfortunately MSVC ignores [[no_unique_address]] (see
--// https://devblogs.microsoft.com/cppblog/msvc-cpp20-and-the-std-cpp20-switch/#msvc-extensions-and-abi),
--// and clang-cl matches it for ABI compatibility reasons. We need to prefer
--// [[msvc::no_unique_address]] when available if we actually want any effect.
--#define V8_NO_UNIQUE_ADDRESS [[msvc::no_unique_address]]
 +// pyv8web/MSVC port: cl.exe has no __attribute__((packed)). A push/pop pair
 +// around the struct is the MSVC equivalent (pack(push) does work inside a
 +// class body as long as it is not preceded by a pack(pop)).
-+#if defined(V8_CC_MSVC)
++#if defined(V8_CC_MSVC) && !defined(__clang__)
 +#define V8_STRUCT_PACKED_BEGIN __pragma(pack(push, 1))
 +#define V8_STRUCT_PACKED_END __pragma(pack(pop))
- #else
--#define V8_NO_UNIQUE_ADDRESS [[no_unique_address]]
++#else
 +#define V8_STRUCT_PACKED_BEGIN
 +#define V8_STRUCT_PACKED_END
- #endif
++#endif
 +
 +// pyv8web/MSVC port: MSVC implements [[msvc::no_unique_address]] but does not
 +// advertise it via __has_cpp_attribute, so V8_HAS_CPP_ATTRIBUTE_NO_UNIQUE_ADDRESS
 +// evaluates to 0 and V8 silently falls back to a no-op. Without the attribute
 +// the zero-sized IsolateData padding members each occupy one byte and every
 +// generated-code offset is wrong. Force the MSVC attribute directly.
-+#if defined(V8_CC_MSVC)
++#if defined(V8_CC_MSVC) && !defined(__clang__)
 +#define V8_NO_UNIQUE_ADDRESS [[msvc::no_unique_address]]
 +#elif V8_HAS_CPP_ATTRIBUTE_NO_UNIQUE_ADDRESS
-+#define V8_NO_UNIQUE_ADDRESS [[no_unique_address]]
+ #if defined(V8_CC_MSVC) && V8_HAS_CPP_ATTRIBUTE(msvc::no_unique_address)
+-// Unfortunately MSVC ignores [[no_unique_address]] (see
+-// https://devblogs.microsoft.com/cppblog/msvc-cpp20-and-the-std-cpp20-switch/#msvc-extensions-and-abi),
+-// and clang-cl matches it for ABI compatibility reasons. We need to prefer
+-// [[msvc::no_unique_address]] when available if we actually want any effect.
+ #define V8_NO_UNIQUE_ADDRESS [[msvc::no_unique_address]]
  #else
- #define V8_NO_UNIQUE_ADDRESS /* NOT SUPPORTED */
- #endif
+ #define V8_NO_UNIQUE_ADDRESS [[no_unique_address]]
 diff --git a/v8/src/api/api-natives.cc b/v8/src/api/api-natives.cc
-index f3a01025..76025837 100644
+index f3a01025a..000f42db2 100644
 --- a/v8/src/api/api-natives.cc
 +++ b/v8/src/api/api-natives.cc
-@@ -631,6 +631,8 @@ Handle<JSFunction> ApiNatives::CreateApiFunction(
+@@ -631,6 +631,11 @@ Handle<JSFunction> ApiNatives::CreateApiFunction(
      DCHECK(result->shared()->IsApiFunction());
      DCHECK(!IsConstructor(*result));
      DCHECK(!result->has_prototype_slot());
-+    // pyv8web: use strict-without-prototype map for non-constructor API methods
-+    result->set_map(*isolate->strict_function_without_prototype_map());
++    // pyv8web: use strict-without-prototype map for non-constructor API
++    // methods. 16.0 dropped the strict/sloppy dual maps (the language mode is
++    // always strict), so the plain function_without_prototype_map is the map
++    // 11.6 called strict_function_without_prototype_map.
++    result->set_map(isolate, *isolate->function_without_prototype_map());
      return result;
    }
  
-@@ -638,8 +640,12 @@ Handle<JSFunction> ApiNatives::CreateApiFunction(
+@@ -638,7 +643,12 @@ Handle<JSFunction> ApiNatives::CreateApiFunction(
    // constructor (don't set the "remove prototype" flag).
    DCHECK(result->has_prototype_slot());
  
@@ -72,14 +77,13 @@ index f3a01025..76025837 100644
 +  // constructors. Sloppy map injects poison pill accessors via
 +  // AddRestrictedFunctionProperties that appear in getOwnPropertyDescriptors.
    if (obj->read_only_prototype()) {
--    result->set_map(isolate, *isolate->function_with_readonly_prototype_map());
-+    // pyv8web: strict map suppresses caller/arguments poison pills.
-+    result->set_map(isolate, *isolate->strict_function_with_readonly_prototype_map());
++    // pyv8web: strict map suppresses caller/arguments poison pills. 16.0
++    // merged the strict/sloppy map pair into a single read-only-prototype map.
+     result->set_map(isolate, *isolate->function_with_readonly_prototype_map());
    }
  
-   if (IsTheHole(*prototype)) {
 diff --git a/v8/src/api/api.cc b/v8/src/api/api.cc
-index 18ee9809..02016f43 100644
+index 18ee9809a..02016f43f 100644
 --- a/v8/src/api/api.cc
 +++ b/v8/src/api/api.cc
 @@ -11469,6 +11469,9 @@ DEFINE_ERROR(RangeError, range_error)
@@ -93,7 +97,7 @@ index 18ee9809..02016f43 100644
  DEFINE_ERROR(WasmLinkError, wasm_link_error)
  DEFINE_ERROR(WasmRuntimeError, wasm_runtime_error)
 diff --git a/v8/src/base/ieee754.cc b/v8/src/base/ieee754.cc
-index 38e29011..c4c21f96 100644
+index 38e290114..c4c21f964 100644
 --- a/v8/src/base/ieee754.cc
 +++ b/v8/src/base/ieee754.cc
 @@ -234,11 +234,92 @@ double pow(double x, double y) { return LIBC_NAMESPACE::shared::pow(x, y); }
@@ -191,7 +195,7 @@ index 38e29011..c4c21f96 100644
  }  // namespace ieee754
  }  // namespace base
 diff --git a/v8/src/base/ieee754.h b/v8/src/base/ieee754.h
-index bcc1992a..832db1ca 100644
+index bcc1992a8..832db1ca0 100644
 --- a/v8/src/base/ieee754.h
 +++ b/v8/src/base/ieee754.h
 @@ -9,6 +9,8 @@
@@ -228,7 +232,7 @@ index bcc1992a..832db1ca 100644
  }  // namespace base
  }  // namespace v8
 diff --git a/v8/src/base/immediate-crash.h b/v8/src/base/immediate-crash.h
-index 9c25a7dc..4722046c 100644
+index 9c25a7dce..4722046c5 100644
 --- a/v8/src/base/immediate-crash.h
 +++ b/v8/src/base/immediate-crash.h
 @@ -178,7 +178,9 @@
@@ -242,8 +246,60 @@ index 9c25a7dc..4722046c 100644
  
  #endif  // defined(__clang__) || defined(COMPILER_GCC)
  
+diff --git a/v8/src/compiler/code-assembler.h b/v8/src/compiler/code-assembler.h
+index 286315481..b03e4bccf 100644
+--- a/v8/src/compiler/code-assembler.h
++++ b/v8/src/compiler/code-assembler.h
+@@ -523,9 +523,18 @@ class V8_EXPORT_PRIVATE CodeAssembler {
+                         std::is_convertible_v<TNode<A>, TNode<Object>>,
+                     "Coercion to untagged values cannot be "
+                     "checked.");
++#if defined(V8_CC_MSVC) && !defined(__clang__)
++      // pyv8web/MSVC port: cl.exe instantiates is_subtype_v before some V8
++      // types are complete, and objects/tagged.h then answers "convertible"
++      // for the still-incomplete hole sentinels (see the note there), which
++      // would make this hygiene check fire on legitimate casts. It is a
++      // code-cleanliness assertion only, so skip it for cl.exe.
++      static_assert(true, "Unnecessary CAST check disabled for cl.exe");
++#else
+       static_assert(
+           !FromTyped || !std::is_convertible_v<TNode<PreviousType>, TNode<A>>,
+           "Unnecessary CAST: types are convertible.");
++#endif
+ #ifdef DEBUG
+       if (v8_flags.slow_debug_code) {
+         TNode<ExternalReference> function = code_assembler_->ExternalConstant(
+diff --git a/v8/src/compiler/turboshaft/assembler.h b/v8/src/compiler/turboshaft/assembler.h
+index 643730314..f048bed97 100644
+--- a/v8/src/compiler/turboshaft/assembler.h
++++ b/v8/src/compiler/turboshaft/assembler.h
+@@ -1103,9 +1103,24 @@ class ScopedVar : public Var<T, Assembler> {
+ //       if (...) goto no_change;
+ //       ...
+ //     }
++#if defined(V8_CC_MSVC) && !defined(__clang__)
++// pyv8web/MSVC port: UNREACHABLE() expands to a do-while *statement* with
++// cl.exe (the GCC/clang branch is the __builtin_unreachable() expression),
++// which cannot appear in the increment clause of a for. Use a flag-based
++// loop with the same shape instead: the body is still skipped unless a
++// `goto label` jumps into it. This drops the "forgot to forward" crash of
++// the fallthrough path, which is only a debugging aid.
++#define LABEL_BLOCK(label)                     \
++  for (bool v8_label_block_done_ = false;;)    \
++    if (v8_label_block_done_++)                \
++      break;                                   \
++    else                                       \
++  label:
++#else
+ #define LABEL_BLOCK(label)     \
+   for (; false; UNREACHABLE()) \
+   label:
++#endif
+ 
+ // EmitProjectionReducer ensures that projections are always emitted right after
+ // their input operation. To do so, when an operation with multiple outputs is
 diff --git a/v8/src/compiler/turboshaft/operations.h b/v8/src/compiler/turboshaft/operations.h
-index 568199cc..1e367147 100644
+index 568199cc4..1e367147c 100644
 --- a/v8/src/compiler/turboshaft/operations.h
 +++ b/v8/src/compiler/turboshaft/operations.h
 @@ -545,7 +545,8 @@ class InputsRepFactory {
@@ -301,7 +357,7 @@ index 568199cc..1e367147 100644
    MemoryRepresentation loaded_rep;
    RegisterRepresentation result_rep;
 diff --git a/v8/src/debug/debug-scope-info.cc b/v8/src/debug/debug-scope-info.cc
-index e6658688..341f09ae 100644
+index e66586886..341f09ae8 100644
 --- a/v8/src/debug/debug-scope-info.cc
 +++ b/v8/src/debug/debug-scope-info.cc
 @@ -82,7 +82,8 @@ static_assert(sizeof(ScopeRecord) == 20);
@@ -323,7 +379,7 @@ index e6658688..341f09ae 100644
  static_assert(std::is_trivial_v<DebugVariableEntry>);
  static_assert(std::is_standard_layout_v<DebugVariableEntry>);
 diff --git a/v8/src/execution/isolate-data.h b/v8/src/execution/isolate-data.h
-index 525ded2c..f38805b7 100644
+index 525ded2cb..f38805b78 100644
 --- a/v8/src/execution/isolate-data.h
 +++ b/v8/src/execution/isolate-data.h
 @@ -89,6 +89,14 @@ struct JSBuiltinDispatchHandleRoot {
@@ -384,7 +440,7 @@ index 525ded2c..f38805b7 100644
  #undef V
    static_assert(sizeof(IsolateData) == IsolateData::kSizeOffset);
 diff --git a/v8/src/execution/isolate.h b/v8/src/execution/isolate.h
-index bc024d14..bd7488cc 100644
+index bc024d14e..bd7488ccc 100644
 --- a/v8/src/execution/isolate.h
 +++ b/v8/src/execution/isolate.h
 @@ -560,8 +560,16 @@ using DebugObjectCache = std::vector<Handle<HeapObject>>;
@@ -406,8 +462,47 @@ index bc024d14..bd7488cc 100644
  
  // HiddenFactory exists so Isolate can privately inherit from it without making
  // Factory's members available to Isolate directly.
+diff --git a/v8/src/execution/simulator.h b/v8/src/execution/simulator.h
+index fddf7915b..13daf3e82 100644
+--- a/v8/src/execution/simulator.h
++++ b/v8/src/execution/simulator.h
+@@ -179,7 +179,16 @@ class GeneratedCode {
+   }
+ #else
+ 
+-  __attribute__((nodebug)) DISABLE_CFI_ICALL Return Call(Args... args) {
++// pyv8web/MSVC port: nodebug is a GNU/clang attribute that suppresses debug
++// info for the generated-code trampoline; cl.exe has no equivalent and the
++// plain attribute syntax is a syntax error.
++#if defined(__clang__) || defined(__GNUC__)
++#define V8_GENERATED_CODE_NODEBUG __attribute__((nodebug))
++#else
++#define V8_GENERATED_CODE_NODEBUG
++#endif
++
++  V8_GENERATED_CODE_NODEBUG DISABLE_CFI_ICALL Return Call(Args... args) {
+     // When running without a simulator we call the entry directly.
+ // Starboard is a platform abstraction interface that also include Windows
+ // platforms like UWP.
+@@ -223,13 +232,15 @@ class GeneratedCode {
+   }
+ #endif  // USE_SIMULATOR
+ 
+-  __attribute__((nodebug)) DISABLE_CFI_ICALL Return
++  V8_GENERATED_CODE_NODEBUG DISABLE_CFI_ICALL Return
+   CallSandboxed(Args... args) {
+     EnterSandboxScope sandboxed;
+     return Call(args...);
+   }
+ 
+  private:
++#undef V8_GENERATED_CODE_NODEBUG
++
+   friend class GeneratedCode<Return(Args...)>;
+   Isolate* isolate_;
+   Signature* fn_ptr_;
 diff --git a/v8/src/flags/flag-definitions.h b/v8/src/flags/flag-definitions.h
-index 185599e5..3b9fec1f 100644
+index 185599e59..3b9fec1f9 100644
 --- a/v8/src/flags/flag-definitions.h
 +++ b/v8/src/flags/flag-definitions.h
 @@ -2228,15 +2228,19 @@ DEFINE_NEG_NEG_IMPLICATION(wasm_bounds_checks, wasm_enforce_bounds_checks)
@@ -437,7 +532,7 @@ index 185599e5..3b9fec1f 100644
  DEFINE_BOOL(wasm_math_intrinsics, true,
              "intrinsify some Math imports into wasm")
 diff --git a/v8/src/heap/factory.cc b/v8/src/heap/factory.cc
-index a5c56990..58393ab5 100644
+index a5c56990c..58393ab59 100644
 --- a/v8/src/heap/factory.cc
 +++ b/v8/src/heap/factory.cc
 @@ -3242,6 +3242,9 @@ DEFINE_ERROR(ReferenceError, reference_error)
@@ -451,7 +546,7 @@ index a5c56990..58393ab5 100644
  DEFINE_ERROR(WasmLinkError, wasm_link_error)
  DEFINE_ERROR(WasmSuspendError, wasm_suspend_error)
 diff --git a/v8/src/heap/factory.h b/v8/src/heap/factory.h
-index a71811e6..451ca3ef 100644
+index a71811e66..451ca3ef4 100644
 --- a/v8/src/heap/factory.h
 +++ b/v8/src/heap/factory.h
 @@ -1106,6 +1106,9 @@ class V8_EXPORT_PRIVATE Factory : public FactoryBase<Factory> {
@@ -465,7 +560,7 @@ index a71811e6..451ca3ef 100644
    DECLARE_ERROR(WasmLinkError)
    DECLARE_ERROR(WasmSuspendError)
 diff --git a/v8/src/heap/local-heap.h b/v8/src/heap/local-heap.h
-index 97f91b14..43b07887 100644
+index 97f91b146..43b07887a 100644
 --- a/v8/src/heap/local-heap.h
 +++ b/v8/src/heap/local-heap.h
 @@ -40,8 +40,15 @@ class Safepoint;
@@ -487,7 +582,7 @@ index 97f91b14..43b07887 100644
  // LocalHeap is used by the GC to track all threads with heap access in order to
  // stop them before performing a collection. LocalHeaps can be either Parked or
 diff --git a/v8/src/init/bootstrapper.cc b/v8/src/init/bootstrapper.cc
-index 471156fa..f94b9221 100644
+index 471156fa3..f94b9221e 100644
 --- a/v8/src/init/bootstrapper.cc
 +++ b/v8/src/init/bootstrapper.cc
 @@ -3346,6 +3346,17 @@ void Genesis::InitializeGlobal(DirectHandle<JSGlobalObject> global_object,
@@ -509,7 +604,7 @@ index 471156fa..f94b9221 100644
    InstallError(isolate_, global, factory->URIError_string(),
                 Context::URI_ERROR_FUNCTION_INDEX);
 diff --git a/v8/src/inspector/v8-console-message.cc b/v8/src/inspector/v8-console-message.cc
-index f65c04dd..7361a000 100644
+index f65c04ddf..7361a0005 100644
 --- a/v8/src/inspector/v8-console-message.cc
 +++ b/v8/src/inspector/v8-console-message.cc
 @@ -118,7 +118,9 @@ class V8ValueStringBuilder {
@@ -524,7 +619,7 @@ index f65c04dd..7361a000 100644
        v8::Local<v8::Object> object = value.As<v8::Object>();
        v8::Local<v8::String> stringValue;
 diff --git a/v8/src/inspector/v8-deep-serializer.cc b/v8/src/inspector/v8-deep-serializer.cc
-index b1ea86bd..b1abd6ea 100644
+index b1ea86bd7..b1abd6eaa 100644
 --- a/v8/src/inspector/v8-deep-serializer.cc
 +++ b/v8/src/inspector/v8-deep-serializer.cc
 @@ -396,7 +396,9 @@ Response V8DeepSerializer::serializeV8Value(
@@ -539,7 +634,7 @@ index b1ea86bd..b1abd6ea 100644
          "type", protocol::Runtime::DeepSerializedValue::TypeEnum::Function);
      return Response::Success();
 diff --git a/v8/src/inspector/value-mirror.cc b/v8/src/inspector/value-mirror.cc
-index b9fcf2bc..2dde3bbb 100644
+index b9fcf2bc0..2dde3bbb4 100644
 --- a/v8/src/inspector/value-mirror.cc
 +++ b/v8/src/inspector/value-mirror.cc
 @@ -1705,7 +1705,7 @@ void ValueMirror::getInternalProperties(
@@ -561,8 +656,29 @@ index b9fcf2bc..2dde3bbb 100644
      v8::Local<v8::Function> function = object.As<v8::Function>();
      return std::make_unique<FunctionMirror>(function);
    }
+diff --git a/v8/src/logging/runtime-call-stats.h b/v8/src/logging/runtime-call-stats.h
+index ad06aa2f3..e330cc548 100644
+--- a/v8/src/logging/runtime-call-stats.h
++++ b/v8/src/logging/runtime-call-stats.h
+@@ -60,6 +60,7 @@ namespace v8::internal {
+   V(Context_New)                                           \
+   V(Context_NewRemoteContext)                              \
+   V(DataView_New)                                          \
++  V(DataCloneError_New)                                    \
+   V(Date_New)                                              \
+   V(Date_Parse)                                            \
+   V(Debug_Call)                                            \
+@@ -68,6 +69,8 @@ namespace v8::internal {
+   V(DictionaryTemplate_NewInstance)                        \
+   V(Error_New)                                             \
+   V(Exception_CaptureStackTrace)                           \
++  V(HierarchyRequestError_New)                             \
++  V(NotSupportedError_New)                                 \
+   V(External_New)                                          \
+   V(Float16Array_New)                                      \
+   V(Float32Array_New)                                      \
 diff --git a/v8/src/objects/contexts.h b/v8/src/objects/contexts.h
-index 9a787529..4e7f1687 100644
+index 9a7875297..4e7f16872 100644
 --- a/v8/src/objects/contexts.h
 +++ b/v8/src/objects/contexts.h
 @@ -437,6 +437,12 @@ enum ContextLookupFlags {
@@ -579,7 +695,7 @@ index 9a787529..4e7f1687 100644
  
  // JSFunctions are pairs (context, function code), sometimes also called
 diff --git a/v8/src/objects/instance-type-inl.h b/v8/src/objects/instance-type-inl.h
-index e36166c7..fae06146 100644
+index e36166c7c..fae06146b 100644
 --- a/v8/src/objects/instance-type-inl.h
 +++ b/v8/src/objects/instance-type-inl.h
 @@ -66,7 +66,8 @@ constexpr std::optional<RootIndex> Map::TryGetMapRootIdxFor(InstanceType type) {
@@ -630,27 +746,33 @@ index e36166c7..fae06146 100644
  
  inline constexpr std::optional<TaggedAddressRange> UniqueMapRangeOfInstanceType(
 diff --git a/v8/src/objects/object-macros.h b/v8/src/objects/object-macros.h
-index 8d9e4cc1..5246aeeb 100644
+index 8d9e4cc19..4bbf4da47 100644
 --- a/v8/src/objects/object-macros.h
 +++ b/v8/src/objects/object-macros.h
-@@ -70,10 +70,13 @@
+@@ -70,10 +70,21 @@
    ;                   \
    V8_OBJECT_POP static_assert(true)
  
--#define V8_OBJECT_INNER_CLASS V8_OBJECT_POP
-+// pyv8web/MSVC port: MSVC honours pack(pop) but ignores pack(push) inside
-+// a class body, so the inner pair unbalances the stack and leaks pack(4)
-+// into every following header (breaking all layout static_asserts).
++// pyv8web/MSVC port: cl.exe honours pack(pop) but ignores pack(push) inside a
++// class body, so the inner pair unbalances the stack and leaks pack(4) into
++// every following header (breaking all layout static_asserts). clang-cl
++// implements the pair correctly, so it keeps V8's original definition.
++#if defined(V8_CC_MSVC) && !defined(__clang__)
 +#define V8_OBJECT_INNER_CLASS
++#define V8_OBJECT_INNER_CLASS_END \
++  ;                               \
++  static_assert(true)
++#else
+ #define V8_OBJECT_INNER_CLASS V8_OBJECT_POP
  #define V8_OBJECT_INNER_CLASS_END \
    ;                               \
--  V8_OBJECT_PUSH static_assert(true)
-+  static_assert(true)  // pyv8web/MSVC port: inner pack stack balanced
+   V8_OBJECT_PUSH static_assert(true)
++#endif
  
  // Instance-type markers for V8_OBJECT classes. They exist solely for the
  // libclang-driven instance-type generator, which harvests them to drive
 diff --git a/v8/src/objects/tagged-field.h b/v8/src/objects/tagged-field.h
-index 4e6e9c3e..5e91be9e 100644
+index 4e6e9c3ed..5e91be9ec 100644
 --- a/v8/src/objects/tagged-field.h
 +++ b/v8/src/objects/tagged-field.h
 @@ -203,6 +203,34 @@ static_assert(sizeof(JSDispatchHandleMember) == sizeof(uint32_t));
@@ -697,8 +819,34 @@ index 4e6e9c3e..5e91be9e 100644
  // OFFSET_OF_DATA_START(T) returns the offset of the FLEXIBLE_ARRAY_MEMBER of
  // the class T.
  #define OFFSET_OF_DATA_START(Type) Type::template OffsetOfDataStart<Type>()
+diff --git a/v8/src/objects/tagged.h b/v8/src/objects/tagged.h
+index fb7a022a7..47467c025 100644
+--- a/v8/src/objects/tagged.h
++++ b/v8/src/objects/tagged.h
+@@ -344,7 +344,21 @@ consteval bool is_subtype_helper() {
+     return is_subtype_helper<typename Derived::value_type, Base>();
+   } else {
+     // Fallback to base_of.
++#if defined(V8_CC_MSVC) && !defined(__clang__)
++    // pyv8web/MSVC port: cl.exe rejects __is_base_of on incomplete types
++    // (C2139) and instantiates these traits earlier than GCC/clang do --
++    // before the hole sentinels (TheHole, HashTableHole, ...) are defined.
++    // Those sentinels ARE Object subclasses and the embedder relies on
++    // Handle<hole> -> Handle<Object> staying valid, so answer true while a
++    // type is still incomplete instead of leaving the relation undecided.
++    if constexpr (!is_complete<Derived> || !is_complete<Base>) {
++      return true;
++    } else {
++      return is_base_of_v<Base, Derived>;
++    }
++#else
+     return is_base_of_v<Base, Derived>;
++#endif
+   }
+ }
+ }  // namespace detail
 diff --git a/v8/src/parsing/keywords-gen.h b/v8/src/parsing/keywords-gen.h
-index aea1747b..214767da 100644
+index aea1747b2..214767da6 100644
 --- a/v8/src/parsing/keywords-gen.h
 +++ b/v8/src/parsing/keywords-gen.h
 @@ -221,6 +221,14 @@ static const struct PerfectKeywordHashTableEntry kPerfectKeywordHashTable[128] =
@@ -724,7 +872,7 @@ index aea1747b..214767da 100644
 +#endif  // V8_PARSING_KEYWORDS_GEN_H_
 \ No newline at end of file
 diff --git a/v8/src/parsing/keywords.txt b/v8/src/parsing/keywords.txt
-index a8d926c2..1de44e58 100644
+index a8d926c26..1de44e585 100644
 --- a/v8/src/parsing/keywords.txt
 +++ b/v8/src/parsing/keywords.txt
 @@ -24,7 +24,8 @@ catch, Token::kCatch
@@ -738,7 +886,7 @@ index a8d926c2..1de44e58 100644
  delete, Token::kDelete
  do, Token::kDo
 diff --git a/v8/src/parsing/parser-base.h b/v8/src/parsing/parser-base.h
-index 8d46afb9..5e501e68 100644
+index 8d46afb9f..5e501e683 100644
 --- a/v8/src/parsing/parser-base.h
 +++ b/v8/src/parsing/parser-base.h
 @@ -5917,8 +5917,13 @@ typename ParserBase<Impl>::StatementT ParserBase<Impl>::ParseStatement(
@@ -757,7 +905,7 @@ index 8d46afb9..5e501e68 100644
        return ParseVariableStatement(kStatement, nullptr);
      case Token::kAsync:
 diff --git a/v8/src/parsing/token.h b/v8/src/parsing/token.h
-index a851946a..718aa306 100644
+index a851946ac..718aa3068 100644
 --- a/v8/src/parsing/token.h
 +++ b/v8/src/parsing/token.h
 @@ -138,6 +138,7 @@ namespace internal {
@@ -769,14 +917,14 @@ index a851946a..718aa306 100644
    /* kDelete */                                                               \
    K(kDo, "do", 0)                                                             \
 diff --git a/v8/src/sandbox/external-pointer-inl.h b/v8/src/sandbox/external-pointer-inl.h
-index fec169a8..84743222 100644
+index fec169a8a..7eef97307 100644
 --- a/v8/src/sandbox/external-pointer-inl.h
 +++ b/v8/src/sandbox/external-pointer-inl.h
 @@ -29,6 +29,7 @@ inline void ExternalPointerMember<kTagRange>::Init(Address host_address,
        host_address, reinterpret_cast<Address>(storage_), isolate, value);
  }
  
-+#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
  template <ExternalPointerTagRange kTagRange>
    requires TagWithRedirection<kTagRange>
  inline void ExternalPointerMember<kTagRange>::Init(Address host_address,
@@ -792,7 +940,7 @@ index fec169a8..84743222 100644
        reinterpret_cast<Address>(storage_), isolate);
  }
  
-+#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
  template <ExternalPointerTagRange kTagRange>
    requires TagWithRedirection<kTagRange>
  inline Address ExternalPointerMember<kTagRange>::load(
@@ -808,7 +956,7 @@ index fec169a8..84743222 100644
                                   value);
  }
  
-+#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
  template <ExternalPointerTagRange kTagRange>
    requires TagWithRedirection<kTagRange>
  inline void ExternalPointerMember<kTagRange>::store(IsolateForSandbox isolate,
@@ -823,7 +971,7 @@ index fec169a8..84743222 100644
                                             isolate, value);
  }
  
-+#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
  template <ExternalPointerTagRange kTagRange>
    requires TagWithRedirection<kTagRange>
  inline Address ExternalPointerMember<kTagRange>::load_raw(
@@ -833,7 +981,7 @@ index fec169a8..84743222 100644
  }
 +#endif
  
-+#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
  template <ExternalPointerTagRange kTagRange>
    requires TagWithRedirection<kTagRange>
  inline void ExternalPointerMember<kTagRange>::store_raw(
@@ -849,7 +997,7 @@ index fec169a8..84743222 100644
    memcpy(storage_, &value, sizeof(ExternalPointer_t));
  }
  
-+#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
  template <ExternalPointerTagRange kTagRange>
    requires TagWithRedirection<kTagRange>
  inline ExternalPointer_t ExternalPointerMember<kTagRange>::load_encoded()
@@ -858,7 +1006,7 @@ index fec169a8..84743222 100644
  }
 +#endif
  
-+#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
  template <ExternalPointerTagRange kTagRange>
    requires TagWithRedirection<kTagRange>
  inline void ExternalPointerMember<kTagRange>::store_encoded(
@@ -867,7 +1015,7 @@ index fec169a8..84743222 100644
  }
 +#endif
  
-+#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
  template <ExternalPointerTagRange kTagRange>
    requires TagWithRedirection<kTagRange>
  inline void
@@ -877,7 +1025,7 @@ index fec169a8..84743222 100644
  }
 +#endif
  
-+#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
  template <ExternalPointerTagRange kTagRange>
    requires TagWithRedirection<kTagRange>
  inline void ExternalPointerMember<kTagRange>::
@@ -887,7 +1035,7 @@ index fec169a8..84743222 100644
  }
 +#endif
  
-+#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
  template <ExternalPointerTagRange kTagRange>
    requires TagWithRedirection<kTagRange>
  inline Address ExternalPointerMember<kTagRange>::RedirectValue(
@@ -900,14 +1048,14 @@ index fec169a8..84743222 100644
  template <ExternalPointerTag tag>
  V8_INLINE ExternalPointerHandle
 diff --git a/v8/src/sandbox/external-pointer.h b/v8/src/sandbox/external-pointer.h
-index 5b9a9437..2881d47f 100644
+index 5b9a9437c..e246526ae 100644
 --- a/v8/src/sandbox/external-pointer.h
 +++ b/v8/src/sandbox/external-pointer.h
 @@ -66,11 +66,20 @@ class ExternalPointerMember {
    inline ExternalPointer_t load_encoded() const;
    inline void store_encoded(ExternalPointer_t value);
  
-+#if defined(V8_CC_MSVC)
++#if defined(V8_CC_MSVC) && !defined(__clang__)
 +  // pyv8web/MSVC port: with the constrained redirection specialisation
 +  // disabled, these hooks are no-ops (they only matter on simulator builds).
 +  inline void RemoveCallbackRedirectionForSerialization(IsolateForSandbox) {}
@@ -920,7 +1068,7 @@ index 5b9a9437..2881d47f 100644
    }
  
   private:
-+#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
    static_assert(
        ([]() {
          for (int tag = kTagRange.first; tag <= kTagRange.last; ++tag) {
@@ -937,7 +1085,7 @@ index 5b9a9437..2881d47f 100644
 +// of a constrained class-template partial specialization (C2244/C3864).
 +// The redirection path is only active on simulator builds
 +// (USE_SIMULATOR_BOOL == true), so on MSVC we use the generic member.
-+#if defined(V8_CC_MSVC)
++#if defined(V8_CC_MSVC) && !defined(__clang__)
 +template <ExternalPointerTagRange kTagRange>
 +concept TagWithRedirection = false;
 +#else
@@ -950,7 +1098,7 @@ index 5b9a9437..2881d47f 100644
  // Specialization of ExternalPointerMember for tags that need callback
  // redirection on the simulator.
 diff --git a/v8/src/snapshot/serializer-deserializer.h b/v8/src/snapshot/serializer-deserializer.h
-index 15198cf5..900a58af 100644
+index 15198cf54..900a58af6 100644
 --- a/v8/src/snapshot/serializer-deserializer.h
 +++ b/v8/src/snapshot/serializer-deserializer.h
 @@ -347,21 +347,27 @@ class SerializerDeserializer : public RootVisitor {
@@ -985,7 +1133,7 @@ index 15198cf5..900a58af 100644
    static_assert(sizeof(EncodedCppHeapPointer) == kEncodedEntrySize);
    static_assert(sizeof(EncodedJSDispatchEntry) == kEncodedEntrySize);
 diff --git a/v8/src/trap-handler/trap-handler.h b/v8/src/trap-handler/trap-handler.h
-index fa4fc80c..a01bf53c 100644
+index fa4fc80c9..a01bf53cf 100644
 --- a/v8/src/trap-handler/trap-handler.h
 +++ b/v8/src/trap-handler/trap-handler.h
 @@ -67,8 +67,12 @@ namespace v8::internal::trap_handler {
@@ -1003,7 +1151,7 @@ index fa4fc80c..a01bf53c 100644
  
  #else  // V8_OS_WIN
 diff --git a/v8/src/utils/utils.h b/v8/src/utils/utils.h
-index 48eca5c2..9ad743c9 100644
+index 48eca5c2a..9ad743c9f 100644
 --- a/v8/src/utils/utils.h
 +++ b/v8/src/utils/utils.h
 @@ -259,8 +259,13 @@ inline T RoundingAverageUnsigned(T a, T b) {
@@ -1022,8 +1170,36 @@ index 48eca5c2..9ad743c9 100644
  
  // Size of the field defined by DEFINE_FIELD_OFFSET_CONSTANTS
  #define FIELD_SIZE(Name) (Name##End + 1 - Name)
+diff --git a/v8/src/wasm/baseline/liftoff-register.h b/v8/src/wasm/baseline/liftoff-register.h
+index 67cc462de..f521e0c89 100644
+--- a/v8/src/wasm/baseline/liftoff-register.h
++++ b/v8/src/wasm/baseline/liftoff-register.h
+@@ -454,13 +454,21 @@ struct Bits128 {
+     return Bits128{0, low << (shift - 64)};
+   }
+ 
++// pyv8web/MSVC port: const marks a pure function; it is a GNU/clang
++// attribute and cl.exe cannot parse it. It is only an optimisation hint.
++#if defined(__clang__) || defined(__GNUC__)
++#define V8_LIFTOFF_CONST_ATTR __attribute__((const))
++#else
++#define V8_LIFTOFF_CONST_ATTR
++#endif
++
+   friend V8_INLINE constexpr bool operator!=(Bits128 lhs, uint64_t rhs)
+-      __attribute__((const)) {
++      V8_LIFTOFF_CONST_ATTR {
+     return lhs.low != rhs || lhs.high != 0;
+   }
+ 
+   friend V8_INLINE constexpr bool operator!=(Bits128 lhs, int rhs)
+-      __attribute__((const)) {
++      V8_LIFTOFF_CONST_ATTR {
+     return lhs.low != static_cast<uint64_t>(rhs) || lhs.high != 0;
+   }
+ };
 diff --git a/v8/src/wasm/effect-handler.h b/v8/src/wasm/effect-handler.h
-index 6c69eced..5f981645 100644
+index 6c69ecedc..5f9816456 100644
 --- a/v8/src/wasm/effect-handler.h
 +++ b/v8/src/wasm/effect-handler.h
 @@ -11,7 +11,14 @@ namespace v8 {
@@ -1051,7 +1227,7 @@ index 6c69eced..5f981645 100644
  }  // namespace internal
  }  // namespace v8
 diff --git a/v8/third_party/rapidhash-v8/rapidhash.h b/v8/third_party/rapidhash-v8/rapidhash.h
-index c67b400c..e7475bca 100644
+index c67b400cb..e7475bcad 100644
 --- a/v8/third_party/rapidhash-v8/rapidhash.h
 +++ b/v8/third_party/rapidhash-v8/rapidhash.h
 @@ -153,8 +153,16 @@ struct PlainHashReader {

@@ -1,0 +1,402 @@
+diff --git a/v8/include/v8-exception.h b/v8/include/v8-exception.h
+index 86f046486..870aa579d 100644
+--- a/v8/include/v8-exception.h
++++ b/v8/include/v8-exception.h
+@@ -48,9 +48,14 @@ class V8_EXPORT Exception {
+   static Local<Value> WasmSuspendError(Local<String> message,
+                                        Local<Value> options = {});
+   static Local<Value> Error(Local<String> message, Local<Value> options = {});
+-  static Local<Value> HierarchyRequestError(Local<String> message);
+-  static Local<Value> DataCloneError(Local<String> message);
+-  static Local<Value> NotSupportedError(Local<String> message);
++  // pyv8web: 16.0's DEFINE_ERROR takes (message, options); keep the
++  // declarations in sync with the definitions in api.cc.
++  static Local<Value> HierarchyRequestError(Local<String> message,
++                                            Local<Value> options = {});
++  static Local<Value> DataCloneError(Local<String> message,
++                                     Local<Value> options = {});
++  static Local<Value> NotSupportedError(Local<String> message,
++                                        Local<Value> options = {});
+ 
+   /**
+    * Creates an error message for the given exception.
+diff --git a/v8/include/v8config.h b/v8/include/v8config.h
+index 2b316273e..df5885764 100644
+--- a/v8/include/v8config.h
++++ b/v8/include/v8config.h
+@@ -750,7 +750,7 @@ path. Add it with -I<path> to the command line
+ // pyv8web/MSVC port: cl.exe has no __attribute__((packed)). A push/pop pair
+ // around the struct is the MSVC equivalent (pack(push) does work inside a
+ // class body as long as it is not preceded by a pack(pop)).
+-#if defined(V8_CC_MSVC)
++#if defined(V8_CC_MSVC) && !defined(__clang__)
+ #define V8_STRUCT_PACKED_BEGIN __pragma(pack(push, 1))
+ #define V8_STRUCT_PACKED_END __pragma(pack(pop))
+ #else
+@@ -763,10 +763,14 @@ path. Add it with -I<path> to the command line
+ // evaluates to 0 and V8 silently falls back to a no-op. Without the attribute
+ // the zero-sized IsolateData padding members each occupy one byte and every
+ // generated-code offset is wrong. Force the MSVC attribute directly.
+-#if defined(V8_CC_MSVC)
++#if defined(V8_CC_MSVC) && !defined(__clang__)
+ #define V8_NO_UNIQUE_ADDRESS [[msvc::no_unique_address]]
+ #elif V8_HAS_CPP_ATTRIBUTE_NO_UNIQUE_ADDRESS
++#if defined(V8_CC_MSVC) && V8_HAS_CPP_ATTRIBUTE(msvc::no_unique_address)
++#define V8_NO_UNIQUE_ADDRESS [[msvc::no_unique_address]]
++#else
+ #define V8_NO_UNIQUE_ADDRESS [[no_unique_address]]
++#endif
+ #else
+ #define V8_NO_UNIQUE_ADDRESS /* NOT SUPPORTED */
+ #endif
+diff --git a/v8/src/api/api-natives.cc b/v8/src/api/api-natives.cc
+index 76025837c..000f42db2 100644
+--- a/v8/src/api/api-natives.cc
++++ b/v8/src/api/api-natives.cc
+@@ -631,8 +631,11 @@ Handle<JSFunction> ApiNatives::CreateApiFunction(
+     DCHECK(result->shared()->IsApiFunction());
+     DCHECK(!IsConstructor(*result));
+     DCHECK(!result->has_prototype_slot());
+-    // pyv8web: use strict-without-prototype map for non-constructor API methods
+-    result->set_map(*isolate->strict_function_without_prototype_map());
++    // pyv8web: use strict-without-prototype map for non-constructor API
++    // methods. 16.0 dropped the strict/sloppy dual maps (the language mode is
++    // always strict), so the plain function_without_prototype_map is the map
++    // 11.6 called strict_function_without_prototype_map.
++    result->set_map(isolate, *isolate->function_without_prototype_map());
+     return result;
+   }
+ 
+@@ -644,8 +647,9 @@ Handle<JSFunction> ApiNatives::CreateApiFunction(
+   // constructors. Sloppy map injects poison pill accessors via
+   // AddRestrictedFunctionProperties that appear in getOwnPropertyDescriptors.
+   if (obj->read_only_prototype()) {
+-    // pyv8web: strict map suppresses caller/arguments poison pills.
+-    result->set_map(isolate, *isolate->strict_function_with_readonly_prototype_map());
++    // pyv8web: strict map suppresses caller/arguments poison pills. 16.0
++    // merged the strict/sloppy map pair into a single read-only-prototype map.
++    result->set_map(isolate, *isolate->function_with_readonly_prototype_map());
+   }
+ 
+   if (IsTheHole(*prototype)) {
+diff --git a/v8/src/compiler/code-assembler.h b/v8/src/compiler/code-assembler.h
+index 286315481..b03e4bccf 100644
+--- a/v8/src/compiler/code-assembler.h
++++ b/v8/src/compiler/code-assembler.h
+@@ -523,9 +523,18 @@ class V8_EXPORT_PRIVATE CodeAssembler {
+                         std::is_convertible_v<TNode<A>, TNode<Object>>,
+                     "Coercion to untagged values cannot be "
+                     "checked.");
++#if defined(V8_CC_MSVC) && !defined(__clang__)
++      // pyv8web/MSVC port: cl.exe instantiates is_subtype_v before some V8
++      // types are complete, and objects/tagged.h then answers "convertible"
++      // for the still-incomplete hole sentinels (see the note there), which
++      // would make this hygiene check fire on legitimate casts. It is a
++      // code-cleanliness assertion only, so skip it for cl.exe.
++      static_assert(true, "Unnecessary CAST check disabled for cl.exe");
++#else
+       static_assert(
+           !FromTyped || !std::is_convertible_v<TNode<PreviousType>, TNode<A>>,
+           "Unnecessary CAST: types are convertible.");
++#endif
+ #ifdef DEBUG
+       if (v8_flags.slow_debug_code) {
+         TNode<ExternalReference> function = code_assembler_->ExternalConstant(
+diff --git a/v8/src/compiler/turboshaft/assembler.h b/v8/src/compiler/turboshaft/assembler.h
+index 643730314..f048bed97 100644
+--- a/v8/src/compiler/turboshaft/assembler.h
++++ b/v8/src/compiler/turboshaft/assembler.h
+@@ -1103,9 +1103,24 @@ class ScopedVar : public Var<T, Assembler> {
+ //       if (...) goto no_change;
+ //       ...
+ //     }
++#if defined(V8_CC_MSVC) && !defined(__clang__)
++// pyv8web/MSVC port: UNREACHABLE() expands to a do-while *statement* with
++// cl.exe (the GCC/clang branch is the __builtin_unreachable() expression),
++// which cannot appear in the increment clause of a for. Use a flag-based
++// loop with the same shape instead: the body is still skipped unless a
++// `goto label` jumps into it. This drops the "forgot to forward" crash of
++// the fallthrough path, which is only a debugging aid.
++#define LABEL_BLOCK(label)                     \
++  for (bool v8_label_block_done_ = false;;)    \
++    if (v8_label_block_done_++)                \
++      break;                                   \
++    else                                       \
++  label:
++#else
+ #define LABEL_BLOCK(label)     \
+   for (; false; UNREACHABLE()) \
+   label:
++#endif
+ 
+ // EmitProjectionReducer ensures that projections are always emitted right after
+ // their input operation. To do so, when an operation with multiple outputs is
+diff --git a/v8/src/execution/simulator.h b/v8/src/execution/simulator.h
+index fddf7915b..13daf3e82 100644
+--- a/v8/src/execution/simulator.h
++++ b/v8/src/execution/simulator.h
+@@ -179,7 +179,16 @@ class GeneratedCode {
+   }
+ #else
+ 
+-  __attribute__((nodebug)) DISABLE_CFI_ICALL Return Call(Args... args) {
++// pyv8web/MSVC port: nodebug is a GNU/clang attribute that suppresses debug
++// info for the generated-code trampoline; cl.exe has no equivalent and the
++// plain attribute syntax is a syntax error.
++#if defined(__clang__) || defined(__GNUC__)
++#define V8_GENERATED_CODE_NODEBUG __attribute__((nodebug))
++#else
++#define V8_GENERATED_CODE_NODEBUG
++#endif
++
++  V8_GENERATED_CODE_NODEBUG DISABLE_CFI_ICALL Return Call(Args... args) {
+     // When running without a simulator we call the entry directly.
+ // Starboard is a platform abstraction interface that also include Windows
+ // platforms like UWP.
+@@ -223,13 +232,15 @@ class GeneratedCode {
+   }
+ #endif  // USE_SIMULATOR
+ 
+-  __attribute__((nodebug)) DISABLE_CFI_ICALL Return
++  V8_GENERATED_CODE_NODEBUG DISABLE_CFI_ICALL Return
+   CallSandboxed(Args... args) {
+     EnterSandboxScope sandboxed;
+     return Call(args...);
+   }
+ 
+  private:
++#undef V8_GENERATED_CODE_NODEBUG
++
+   friend class GeneratedCode<Return(Args...)>;
+   Isolate* isolate_;
+   Signature* fn_ptr_;
+diff --git a/v8/src/logging/runtime-call-stats.h b/v8/src/logging/runtime-call-stats.h
+index ad06aa2f3..e330cc548 100644
+--- a/v8/src/logging/runtime-call-stats.h
++++ b/v8/src/logging/runtime-call-stats.h
+@@ -60,6 +60,7 @@ namespace v8::internal {
+   V(Context_New)                                           \
+   V(Context_NewRemoteContext)                              \
+   V(DataView_New)                                          \
++  V(DataCloneError_New)                                    \
+   V(Date_New)                                              \
+   V(Date_Parse)                                            \
+   V(Debug_Call)                                            \
+@@ -68,6 +69,8 @@ namespace v8::internal {
+   V(DictionaryTemplate_NewInstance)                        \
+   V(Error_New)                                             \
+   V(Exception_CaptureStackTrace)                           \
++  V(HierarchyRequestError_New)                             \
++  V(NotSupportedError_New)                                 \
+   V(External_New)                                          \
+   V(Float16Array_New)                                      \
+   V(Float32Array_New)                                      \
+diff --git a/v8/src/objects/object-macros.h b/v8/src/objects/object-macros.h
+index 5246aeeb4..4bbf4da47 100644
+--- a/v8/src/objects/object-macros.h
++++ b/v8/src/objects/object-macros.h
+@@ -70,13 +70,21 @@
+   ;                   \
+   V8_OBJECT_POP static_assert(true)
+ 
+-// pyv8web/MSVC port: MSVC honours pack(pop) but ignores pack(push) inside
+-// a class body, so the inner pair unbalances the stack and leaks pack(4)
+-// into every following header (breaking all layout static_asserts).
++// pyv8web/MSVC port: cl.exe honours pack(pop) but ignores pack(push) inside a
++// class body, so the inner pair unbalances the stack and leaks pack(4) into
++// every following header (breaking all layout static_asserts). clang-cl
++// implements the pair correctly, so it keeps V8's original definition.
++#if defined(V8_CC_MSVC) && !defined(__clang__)
+ #define V8_OBJECT_INNER_CLASS
+ #define V8_OBJECT_INNER_CLASS_END \
+   ;                               \
+-  static_assert(true)  // pyv8web/MSVC port: inner pack stack balanced
++  static_assert(true)
++#else
++#define V8_OBJECT_INNER_CLASS V8_OBJECT_POP
++#define V8_OBJECT_INNER_CLASS_END \
++  ;                               \
++  V8_OBJECT_PUSH static_assert(true)
++#endif
+ 
+ // Instance-type markers for V8_OBJECT classes. They exist solely for the
+ // libclang-driven instance-type generator, which harvests them to drive
+diff --git a/v8/src/objects/tagged.h b/v8/src/objects/tagged.h
+index fb7a022a7..47467c025 100644
+--- a/v8/src/objects/tagged.h
++++ b/v8/src/objects/tagged.h
+@@ -344,7 +344,21 @@ consteval bool is_subtype_helper() {
+     return is_subtype_helper<typename Derived::value_type, Base>();
+   } else {
+     // Fallback to base_of.
++#if defined(V8_CC_MSVC) && !defined(__clang__)
++    // pyv8web/MSVC port: cl.exe rejects __is_base_of on incomplete types
++    // (C2139) and instantiates these traits earlier than GCC/clang do --
++    // before the hole sentinels (TheHole, HashTableHole, ...) are defined.
++    // Those sentinels ARE Object subclasses and the embedder relies on
++    // Handle<hole> -> Handle<Object> staying valid, so answer true while a
++    // type is still incomplete instead of leaving the relation undecided.
++    if constexpr (!is_complete<Derived> || !is_complete<Base>) {
++      return true;
++    } else {
++      return is_base_of_v<Base, Derived>;
++    }
++#else
+     return is_base_of_v<Base, Derived>;
++#endif
+   }
+ }
+ }  // namespace detail
+diff --git a/v8/src/sandbox/external-pointer-inl.h b/v8/src/sandbox/external-pointer-inl.h
+index 84743222d..7eef97307 100644
+--- a/v8/src/sandbox/external-pointer-inl.h
++++ b/v8/src/sandbox/external-pointer-inl.h
+@@ -29,7 +29,7 @@ inline void ExternalPointerMember<kTagRange>::Init(Address host_address,
+       host_address, reinterpret_cast<Address>(storage_), isolate, value);
+ }
+ 
+-#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline void ExternalPointerMember<kTagRange>::Init(Address host_address,
+@@ -50,7 +50,7 @@ inline Address ExternalPointerMember<kTagRange>::load(
+       reinterpret_cast<Address>(storage_), isolate);
+ }
+ 
+-#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline Address ExternalPointerMember<kTagRange>::load(
+@@ -71,7 +71,7 @@ inline void ExternalPointerMember<kTagRange>::store(IsolateForSandbox isolate,
+                                  value);
+ }
+ 
+-#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline void ExternalPointerMember<kTagRange>::store(IsolateForSandbox isolate,
+@@ -89,7 +89,7 @@ inline Address ExternalPointerMember<kTagRange>::exchange(
+                                            isolate, value);
+ }
+ 
+-#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline Address ExternalPointerMember<kTagRange>::load_raw(
+@@ -99,7 +99,7 @@ inline Address ExternalPointerMember<kTagRange>::load_raw(
+ }
+ #endif
+ 
+-#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline void ExternalPointerMember<kTagRange>::store_raw(
+@@ -121,7 +121,7 @@ inline void ExternalPointerMember<kTagRange>::store_encoded(
+   memcpy(storage_, &value, sizeof(ExternalPointer_t));
+ }
+ 
+-#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline ExternalPointer_t ExternalPointerMember<kTagRange>::load_encoded()
+@@ -130,7 +130,7 @@ inline ExternalPointer_t ExternalPointerMember<kTagRange>::load_encoded()
+ }
+ #endif
+ 
+-#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline void ExternalPointerMember<kTagRange>::store_encoded(
+@@ -139,7 +139,7 @@ inline void ExternalPointerMember<kTagRange>::store_encoded(
+ }
+ #endif
+ 
+-#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline void
+@@ -150,7 +150,7 @@ ExternalPointerMember<kTagRange>::RemoveCallbackRedirectionForSerialization(
+ }
+ #endif
+ 
+-#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline void ExternalPointerMember<kTagRange>::
+@@ -160,7 +160,7 @@ inline void ExternalPointerMember<kTagRange>::
+ }
+ #endif
+ 
+-#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
+ template <ExternalPointerTagRange kTagRange>
+   requires TagWithRedirection<kTagRange>
+ inline Address ExternalPointerMember<kTagRange>::RedirectValue(
+diff --git a/v8/src/sandbox/external-pointer.h b/v8/src/sandbox/external-pointer.h
+index 2881d47fe..e246526ae 100644
+--- a/v8/src/sandbox/external-pointer.h
++++ b/v8/src/sandbox/external-pointer.h
+@@ -66,7 +66,7 @@ class ExternalPointerMember {
+   inline ExternalPointer_t load_encoded() const;
+   inline void store_encoded(ExternalPointer_t value);
+ 
+-#if defined(V8_CC_MSVC)
++#if defined(V8_CC_MSVC) && !defined(__clang__)
+   // pyv8web/MSVC port: with the constrained redirection specialisation
+   // disabled, these hooks are no-ops (they only matter on simulator builds).
+   inline void RemoveCallbackRedirectionForSerialization(IsolateForSandbox) {}
+@@ -79,7 +79,7 @@ class ExternalPointerMember {
+   }
+ 
+  private:
+-#if !defined(V8_CC_MSVC)
++#if !defined(V8_CC_MSVC) || defined(__clang__)
+   static_assert(
+       ([]() {
+         for (int tag = kTagRange.first; tag <= kTagRange.last; ++tag) {
+@@ -103,7 +103,7 @@ class ExternalPointerMember {
+ // of a constrained class-template partial specialization (C2244/C3864).
+ // The redirection path is only active on simulator builds
+ // (USE_SIMULATOR_BOOL == true), so on MSVC we use the generic member.
+-#if defined(V8_CC_MSVC)
++#if defined(V8_CC_MSVC) && !defined(__clang__)
+ template <ExternalPointerTagRange kTagRange>
+ concept TagWithRedirection = false;
+ #else
+diff --git a/v8/src/wasm/baseline/liftoff-register.h b/v8/src/wasm/baseline/liftoff-register.h
+index 67cc462de..f521e0c89 100644
+--- a/v8/src/wasm/baseline/liftoff-register.h
++++ b/v8/src/wasm/baseline/liftoff-register.h
+@@ -454,13 +454,21 @@ struct Bits128 {
+     return Bits128{0, low << (shift - 64)};
+   }
+ 
++// pyv8web/MSVC port: const marks a pure function; it is a GNU/clang
++// attribute and cl.exe cannot parse it. It is only an optimisation hint.
++#if defined(__clang__) || defined(__GNUC__)
++#define V8_LIFTOFF_CONST_ATTR __attribute__((const))
++#else
++#define V8_LIFTOFF_CONST_ATTR
++#endif
++
+   friend V8_INLINE constexpr bool operator!=(Bits128 lhs, uint64_t rhs)
+-      __attribute__((const)) {
++      V8_LIFTOFF_CONST_ATTR {
+     return lhs.low != rhs || lhs.high != 0;
+   }
+ 
+   friend V8_INLINE constexpr bool operator!=(Bits128 lhs, int rhs)
+-      __attribute__((const)) {
++      V8_LIFTOFF_CONST_ATTR {
+     return lhs.low != static_cast<uint64_t>(rhs) || lhs.high != 0;
+   }
+ };

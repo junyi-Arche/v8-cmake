@@ -454,13 +454,21 @@ struct Bits128 {
     return Bits128{0, low << (shift - 64)};
   }
 
+// pyv8web/MSVC port: const marks a pure function; it is a GNU/clang
+// attribute and cl.exe cannot parse it. It is only an optimisation hint.
+#if defined(__clang__) || defined(__GNUC__)
+#define V8_LIFTOFF_CONST_ATTR __attribute__((const))
+#else
+#define V8_LIFTOFF_CONST_ATTR
+#endif
+
   friend V8_INLINE constexpr bool operator!=(Bits128 lhs, uint64_t rhs)
-      __attribute__((const)) {
+      V8_LIFTOFF_CONST_ATTR {
     return lhs.low != rhs || lhs.high != 0;
   }
 
   friend V8_INLINE constexpr bool operator!=(Bits128 lhs, int rhs)
-      __attribute__((const)) {
+      V8_LIFTOFF_CONST_ATTR {
     return lhs.low != static_cast<uint64_t>(rhs) || lhs.high != 0;
   }
 };

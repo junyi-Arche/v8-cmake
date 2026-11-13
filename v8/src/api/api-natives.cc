@@ -631,8 +631,11 @@ Handle<JSFunction> ApiNatives::CreateApiFunction(
     DCHECK(result->shared()->IsApiFunction());
     DCHECK(!IsConstructor(*result));
     DCHECK(!result->has_prototype_slot());
-    // pyv8web: use strict-without-prototype map for non-constructor API methods
-    result->set_map(*isolate->strict_function_without_prototype_map());
+    // pyv8web: use strict-without-prototype map for non-constructor API
+    // methods. 16.0 dropped the strict/sloppy dual maps (the language mode is
+    // always strict), so the plain function_without_prototype_map is the map
+    // 11.6 called strict_function_without_prototype_map.
+    result->set_map(isolate, *isolate->function_without_prototype_map());
     return result;
   }
 
@@ -644,8 +647,9 @@ Handle<JSFunction> ApiNatives::CreateApiFunction(
   // constructors. Sloppy map injects poison pill accessors via
   // AddRestrictedFunctionProperties that appear in getOwnPropertyDescriptors.
   if (obj->read_only_prototype()) {
-    // pyv8web: strict map suppresses caller/arguments poison pills.
-    result->set_map(isolate, *isolate->strict_function_with_readonly_prototype_map());
+    // pyv8web: strict map suppresses caller/arguments poison pills. 16.0
+    // merged the strict/sloppy map pair into a single read-only-prototype map.
+    result->set_map(isolate, *isolate->function_with_readonly_prototype_map());
   }
 
   if (IsTheHole(*prototype)) {

@@ -70,13 +70,21 @@
   ;                   \
   V8_OBJECT_POP static_assert(true)
 
-// pyv8web/MSVC port: MSVC honours pack(pop) but ignores pack(push) inside
-// a class body, so the inner pair unbalances the stack and leaks pack(4)
-// into every following header (breaking all layout static_asserts).
+// pyv8web/MSVC port: cl.exe honours pack(pop) but ignores pack(push) inside a
+// class body, so the inner pair unbalances the stack and leaks pack(4) into
+// every following header (breaking all layout static_asserts). clang-cl
+// implements the pair correctly, so it keeps V8's original definition.
+#if defined(V8_CC_MSVC) && !defined(__clang__)
 #define V8_OBJECT_INNER_CLASS
 #define V8_OBJECT_INNER_CLASS_END \
   ;                               \
-  static_assert(true)  // pyv8web/MSVC port: inner pack stack balanced
+  static_assert(true)
+#else
+#define V8_OBJECT_INNER_CLASS V8_OBJECT_POP
+#define V8_OBJECT_INNER_CLASS_END \
+  ;                               \
+  V8_OBJECT_PUSH static_assert(true)
+#endif
 
 // Instance-type markers for V8_OBJECT classes. They exist solely for the
 // libclang-driven instance-type generator, which harvests them to drive
