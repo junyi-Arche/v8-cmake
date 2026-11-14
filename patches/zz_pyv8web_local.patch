@@ -246,11 +246,75 @@ index 9c25a7dce..4722046c5 100644
  
  #endif  // defined(__clang__) || defined(COMPILER_GCC)
  
+diff --git a/v8/src/codegen/code-stub-assembler-inl.h b/v8/src/codegen/code-stub-assembler-inl.h
+index 4d1066b0d..8c593c28d 100644
+--- a/v8/src/codegen/code-stub-assembler-inl.h
++++ b/v8/src/codegen/code-stub-assembler-inl.h
+@@ -26,8 +26,10 @@ TNode<JSAny> CodeStubAssembler::Call(TNode<Context> context,
+                                      ConvertReceiverMode mode,
+                                      TNode<JSAny> receiver, TArgs... args) {
+   static_assert(is_subtype_v<TCallable, Object>);
++#if !(defined(V8_CC_MSVC) && !defined(__clang__))
+   static_assert(!is_subtype_v<TCallable, JSFunction>,
+                 "Use CallFunction() when the callable is a JSFunction.");
++#endif  // !cl.exe: see objects/tagged.h
+ 
+   if (IsUndefinedConstant(receiver) || IsNullConstant(receiver)) {
+     DCHECK_NE(mode, ConvertReceiverMode::kNotNullOrUndefined);
+diff --git a/v8/src/codegen/turboshaft-builtins-assembler-inl.h b/v8/src/codegen/turboshaft-builtins-assembler-inl.h
+index 38c1626d2..f66a51230 100644
+--- a/v8/src/codegen/turboshaft-builtins-assembler-inl.h
++++ b/v8/src/codegen/turboshaft-builtins-assembler-inl.h
+@@ -1084,8 +1084,10 @@ class BuiltinsReducer : public Next {
+   V<JSAny> Call(V<Context> context, V<Callable> callable,
+                 ConvertReceiverMode mode, V<JSAny> receiver, V<Args>... args) {
+     static_assert(is_subtype_v<Callable, Object>);
++#if !(defined(V8_CC_MSVC) && !defined(__clang__))
+     static_assert(!is_subtype_v<Callable, JSFunction>,
+                   "Use CallFunction() when the callable is a JSFunction.");
++#endif  // !cl.exe: see objects/tagged.h
+ 
+     Handle<HeapObject> tagged;
+     if (__ matcher().MatchHeapConstant(receiver, &tagged) &&
+diff --git a/v8/src/compiler/backend/simd-shuffle.h b/v8/src/compiler/backend/simd-shuffle.h
+index dae746a51..ef10e2c61 100644
+--- a/v8/src/compiler/backend/simd-shuffle.h
++++ b/v8/src/compiler/backend/simd-shuffle.h
+@@ -322,10 +322,18 @@ class V8_EXPORT_PRIVATE SimdShuffle {
+     kS8x4DeinterleaveOddOddOdd,
+   };
+ 
++#if defined(V8_CC_MSVC) && !defined(__clang__)
++  // pyv8web/MSVC port: cl.exe cannot deduce constrained alias templates
++  // (C2641: "cannot deduce template arguments for ShuffleArray"). The requires
++  // clause is a compile-time guard only, so drop it for cl.exe.
++  template <size_t N = kSimd128Size>
++  using ShuffleArray = std::array<uint8_t, N>;
++#else
+   template <size_t N = kSimd128Size>
+     requires(N == kSimd128QuarterSize || N == kSimd128HalfSize ||
+              N == kSimd128Size || N == kSimd256Size)
+   using ShuffleArray = std::array<uint8_t, N>;
++#endif
+ 
+   static CanonicalShuffle TryMatchCanonical(
+       const ShuffleArray<kSimd128Size>& shuffle);
 diff --git a/v8/src/compiler/code-assembler.h b/v8/src/compiler/code-assembler.h
-index 286315481..b03e4bccf 100644
+index 286315481..76d105eb3 100644
 --- a/v8/src/compiler/code-assembler.h
 +++ b/v8/src/compiler/code-assembler.h
-@@ -523,9 +523,18 @@ class V8_EXPORT_PRIVATE CodeAssembler {
+@@ -511,8 +511,10 @@ class V8_EXPORT_PRIVATE CodeAssembler {
+       // TODO(olivf): Provide a safe SbxCast like in C++.
+       // Trusted objects can only be cast with TrustedCast. But proceed with
+       // caution, there is no safety net!
++#if !(defined(V8_CC_MSVC) && !defined(__clang__))
+       static_assert(AllowDowncastToTrusted || (!is_subtype_v<A, TrustedObject>),
+                     "Down-casting to trusted objects is verboten.");
++#endif  // !cl.exe: see objects/tagged.h
+       static_assert(!std::is_same_v<A, Tagged<MaybeObject>>,
+                     "Can't cast to Tagged<MaybeObject>, use explicit "
+                     "conversion functions. ");
+@@ -523,9 +525,18 @@ class V8_EXPORT_PRIVATE CodeAssembler {
                          std::is_convertible_v<TNode<A>, TNode<Object>>,
                      "Coercion to untagged values cannot be "
                      "checked.");
@@ -270,7 +334,7 @@ index 286315481..b03e4bccf 100644
        if (v8_flags.slow_debug_code) {
          TNode<ExternalReference> function = code_assembler_->ExternalConstant(
 diff --git a/v8/src/compiler/turboshaft/assembler.h b/v8/src/compiler/turboshaft/assembler.h
-index 643730314..f048bed97 100644
+index 643730314..fe4969ea0 100644
 --- a/v8/src/compiler/turboshaft/assembler.h
 +++ b/v8/src/compiler/turboshaft/assembler.h
 @@ -1103,9 +1103,24 @@ class ScopedVar : public Var<T, Assembler> {
@@ -278,17 +342,17 @@ index 643730314..f048bed97 100644
  //       ...
  //     }
 +#if defined(V8_CC_MSVC) && !defined(__clang__)
-+// pyv8web/MSVC port: UNREACHABLE() expands to a do-while *statement* with
-+// cl.exe (the GCC/clang branch is the __builtin_unreachable() expression),
-+// which cannot appear in the increment clause of a for. Use a flag-based
-+// loop with the same shape instead: the body is still skipped unless a
-+// `goto label` jumps into it. This drops the "forgot to forward" crash of
-+// the fallthrough path, which is only a debugging aid.
-+#define LABEL_BLOCK(label)                     \
-+  for (bool v8_label_block_done_ = false;;)    \
-+    if (v8_label_block_done_++)                \
-+      break;                                   \
-+    else                                       \
++// pyv8web/MSVC port: with cl.exe UNREACHABLE() expands to a do-while
++// *statement* (the GCC/clang branch is the __builtin_unreachable()
++// expression), which cannot appear in the increment clause of a for. Use a
++// [[noreturn]] bool helper instead so the loop keeps the exact shape of the
++// original: leaving the increment empty made the optimiser drop the body,
++// including the label that `goto` jumps into.
++[[noreturn]] inline bool TurboshaftLabelBlockUnreachable() {
++  V8_Fatal(__FILE__, __LINE__, "unreachable code");
++}
++#define LABEL_BLOCK(label)                 \
++  for (; false; TurboshaftLabelBlockUnreachable()) \
 +  label:
 +#else
  #define LABEL_BLOCK(label)     \
@@ -356,6 +420,102 @@ index 568199cc4..1e367147c 100644
    Kind kind;
    MemoryRepresentation loaded_rep;
    RegisterRepresentation result_rep;
+diff --git a/v8/src/compiler/turboshaft/random-rescheduling-phase.cc b/v8/src/compiler/turboshaft/random-rescheduling-phase.cc
+index c4ccc09c9..61605adc7 100644
+--- a/v8/src/compiler/turboshaft/random-rescheduling-phase.cc
++++ b/v8/src/compiler/turboshaft/random-rescheduling-phase.cc
+@@ -14,6 +14,15 @@ namespace v8::internal::compiler::turboshaft {
+ 
+ #include "src/compiler/turboshaft/define-assembler-macros.inc"
+ 
++// pyv8web/MSVC port: the rescheduling stack instantiates
++// Assembler<ReschedulingReducer, GraphVisitor>, and cl.exe rejects
++// ReschedulingReducer as the outermost template-template argument (C3200).
++// This pass is only reachable through the experimental
++// --turboshaft-random-rescheduling / --wasm-random-rescheduling flags (both
++// off by default), so it becomes a no-op under cl.exe while the phase symbol
++// stays defined for the pipeline.
++#if !(defined(V8_CC_MSVC) && !defined(__clang__))
++
+ template <class Next>
+ class ReschedulingReducer : public Next {
+  public:
+@@ -373,6 +382,13 @@ void RandomReschedulingPhase::Run(PipelineData* data, Zone* temp_zone) {
+                                 input_graph.GetOrCreateCompanion(), temp_zone);
+   rescheduler.Run();
+ }
++#else
++void RandomReschedulingPhase::Run(PipelineData* data, Zone* temp_zone) {
++  // No-op: see the note at the top of this file.
++  (void)data;
++  (void)temp_zone;
++}
++#endif
+ 
+ #include "src/compiler/turboshaft/undef-assembler-macros.inc"
+ 
+diff --git a/v8/src/compiler/turboshaft/turbolev-graph-builder.cc b/v8/src/compiler/turboshaft/turbolev-graph-builder.cc
+index 9e3f3418b..35da14835 100644
+--- a/v8/src/compiler/turboshaft/turbolev-graph-builder.cc
++++ b/v8/src/compiler/turboshaft/turbolev-graph-builder.cc
+@@ -5907,6 +5907,27 @@ class GraphBuildingNodeProcessor {
+     __ SetContinuationPreservedEmbedderData(data);
+     return maglev::ProcessResult::kContinue;
+   }
++
++#elif defined(V8_CC_MSVC) && !defined(__clang__)
++  // pyv8web/MSVC port: the Maglev Get/SetContinuationPreservedEmbedderData
++  // nodes are declared unconditionally in maglev-ir.h, but the Turboshaft
++  // assembler methods that lower them exist only under
++  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA. Without these overloads
++  // the generic dispatch in Run() fails with C2665. Both nodes are only
++  // produced when the embedder uses the continuation API, which this build
++  // does not, so mapping to undefined / skipping is safe here.
++  maglev::ProcessResult Process(
++      maglev::GetContinuationPreservedEmbedderData* node,
++      const maglev::ProcessingState&) {
++    SetMap(node, __ UndefinedConstant());
++    return maglev::ProcessResult::kContinue;
++  }
++  maglev::ProcessResult Process(
++      maglev::SetContinuationPreservedEmbedderData* node,
++      const maglev::ProcessingState&) {
++    node->SetValueLocationConstraints();
++    return maglev::ProcessResult::kContinue;
++  }
+ #endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
+ 
+   maglev::ProcessResult Process(maglev::AssertInt32* node,
+diff --git a/v8/src/compiler/turboshaft/wasm-code-coverage-reducer.h b/v8/src/compiler/turboshaft/wasm-code-coverage-reducer.h
+index ce8bb9f8a..82da10b38 100644
+--- a/v8/src/compiler/turboshaft/wasm-code-coverage-reducer.h
++++ b/v8/src/compiler/turboshaft/wasm-code-coverage-reducer.h
+@@ -20,7 +20,9 @@ class WasmCodeCoverageReducer : public Next {
+   // Increments a coverage counter at a given address.
+   V<None> REDUCE(WasmIncCoverageCounter)(Address address) {
+     V<WordPtr> counter_address =
+-        __ WordPtrConstant(reinterpret_cast<uintptr_t>(address));
++        // pyv8web/MSVC port: Address is uintptr_t, so the cast to the same
++        // type is ill-formed for cl.exe (C2440).
++        __ WordPtrConstant(static_cast<uintptr_t>(address));
+     V<Word32> value =
+         __ LoadOffHeap(counter_address, 0, MemoryRepresentation::Uint32());
+     V<Word32> incremented_value = __ Word32Add(value, 1);
+diff --git a/v8/src/compiler/turboshaft/wasm-shuffle-reducer.cc b/v8/src/compiler/turboshaft/wasm-shuffle-reducer.cc
+index ab5d6c262..116debc99 100644
+--- a/v8/src/compiler/turboshaft/wasm-shuffle-reducer.cc
++++ b/v8/src/compiler/turboshaft/wasm-shuffle-reducer.cc
+@@ -854,7 +854,9 @@ void WasmShuffleAnalyzer::ProcessShuffleOfLoads(const Simd128ShuffleOp& shuffle,
+ 
+   if (GetDemandedBytes(&shuffle).IsAll()) {
+     // Full width shuffles.
+-    SimdShuffle::ShuffleArray shuffle_bytes;
++    // pyv8web/MSVC port: an alias template needs an explicit (possibly
++    // empty) argument list; cl.exe rejects the elided form with C2641.
++    SimdShuffle::ShuffleArray<> shuffle_bytes;
+     std::copy_n(shuffle.shuffle.begin(), kSimd128Size, shuffle_bytes.begin());
+     auto canonical = SimdShuffle::TryMatchCanonical(shuffle_bytes);
+     switch (canonical) {
 diff --git a/v8/src/debug/debug-scope-info.cc b/v8/src/debug/debug-scope-info.cc
 index e66586886..341f09ae8 100644
 --- a/v8/src/debug/debug-scope-info.cc
@@ -559,6 +719,25 @@ index a71811e66..451ca3ef4 100644
    DECLARE_ERROR(WasmCompileError)
    DECLARE_ERROR(WasmLinkError)
    DECLARE_ERROR(WasmSuspendError)
+diff --git a/v8/src/heap/heap-write-barrier.cc b/v8/src/heap/heap-write-barrier.cc
+index ff199e658..9df3de912 100644
+--- a/v8/src/heap/heap-write-barrier.cc
++++ b/v8/src/heap/heap-write-barrier.cc
+@@ -24,8 +24,14 @@ namespace v8::internal {
+ class DescriptorArray;
+ 
+ namespace {
++#if defined(V8_CC_MSVC) && !defined(__clang__)
++// pyv8web/MSVC port: cl.exe has no __attribute__((tls_model(...))); its
++// thread_local already maps to __declspec(thread).
++thread_local MarkingBarrier* current_marking_barrier = nullptr;
++#else
+ __attribute__((tls_model(V8_TLS_MODEL))) thread_local MarkingBarrier*
+     current_marking_barrier V8_CONSTINIT = nullptr;
++#endif
+ }  // namespace
+ 
+ MarkingBarrier* WriteBarrier::CurrentMarkingBarrier(
 diff --git a/v8/src/heap/local-heap.h b/v8/src/heap/local-heap.h
 index 97f91b146..43b07887a 100644
 --- a/v8/src/heap/local-heap.h
@@ -677,6 +856,65 @@ index ad06aa2f3..e330cc548 100644
    V(External_New)                                          \
    V(Float16Array_New)                                      \
    V(Float32Array_New)                                      \
+diff --git a/v8/src/maglev/maglev-range.h b/v8/src/maglev/maglev-range.h
+index 20abc8a48..af872abd1 100644
+--- a/v8/src/maglev/maglev-range.h
++++ b/v8/src/maglev/maglev-range.h
+@@ -25,11 +25,22 @@ inline constexpr bool IsSafeInteger(int64_t value) {
+ }
+ 
+ inline constexpr bool IsSafeInteger(double value) {
++#if defined(V8_CC_MSVC) && !defined(__clang__)
++  // pyv8web/MSVC port: cl.exe's std::isfinite / std::trunc are not constexpr
++  // (C3615 when this is evaluated in a constant expression in C++20 mode).
++  // Hand-rolled equivalent: reject NaN, reject out-of-range, then require an
++  // exact integer round-trip.
++  constexpr double kMaxD = 9007199254740991.0;  // 2^53 - 1
++  if (value != value) return false;             // NaN
++  if (value < -kMaxD || value > kMaxD) return false;
++  return static_cast<double>(static_cast<int64_t>(value)) == value;
++#else
+   if (!std::isfinite(value)) return false;
+   if (value != std::trunc(value)) return false;
+   double max = static_cast<double>(kMaxSafeInteger);
+   double min = static_cast<double>(kMinSafeInteger);
+   return value >= min && value <= max;
++#endif
+ }
+ 
+ class Range {
+diff --git a/v8/src/objects/casting.h b/v8/src/objects/casting.h
+index 5fe772122..c5c4b1112 100644
+--- a/v8/src/objects/casting.h
++++ b/v8/src/objects/casting.h
+@@ -280,9 +280,11 @@ template <typename To, typename From, template <typename> class Holder>
+   requires HasTryCastImplementation<Holder, To, From>
+ inline bool TryCast(Holder<From> value, Holder<To>* out) {
+   // See SbxCast for why only TrustedObject, Smi, and Oddball are allowed.
++#if !(defined(V8_CC_MSVC) && !defined(__clang__))
+   static_assert(!is_subtype_v<To, TrustedObject> ||
+                     is_subtype_v<From, Union<Smi, Oddball, TrustedObject>>,
+                 "Type of untrusted objects cannot be checked reliably");
++#endif  // !cl.exe: see objects/tagged.h
+   if (!Is<To>(value)) return false;
+   *out = UncheckedCast<To>(value);
+   return true;
+@@ -519,6 +521,7 @@ template <typename To, typename From, template <typename> class Holder>
+   requires HasCastImplementation<Holder, To, From>
+ inline Holder<To> Cast(Holder<From> value,
+                        SourceLocation loc = SourceLocation::CurrentIfDebug()) {
++#if !(defined(V8_CC_MSVC) && !defined(__clang__))
+   static_assert(
+       !is_subtype_v<To, TrustedObject> || is_subtype_v<From, To>,
+       "Down-casting to trusted objects is verboten. Pick one of:\n"
+@@ -531,6 +534,7 @@ inline Holder<To> Cast(Holder<From> value,
+       "      Tagged<Trusted> t = "
+       "TrustedCast<Trusted>(TrustedPointerField::ReadTrustedPointerField<"
+       "kTrustedTag>(obj, ...));\n");
++#endif  // !cl.exe: see objects/tagged.h
+   DCHECK_WITH_SANDBOX_ACCESS_AND_MSG_AND_LOC(
+       NullOrIs<To>(value), V8_PRETTY_FUNCTION_VALUE_OR("Cast type check"), loc);
+   return UncheckedCast<To>(value);
 diff --git a/v8/src/objects/contexts.h b/v8/src/objects/contexts.h
 index 9a7875297..4e7f16872 100644
 --- a/v8/src/objects/contexts.h
@@ -916,6 +1154,132 @@ index a851946ac..718aa3068 100644
    K(kDefault, "default", 0)                                                   \
    /* kDelete */                                                               \
    K(kDo, "do", 0)                                                             \
+diff --git a/v8/src/regexp/regexp-bytecodes-inl.h b/v8/src/regexp/regexp-bytecodes-inl.h
+index 29f81cb68..d4eb03a6f 100644
+--- a/v8/src/regexp/regexp-bytecodes-inl.h
++++ b/v8/src/regexp/regexp-bytecodes-inl.h
+@@ -154,6 +154,14 @@ struct BytecodeOperandsTraits {
+ template <Bytecode bc>
+ struct BytecodeOperandNames;
+ 
++// pyv8web/MSVC port: cl.exe cannot constant-evaluate Name() (C3615) even
++// though kNames is a constexpr array; the function is only used for tracing
++// output at runtime, so drop the constexpr there.
++#if defined(V8_CC_MSVC) && !defined(__clang__)
++#define V8_OPERAND_NAME_CONSTEXPR
++#else
++#define V8_OPERAND_NAME_CONSTEXPR constexpr
++#endif
+ #define DECLARE_OPERAND_NAMES(CamelName, OpNames, OpTypes, ...)           \
+   template <>                                                             \
+   struct BytecodeOperandNames<Bytecode::k##CamelName> {                   \
+@@ -161,12 +169,13 @@ struct BytecodeOperandNames;
+     using enum Operand;                                                   \
+     static constexpr size_t kCount = detail::CountOf<UNPAREN(OpNames)>(); \
+     static constexpr auto kNames = detail::SplitNames<kCount>(#OpNames);  \
+-    static constexpr std::string_view Name(Operand op) {                  \
++    static V8_OPERAND_NAME_CONSTEXPR std::string_view Name(Operand op) {  \
+       return kNames[static_cast<size_t>(op)];                             \
+     }                                                                     \
+   };
+ REGEXP_BYTECODE_LIST(DECLARE_OPERAND_NAMES)
+ #undef DECLARE_OPERAND_NAMES
++#undef V8_OPERAND_NAME_CONSTEXPR
+ 
+ template <Bytecode bc, BytecodeOperandType... OpTypes>
+ class BytecodeOperandsBase {
+@@ -196,7 +205,10 @@ class BytecodeOperandsBase {
+     return []<size_t... Is>(std::index_sequence<Is...>) {
+       return std::tuple_cat([]<size_t I>() {
+         constexpr auto id = static_cast<Operand>(I);
+-        return std::tuple(std::integral_constant<Operand, id>{});
++        // pyv8web/MSVC port: class template argument deduction on std::tuple
++        // fails for cl.exe here, leaving the element type as <error> and
++        // breaking `ops.value` in ForEachOperand. Name the type explicitly.
++        return std::tuple<std::integral_constant<Operand, id>>{};
+       }.template operator()<Is>()...);
+     }(std::make_index_sequence<kCount>{});
+   }
+@@ -212,15 +224,31 @@ class BytecodeOperandsBase {
+   // above is essentially a constant.
+   template <typename Func>
+   static constexpr void ForEachOperand(Func&& f) {
++#if defined(V8_CC_MSVC) && !defined(__clang__)
++    // pyv8web/MSVC port: cl.exe mis-deduces the element type of the tuple from
++    // GetOperandsTuple() (C2228: `.value` on an <error> type) and the empty
++    // operand list breaks the unary fold. The operand list is simply
++    // 0..kCount-1 in order, so expand an index sequence instead.
++    [&]<size_t... I>(std::index_sequence<I...>) {
++      (..., f.template operator()<static_cast<Operand>(I)>());
++    }(std::make_index_sequence<kCount>{});
++#else
+     constexpr auto filtered_ops = GetOperandsTuple();
+     std::apply([&](auto... ops) { (..., f.template operator()<ops.value>()); },
+                filtered_ops);
++#endif
+   }
+ 
+   // Similar to ForEachOperand, but additionally provides the current index as
+   // a template argument. The index is a sequential index of operands.
+   template <typename Func>
+   static constexpr void ForEachOperandWithIndex(Func&& f) {
++#if defined(V8_CC_MSVC) && !defined(__clang__)
++    // pyv8web/MSVC port: see ForEachOperand.
++    [&]<size_t... I>(std::index_sequence<I...>) {
++      (..., f.template operator()<static_cast<Operand>(I), I>());
++    }(std::make_index_sequence<kCount>{});
++#else
+     constexpr auto filtered_ops = GetOperandsTuple();
+     [&]<size_t... I>(std::index_sequence<I...>) {
+       (...,
+@@ -228,6 +256,7 @@ class BytecodeOperandsBase {
+            std::tuple_element_t<I, decltype(filtered_ops)>::value /* Operand */,
+            I /* Index */>());
+     }(std::make_index_sequence<std::tuple_size_v<decltype(filtered_ops)>>{});
++#endif
+   }
+ 
+   // Similar to above, but calls |f| only for operands of a given type.
+diff --git a/v8/src/regexp/regexp-interpreter.cc b/v8/src/regexp/regexp-interpreter.cc
+index 7b999d6df..3fc688510 100644
+--- a/v8/src/regexp/regexp-interpreter.cc
++++ b/v8/src/regexp/regexp-interpreter.cc
+@@ -399,6 +399,27 @@ bool IndexIsInBounds(int index, int length) {
+   BC_LABEL(Name) OPEN_BLOCK INIT(Name __VA_OPT__(, ) __VA_ARGS__);
+ #endif  // ENABLE_DISASSEMBLER
+ 
++#if defined(V8_CC_MSVC) && !defined(__clang__)
++// pyv8web/MSVC port: routing the operands through std::apply over a tuple of
++// integral_constant makes cl.exe hit C1054 ("initializer nested too deeply")
++// on the bytecodes with many operands, and C2228 on the tuple element type.
++// Expand an index sequence instead: same order, much shallower nesting.
++#define INIT(Name, ...)                                                     \
++  constexpr Bytecode current_bc = Bytecode::k##Name;                        \
++  using Operands = BytecodeOperands<current_bc>;                            \
++  __VA_OPT__(                                                               \
++      auto argument_tuple =                                                 \
++          [&]<size_t... I>(std::index_sequence<I...>) {                     \
++            return std::make_tuple(                                         \
++                Operands::template Get<                                     \
++                    static_cast<typename Operands::Operand>(I)>(pc,         \
++                                                               no_gc)...);  \
++          }(std::make_index_sequence<Operands::kCount>{});                  \
++      auto [__VA_ARGS__] = argument_tuple;)                                 \
++  static_assert((IS_VA_EMPTY(__VA_ARGS__)) == (Operands::kCount == 0),      \
++                "Number of arguments to VISIT doesn't match the bytecodes " \
++                "operands count")
++#else
+ #define INIT(Name, ...)                                                     \
+   constexpr Bytecode current_bc = Bytecode::k##Name;                        \
+   using Operands = BytecodeOperands<current_bc>;                            \
+@@ -412,6 +433,7 @@ bool IndexIsInBounds(int index, int length) {
+   static_assert((IS_VA_EMPTY(__VA_ARGS__)) == (Operands::kCount == 0),      \
+                 "Number of arguments to VISIT doesn't match the bytecodes " \
+                 "operands count")
++#endif
+ 
+ namespace {
+ 
 diff --git a/v8/src/sandbox/external-pointer-inl.h b/v8/src/sandbox/external-pointer-inl.h
 index fec169a8a..7eef97307 100644
 --- a/v8/src/sandbox/external-pointer-inl.h
@@ -1132,6 +1496,32 @@ index 15198cf54..900a58af6 100644
    static_assert(sizeof(EncodedExternalPointer) == kEncodedEntrySize);
    static_assert(sizeof(EncodedCppHeapPointer) == kEncodedEntrySize);
    static_assert(sizeof(EncodedJSDispatchEntry) == kEncodedEntrySize);
+diff --git a/v8/src/tracing/trace-event-no-perfetto.h b/v8/src/tracing/trace-event-no-perfetto.h
+index 033f720de..d30c07120 100644
+--- a/v8/src/tracing/trace-event-no-perfetto.h
++++ b/v8/src/tracing/trace-event-no-perfetto.h
+@@ -862,11 +862,21 @@ struct TerminatingFlow {
+       TRACE_EVENT_FLAG_NONE)
+ 
+ // Macro to efficiently determine if a given category group is enabled.
++#if defined(V8_CC_MSVC) && !defined(__clang__)
++// pyv8web/MSVC port: cl.exe does not support GNU statement expressions
++// `({ ... })`; an immediately-invoked lambda keeps the same scope and value.
++#define TRACE_EVENT_CATEGORY_ENABLED(category)                          \
++  ([&]() -> bool {                                                      \
++    INTERNAL_TRACE_EVENT_GET_CATEGORY_INFO(category);                   \
++    return INTERNAL_TRACE_EVENT_CATEGORY_GROUP_ENABLED_FOR_RECORDING_MODE(); \
++  }())
++#else
+ #define TRACE_EVENT_CATEGORY_ENABLED(category)                        \
+   ({                                                                  \
+     INTERNAL_TRACE_EVENT_GET_CATEGORY_INFO(category);                 \
+     INTERNAL_TRACE_EVENT_CATEGORY_GROUP_ENABLED_FOR_RECORDING_MODE(); \
+   })
++#endif
+ 
+ #define TRACE_EVENT_CATEGORY_GROUP_ENABLED(category_group, ret)             \
+   do {                                                                      \
 diff --git a/v8/src/trap-handler/trap-handler.h b/v8/src/trap-handler/trap-handler.h
 index fa4fc80c9..a01bf53cf 100644
 --- a/v8/src/trap-handler/trap-handler.h
@@ -1150,6 +1540,22 @@ index fa4fc80c9..a01bf53cf 100644
  #endif  // BUILDING_V8_SHARED_PRIVATE
  
  #else  // V8_OS_WIN
+diff --git a/v8/src/utils/sha-256.h b/v8/src/utils/sha-256.h
+index b6cf8f590..f9511f1f3 100644
+--- a/v8/src/utils/sha-256.h
++++ b/v8/src/utils/sha-256.h
+@@ -10,7 +10,10 @@
+ 
+ #include "include/v8config.h"
+ 
+-#if !defined(V8_HOST_ARCH_PPC64) && !defined(V8_HOST_ARCH_S390X)
++// pyv8web: the CMake port does not build/link BoringSSL, so use the built-in
++// SHA-256 implementation (the Omaha-derived one) instead of <openssl/sha.h>.
++#if !defined(V8_HOST_ARCH_PPC64) && !defined(V8_HOST_ARCH_S390X) && \
++    !defined(V8_USE_BUILTIN_SHA256)
+ #define V8_BORINGSSL_SHA256 1
+ #else
+ #define V8_BORINGSSL_SHA256 0
 diff --git a/v8/src/utils/utils.h b/v8/src/utils/utils.h
 index 48eca5c2a..9ad743c9f 100644
 --- a/v8/src/utils/utils.h
@@ -1226,6 +1632,41 @@ index 6c69ecedc..5f9816456 100644
  }  // namespace wasm
  }  // namespace internal
  }  // namespace v8
+diff --git a/v8/src/wasm/stacks.cc b/v8/src/wasm/stacks.cc
+index 143ef14f3..d424cf433 100644
+--- a/v8/src/wasm/stacks.cc
++++ b/v8/src/wasm/stacks.cc
+@@ -177,9 +177,11 @@ void StackMemory::IterateWasmFXRoots(v8::internal::RootVisitor* v) {
+   IterateWasmFXArgBuffer(param_types_, [this, v](size_t index, int offset) {
+     if (static_cast<int>(index) < num_bound_args_ &&
+         param_types_[index].is_ref()) {
+-      v->VisitRootPointer(Root::kStackRoots, "wasm cont ref bound argument",
+-                          FullObjectSlot(reinterpret_cast<Address>(
+-                              this->arg_buffer_ + offset)));
++      // pyv8web/MSVC port: arg_buffer_ is already an Address, so the cast to
++      // the same type is ill-formed for cl.exe (C2440); pass it directly.
++      v->VisitRootPointer(
++          Root::kStackRoots, "wasm cont ref bound argument",
++          FullObjectSlot(this->arg_buffer_ + offset));
+     }
+   });
+ }
+diff --git a/v8/third_party/inspector_protocol/templates/TypeBuilder_h.template b/v8/third_party/inspector_protocol/templates/TypeBuilder_h.template
+index 38b1fcf6d..fdd0965b9 100644
+--- a/v8/third_party/inspector_protocol/templates/TypeBuilder_h.template
++++ b/v8/third_party/inspector_protocol/templates/TypeBuilder_h.template
+@@ -198,8 +198,9 @@ inline {{type.id}}::{{type.id}}Builder<STATE>& {{type.id}}::{{type.id}}Builder<S
+ }
+       {% else %}
+ template<int STATE>
+-inline {{type.id}}::{{type.id}}Builder<STATE | {{type.id}}::{{type.id}}Builder<STATE>::{{property_name}}Set>&
+-{{type.id}}::{{type.id}}Builder<STATE>::{{"set" | to_method_case}}{{property_name}}({{property_type.pass_type}} value) {
++inline auto
++{{type.id}}::{{type.id}}Builder<STATE>::{{"set" | to_method_case}}{{property_name}}({{property_type.pass_type}} value)
++    -> {{type.id}}Builder<STATE | {{property_name}}Set>& {
+   static_assert(!(STATE & {{property_name}}Set), "property {{property.name}} should not be set yet");
+   m_result->{{"set" | to_method_case}}{{property_name}}({{property_type.to_rvalue % "value"}});
+   return castState<{{property_name}}Set>();
 diff --git a/v8/third_party/rapidhash-v8/rapidhash.h b/v8/third_party/rapidhash-v8/rapidhash.h
 index c67b400cb..e7475bcad 100644
 --- a/v8/third_party/rapidhash-v8/rapidhash.h

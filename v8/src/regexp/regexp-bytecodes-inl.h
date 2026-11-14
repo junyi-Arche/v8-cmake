@@ -154,6 +154,14 @@ struct BytecodeOperandsTraits {
 template <Bytecode bc>
 struct BytecodeOperandNames;
 
+// pyv8web/MSVC port: cl.exe cannot constant-evaluate Name() (C3615) even
+// though kNames is a constexpr array; the function is only used for tracing
+// output at runtime, so drop the constexpr there.
+#if defined(V8_CC_MSVC) && !defined(__clang__)
+#define V8_OPERAND_NAME_CONSTEXPR
+#else
+#define V8_OPERAND_NAME_CONSTEXPR constexpr
+#endif
 #define DECLARE_OPERAND_NAMES(CamelName, OpNames, OpTypes, ...)           \
   template <>                                                             \
   struct BytecodeOperandNames<Bytecode::k##CamelName> {                   \
@@ -161,12 +169,13 @@ struct BytecodeOperandNames;
     using enum Operand;                                                   \
     static constexpr size_t kCount = detail::CountOf<UNPAREN(OpNames)>(); \
     static constexpr auto kNames = detail::SplitNames<kCount>(#OpNames);  \
-    static constexpr std::string_view Name(Operand op) {                  \
+    static V8_OPERAND_NAME_CONSTEXPR std::string_view Name(Operand op) {  \
       return kNames[static_cast<size_t>(op)];                             \
     }                                                                     \
   };
 REGEXP_BYTECODE_LIST(DECLARE_OPERAND_NAMES)
 #undef DECLARE_OPERAND_NAMES
+#undef V8_OPERAND_NAME_CONSTEXPR
 
 template <Bytecode bc, BytecodeOperandType... OpTypes>
 class BytecodeOperandsBase {
@@ -196,7 +205,10 @@ class BytecodeOperandsBase {
     return []<size_t... Is>(std::index_sequence<Is...>) {
       return std::tuple_cat([]<size_t I>() {
         constexpr auto id = static_cast<Operand>(I);
-        return std::tuple(std::integral_constant<Operand, id>{});
+        // pyv8web/MSVC port: class template argument deduction on std::tuple
+        // fails for cl.exe here, leaving the element type as <error> and
+        // breaking `ops.value` in ForEachOperand. Name the type explicitly.
+        return std::tuple<std::integral_constant<Operand, id>>{};
       }.template operator()<Is>()...);
     }(std::make_index_sequence<kCount>{});
   }
@@ -212,15 +224,31 @@ class BytecodeOperandsBase {
   // above is essentially a constant.
   template <typename Func>
   static constexpr void ForEachOperand(Func&& f) {
+#if defined(V8_CC_MSVC) && !defined(__clang__)
+    // pyv8web/MSVC port: cl.exe mis-deduces the element type of the tuple from
+    // GetOperandsTuple() (C2228: `.value` on an <error> type) and the empty
+    // operand list breaks the unary fold. The operand list is simply
+    // 0..kCount-1 in order, so expand an index sequence instead.
+    [&]<size_t... I>(std::index_sequence<I...>) {
+      (..., f.template operator()<static_cast<Operand>(I)>());
+    }(std::make_index_sequence<kCount>{});
+#else
     constexpr auto filtered_ops = GetOperandsTuple();
     std::apply([&](auto... ops) { (..., f.template operator()<ops.value>()); },
                filtered_ops);
+#endif
   }
 
   // Similar to ForEachOperand, but additionally provides the current index as
   // a template argument. The index is a sequential index of operands.
   template <typename Func>
   static constexpr void ForEachOperandWithIndex(Func&& f) {
+#if defined(V8_CC_MSVC) && !defined(__clang__)
+    // pyv8web/MSVC port: see ForEachOperand.
+    [&]<size_t... I>(std::index_sequence<I...>) {
+      (..., f.template operator()<static_cast<Operand>(I), I>());
+    }(std::make_index_sequence<kCount>{});
+#else
     constexpr auto filtered_ops = GetOperandsTuple();
     [&]<size_t... I>(std::index_sequence<I...>) {
       (...,
@@ -228,6 +256,7 @@ class BytecodeOperandsBase {
            std::tuple_element_t<I, decltype(filtered_ops)>::value /* Operand */,
            I /* Index */>());
     }(std::make_index_sequence<std::tuple_size_v<decltype(filtered_ops)>>{});
+#endif
   }
 
   // Similar to above, but calls |f| only for operands of a given type.

@@ -854,7 +854,9 @@ void WasmShuffleAnalyzer::ProcessShuffleOfLoads(const Simd128ShuffleOp& shuffle,
 
   if (GetDemandedBytes(&shuffle).IsAll()) {
     // Full width shuffles.
-    SimdShuffle::ShuffleArray shuffle_bytes;
+    // pyv8web/MSVC port: an alias template needs an explicit (possibly
+    // empty) argument list; cl.exe rejects the elided form with C2641.
+    SimdShuffle::ShuffleArray<> shuffle_bytes;
     std::copy_n(shuffle.shuffle.begin(), kSimd128Size, shuffle_bytes.begin());
     auto canonical = SimdShuffle::TryMatchCanonical(shuffle_bytes);
     switch (canonical) {

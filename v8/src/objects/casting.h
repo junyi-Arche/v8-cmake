@@ -280,9 +280,11 @@ template <typename To, typename From, template <typename> class Holder>
   requires HasTryCastImplementation<Holder, To, From>
 inline bool TryCast(Holder<From> value, Holder<To>* out) {
   // See SbxCast for why only TrustedObject, Smi, and Oddball are allowed.
+#if !(defined(V8_CC_MSVC) && !defined(__clang__))
   static_assert(!is_subtype_v<To, TrustedObject> ||
                     is_subtype_v<From, Union<Smi, Oddball, TrustedObject>>,
                 "Type of untrusted objects cannot be checked reliably");
+#endif  // !cl.exe: see objects/tagged.h
   if (!Is<To>(value)) return false;
   *out = UncheckedCast<To>(value);
   return true;
@@ -519,6 +521,7 @@ template <typename To, typename From, template <typename> class Holder>
   requires HasCastImplementation<Holder, To, From>
 inline Holder<To> Cast(Holder<From> value,
                        SourceLocation loc = SourceLocation::CurrentIfDebug()) {
+#if !(defined(V8_CC_MSVC) && !defined(__clang__))
   static_assert(
       !is_subtype_v<To, TrustedObject> || is_subtype_v<From, To>,
       "Down-casting to trusted objects is verboten. Pick one of:\n"
@@ -531,6 +534,7 @@ inline Holder<To> Cast(Holder<From> value,
       "      Tagged<Trusted> t = "
       "TrustedCast<Trusted>(TrustedPointerField::ReadTrustedPointerField<"
       "kTrustedTag>(obj, ...));\n");
+#endif  // !cl.exe: see objects/tagged.h
   DCHECK_WITH_SANDBOX_ACCESS_AND_MSG_AND_LOC(
       NullOrIs<To>(value), V8_PRETTY_FUNCTION_VALUE_OR("Cast type check"), loc);
   return UncheckedCast<To>(value);

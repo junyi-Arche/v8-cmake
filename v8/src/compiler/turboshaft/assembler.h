@@ -1104,17 +1104,17 @@ class ScopedVar : public Var<T, Assembler> {
 //       ...
 //     }
 #if defined(V8_CC_MSVC) && !defined(__clang__)
-// pyv8web/MSVC port: UNREACHABLE() expands to a do-while *statement* with
-// cl.exe (the GCC/clang branch is the __builtin_unreachable() expression),
-// which cannot appear in the increment clause of a for. Use a flag-based
-// loop with the same shape instead: the body is still skipped unless a
-// `goto label` jumps into it. This drops the "forgot to forward" crash of
-// the fallthrough path, which is only a debugging aid.
-#define LABEL_BLOCK(label)                     \
-  for (bool v8_label_block_done_ = false;;)    \
-    if (v8_label_block_done_++)                \
-      break;                                   \
-    else                                       \
+// pyv8web/MSVC port: with cl.exe UNREACHABLE() expands to a do-while
+// *statement* (the GCC/clang branch is the __builtin_unreachable()
+// expression), which cannot appear in the increment clause of a for. Use a
+// [[noreturn]] bool helper instead so the loop keeps the exact shape of the
+// original: leaving the increment empty made the optimiser drop the body,
+// including the label that `goto` jumps into.
+[[noreturn]] inline bool TurboshaftLabelBlockUnreachable() {
+  V8_Fatal(__FILE__, __LINE__, "unreachable code");
+}
+#define LABEL_BLOCK(label)                 \
+  for (; false; TurboshaftLabelBlockUnreachable()) \
   label:
 #else
 #define LABEL_BLOCK(label)     \

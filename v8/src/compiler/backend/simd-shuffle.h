@@ -322,10 +322,18 @@ class V8_EXPORT_PRIVATE SimdShuffle {
     kS8x4DeinterleaveOddOddOdd,
   };
 
+#if defined(V8_CC_MSVC) && !defined(__clang__)
+  // pyv8web/MSVC port: cl.exe cannot deduce constrained alias templates
+  // (C2641: "cannot deduce template arguments for ShuffleArray"). The requires
+  // clause is a compile-time guard only, so drop it for cl.exe.
+  template <size_t N = kSimd128Size>
+  using ShuffleArray = std::array<uint8_t, N>;
+#else
   template <size_t N = kSimd128Size>
     requires(N == kSimd128QuarterSize || N == kSimd128HalfSize ||
              N == kSimd128Size || N == kSimd256Size)
   using ShuffleArray = std::array<uint8_t, N>;
+#endif
 
   static CanonicalShuffle TryMatchCanonical(
       const ShuffleArray<kSimd128Size>& shuffle);

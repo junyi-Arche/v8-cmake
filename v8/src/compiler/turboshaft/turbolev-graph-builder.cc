@@ -5907,6 +5907,27 @@ class GraphBuildingNodeProcessor {
     __ SetContinuationPreservedEmbedderData(data);
     return maglev::ProcessResult::kContinue;
   }
+
+#elif defined(V8_CC_MSVC) && !defined(__clang__)
+  // pyv8web/MSVC port: the Maglev Get/SetContinuationPreservedEmbedderData
+  // nodes are declared unconditionally in maglev-ir.h, but the Turboshaft
+  // assembler methods that lower them exist only under
+  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA. Without these overloads
+  // the generic dispatch in Run() fails with C2665. Both nodes are only
+  // produced when the embedder uses the continuation API, which this build
+  // does not, so mapping to undefined / skipping is safe here.
+  maglev::ProcessResult Process(
+      maglev::GetContinuationPreservedEmbedderData* node,
+      const maglev::ProcessingState&) {
+    SetMap(node, __ UndefinedConstant());
+    return maglev::ProcessResult::kContinue;
+  }
+  maglev::ProcessResult Process(
+      maglev::SetContinuationPreservedEmbedderData* node,
+      const maglev::ProcessingState&) {
+    node->SetValueLocationConstraints();
+    return maglev::ProcessResult::kContinue;
+  }
 #endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
 
   maglev::ProcessResult Process(maglev::AssertInt32* node,

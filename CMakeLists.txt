@@ -200,6 +200,15 @@ set(
   $<${is-win}:V8_OS_WIN32>
 )
 
+# pyv8web: no BoringSSL in this build -- use V8's built-in SHA-256 so that
+# <openssl/sha.h> is never needed (src/utils/sha-256.h).
+list(APPEND v8_defines V8_USE_BUILTIN_SHA256)
+# pyv8web: BUILD.gn sets BUILTIN_BLOCK_POSITION from
+# v8_enable_builtins_block_position (default on) in v8_internal_config, which
+# every internal target shares. The recursive GLOB always compiles
+# src/compiler/backend/block-position.cc, so the macro must be defined too.
+list(APPEND v8_defines BUILTIN_BLOCK_POSITION)
+
 set(disable-exceptions
   $<$<CXX_COMPILER_ID:MSVC>:/EHs-c->
   $<$<CXX_COMPILER_ID:AppleClang>:-fno-exceptions>
@@ -427,6 +436,19 @@ list(REMOVE_ITEM builtin-sources v8/src/builtins/builtins-temporal.cc)
 # and the surrounding class definition cannot be compiled by cl.exe (C3200
 # on the template-template argument; upstream builds it with clang-cl).
 list(REMOVE_ITEM builtin-sources v8/src/builtins/builtins-number-tsa.cc)
+
+# 16.0: BUILD.gn only compiles the ETW diagnostics under
+# `is_win && v8_enable_etw_stack_walking`. DrumBrake-style, the recursive GLOB
+# picks them up unconditionally and they reference
+# V8FileLogger::SetEtwCodeEventHandler / Isolate::SetETWTracingEnabled, which
+# only exist when V8_ENABLE_ETW_STACK_WALKING is defined.
+list(REMOVE_ITEM diagnostic-sources
+  v8/src/diagnostics/etw-debug-win.cc
+  v8/src/diagnostics/etw-isolate-capture-state-monitor-win.cc
+  v8/src/diagnostics/etw-isolate-load-script-data-win.cc
+  v8/src/diagnostics/etw-isolate-operations-win.cc
+  v8/src/diagnostics/etw-jit-metadata-win.cc
+  v8/src/diagnostics/etw-jit-win.cc)
 list(REMOVE_ITEM regexp-sources v8/src/regexp/gen-regexp-special-case.cc)
 list(REMOVE_ITEM runtime-sources v8/src/runtime/runtime-intl.cc)
 list(REMOVE_ITEM snapshot-sources
@@ -767,6 +789,14 @@ add_custom_command(
     $<$<PLATFORM_ID:Linux>:--target_os=linux>
     $<$<PLATFORM_ID:Windows>:--target_os=win>
     --turbo_instruction_scheduling
+    # pyv8web: mksnapshot emits gas-style .cfi_* directives for the
+    # hand-written (JSEntry) builtins, which MASM cannot assemble. Windows
+    # unwind data comes from the Win writer's UNWIND_INFO instead, so drop
+    # them before ml64 sees the file.
+    COMMAND
+      $<$<PLATFORM_ID:Windows>:${Python_EXECUTABLE}>
+      $<$<PLATFORM_ID:Windows>:${PROJECT_SOURCE_DIR}/cmake/strip_cfi.py>
+      $<$<PLATFORM_ID:Windows>:${PROJECT_BINARY_DIR}/embedded.S>
   DEPENDS
     mksnapshot
   OUTPUT
@@ -1218,6 +1248,10 @@ add_executable(mksnapshot
   v8/src/snapshot/embedded/platform-embedded-file-writer-generic.cc
   v8/src/snapshot/embedded/platform-embedded-file-writer-mac.cc
   v8/src/snapshot/embedded/platform-embedded-file-writer-win.cc
+  # pyv8web: MakeEmbeddedFileWriter() references the ZOS writer
+  # unconditionally (runtime dispatch on the target OS), so its
+  # implementation must be linked even on x64 Windows.
+  v8/src/snapshot/embedded/platform-embedded-file-writer-zos.cc
   v8/src/snapshot/mksnapshot.cc
   v8/src/snapshot/snapshot-empty.cc
 )

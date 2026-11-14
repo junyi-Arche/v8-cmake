@@ -511,8 +511,10 @@ class V8_EXPORT_PRIVATE CodeAssembler {
       // TODO(olivf): Provide a safe SbxCast like in C++.
       // Trusted objects can only be cast with TrustedCast. But proceed with
       // caution, there is no safety net!
+#if !(defined(V8_CC_MSVC) && !defined(__clang__))
       static_assert(AllowDowncastToTrusted || (!is_subtype_v<A, TrustedObject>),
                     "Down-casting to trusted objects is verboten.");
+#endif  // !cl.exe: see objects/tagged.h
       static_assert(!std::is_same_v<A, Tagged<MaybeObject>>,
                     "Can't cast to Tagged<MaybeObject>, use explicit "
                     "conversion functions. ");

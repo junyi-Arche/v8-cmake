@@ -10,7 +10,10 @@
 
 #include "include/v8config.h"
 
-#if !defined(V8_HOST_ARCH_PPC64) && !defined(V8_HOST_ARCH_S390X)
+// pyv8web: the CMake port does not build/link BoringSSL, so use the built-in
+// SHA-256 implementation (the Omaha-derived one) instead of <openssl/sha.h>.
+#if !defined(V8_HOST_ARCH_PPC64) && !defined(V8_HOST_ARCH_S390X) && \
+    !defined(V8_USE_BUILTIN_SHA256)
 #define V8_BORINGSSL_SHA256 1
 #else
 #define V8_BORINGSSL_SHA256 0
