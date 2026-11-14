@@ -2228,19 +2228,15 @@ DEFINE_NEG_NEG_IMPLICATION(wasm_bounds_checks, wasm_enforce_bounds_checks)
 // systems with Apple silicon currently do provide trapping behaviour for
 // partially-out-of-bound writes, so we assume we can rely on that on MacOS,
 // since doing so provides better performance for writes.
-// pyv8web/MSVC port: MSVC does not accept preprocessor directives inside a
-// macro argument list (error C2121). Hoist the default into a macro instead.
+DEFINE_BOOL(
 #if V8_TARGET_ARCH_RISCV64 || (V8_TARGET_ARCH_ARM64 && !V8_OS_MACOS)
-#define V8_DEFAULT_WASM_PARTIAL_OOB_WRITES_ARE_NOOPS false
+    wasm_partial_oob_writes_are_noops, false,
 #else
-#define V8_DEFAULT_WASM_PARTIAL_OOB_WRITES_ARE_NOOPS true
+    wasm_partial_oob_writes_are_noops, true,
 #endif
-DEFINE_BOOL(wasm_partial_oob_writes_are_noops,
-            V8_DEFAULT_WASM_PARTIAL_OOB_WRITES_ARE_NOOPS,
-            "assume partially out-of-bounds writes are no-ops and can use the "
-            "trap handler. Note that explicitly enabling this flag (if not "
-            "enabled by default) can affect the spec-compliance of V8.")
-#undef V8_DEFAULT_WASM_PARTIAL_OOB_WRITES_ARE_NOOPS
+    "assume partially out-of-bounds writes are no-ops and can use the trap "
+    "handler. Note that explicitly enabling this flag (if not enabled by "
+    "default) can affect the spec-compliance of V8.")
 
 DEFINE_BOOL(wasm_math_intrinsics, true,
             "intrinsify some Math imports into wasm")

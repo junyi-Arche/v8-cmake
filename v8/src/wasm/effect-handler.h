@@ -11,14 +11,7 @@ namespace v8 {
 namespace internal {
 namespace wasm {
 
-/* pyv8web/MSVC port: the struct has a single uint32_t member, so packing
- * changes nothing. Keep the attribute for clang/GCC where upstream uses it. */
-#if defined(__clang__) || defined(__GNUC__)
-#define V8_WASM_EFFECT_HANDLER_PACKED __attribute__((packed))
-#else
-#define V8_WASM_EFFECT_HANDLER_PACKED
-#endif
-struct V8_WASM_EFFECT_HANDLER_PACKED EffectHandlerTagIndex {
+struct __attribute__((packed)) EffectHandlerTagIndex {
   using IsSwitchField = base::BitField<bool, 0, 1>;
   using IndexField = IsSwitchField::Next<uint32_t, 31>;
   uint32_t tag_and_kind;
@@ -33,7 +26,6 @@ struct V8_WASM_EFFECT_HANDLER_PACKED EffectHandlerTagIndex {
 
   uint32_t raw_value() const { return tag_and_kind; }
 };
-#undef V8_WASM_EFFECT_HANDLER_PACKED
 }  // namespace wasm
 }  // namespace internal
 }  // namespace v8

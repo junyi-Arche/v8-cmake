@@ -24,14 +24,8 @@ namespace v8::internal {
 class DescriptorArray;
 
 namespace {
-#if defined(V8_CC_MSVC) && !defined(__clang__)
-// pyv8web/MSVC port: cl.exe has no __attribute__((tls_model(...))); its
-// thread_local already maps to __declspec(thread).
-thread_local MarkingBarrier* current_marking_barrier = nullptr;
-#else
 __attribute__((tls_model(V8_TLS_MODEL))) thread_local MarkingBarrier*
     current_marking_barrier V8_CONSTINIT = nullptr;
-#endif
 }  // namespace
 
 MarkingBarrier* WriteBarrier::CurrentMarkingBarrier(

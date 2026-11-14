@@ -177,11 +177,9 @@ void StackMemory::IterateWasmFXRoots(v8::internal::RootVisitor* v) {
   IterateWasmFXArgBuffer(param_types_, [this, v](size_t index, int offset) {
     if (static_cast<int>(index) < num_bound_args_ &&
         param_types_[index].is_ref()) {
-      // pyv8web/MSVC port: arg_buffer_ is already an Address, so the cast to
-      // the same type is ill-formed for cl.exe (C2440); pass it directly.
-      v->VisitRootPointer(
-          Root::kStackRoots, "wasm cont ref bound argument",
-          FullObjectSlot(this->arg_buffer_ + offset));
+      v->VisitRootPointer(Root::kStackRoots, "wasm cont ref bound argument",
+                          FullObjectSlot(reinterpret_cast<Address>(
+                              this->arg_buffer_ + offset)));
     }
   });
 }

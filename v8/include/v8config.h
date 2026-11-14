@@ -747,26 +747,12 @@ path. Add it with -I<path> to the command line
 //
 // [[no_unique_address]] comes in C++20 but supported in clang with
 // -std >= c++11.
-// pyv8web/MSVC port: cl.exe has no __attribute__((packed)). A push/pop pair
-// around the struct is the MSVC equivalent (pack(push) does work inside a
-// class body as long as it is not preceded by a pack(pop)).
-#if defined(V8_CC_MSVC) && !defined(__clang__)
-#define V8_STRUCT_PACKED_BEGIN __pragma(pack(push, 1))
-#define V8_STRUCT_PACKED_END __pragma(pack(pop))
-#else
-#define V8_STRUCT_PACKED_BEGIN
-#define V8_STRUCT_PACKED_END
-#endif
-
-// pyv8web/MSVC port: MSVC implements [[msvc::no_unique_address]] but does not
-// advertise it via __has_cpp_attribute, so V8_HAS_CPP_ATTRIBUTE_NO_UNIQUE_ADDRESS
-// evaluates to 0 and V8 silently falls back to a no-op. Without the attribute
-// the zero-sized IsolateData padding members each occupy one byte and every
-// generated-code offset is wrong. Force the MSVC attribute directly.
-#if defined(V8_CC_MSVC) && !defined(__clang__)
-#define V8_NO_UNIQUE_ADDRESS [[msvc::no_unique_address]]
-#elif V8_HAS_CPP_ATTRIBUTE_NO_UNIQUE_ADDRESS
+#if V8_HAS_CPP_ATTRIBUTE_NO_UNIQUE_ADDRESS
 #if defined(V8_CC_MSVC) && V8_HAS_CPP_ATTRIBUTE(msvc::no_unique_address)
+// Unfortunately MSVC ignores [[no_unique_address]] (see
+// https://devblogs.microsoft.com/cppblog/msvc-cpp20-and-the-std-cpp20-switch/#msvc-extensions-and-abi),
+// and clang-cl matches it for ABI compatibility reasons. We need to prefer
+// [[msvc::no_unique_address]] when available if we actually want any effect.
 #define V8_NO_UNIQUE_ADDRESS [[msvc::no_unique_address]]
 #else
 #define V8_NO_UNIQUE_ADDRESS [[no_unique_address]]

@@ -89,14 +89,6 @@ struct JSBuiltinDispatchHandleRoot {
 // and compiled code (including builtins, interpreter bytecode handlers and
 // optimized code). The compiled code accesses the isolate data fields
 // indirectly via the root register.
-// pyv8web/MSVC port: MSVC error C2229 forbids zero-sized arrays in the
-// middle of a class. An empty [[msvc::no_unique_address]] struct takes
-// zero bytes and keeps all following offsets unchanged.
-template <int N>
-struct V8PaddingStorage { uint8_t bytes[N]; };
-template <>
-struct V8PaddingStorage<0> {};
-
 class IsolateData final {
  public:
   IsolateData(Isolate* isolate, IsolateGroup* group)
@@ -383,8 +375,8 @@ class IsolateData final {
   uint8_t has_lazy_closures_ = 0;
 
   // Ensure the following tables are kSystemPointerSize-byte aligned.
-  V8_NO_UNIQUE_ADDRESS
-  V8PaddingStorage<kTablesAlignmentPaddingSize> tables_alignment_padding_;
+  V8_NO_UNIQUE_ADDRESS uint8_t
+      tables_alignment_padding_[kTablesAlignmentPaddingSize];
 
   // A pointer to the static offsets vector (used to pass results from the
   // irregexp engine to the rest of V8), or nullptr if the static offsets
@@ -501,8 +493,7 @@ class IsolateData final {
 #endif
 
   // Padding for aligning raw_arguments_.
-  V8_NO_UNIQUE_ADDRESS
-  V8PaddingStorage<kRawArgumentsPaddingSize> raw_arguments_padding_;
+  V8_NO_UNIQUE_ADDRESS uint8_t raw_arguments_padding_[kRawArgumentsPaddingSize];
 
   // Storage for raw values passed from CSA/Torque to runtime functions.
   struct RawArgument {
@@ -527,8 +518,7 @@ class IsolateData final {
   // following the IsolateData field predictable. This solves the issue with
   // C++ compilers for 32-bit platforms which are not consistent at aligning
   // int64_t fields.
-  V8_NO_UNIQUE_ADDRESS
-  V8PaddingStorage<kTrailingPaddingSize> trailing_padding_;
+  V8_NO_UNIQUE_ADDRESS uint8_t trailing_padding_[kTrailingPaddingSize];
 
   V8_INLINE static void AssertPredictableLayout();
 
@@ -552,9 +542,7 @@ void IsolateData::AssertPredictableLayout() {
   static_assert(std::is_standard_layout_v<LinearAllocationArea>);
 #define V(PureName, Size, Name)                                             \
   static_assert(std::is_standard_layout_v<decltype(IsolateData::Name##_)>); \
-  static_assert(Size == 0 ||                                             \
-                offsetof(IsolateData, Name##_) == k##PureName##Offset,  \
-                #PureName);
+  static_assert(offsetof(IsolateData, Name##_) == k##PureName##Offset);
   ISOLATE_DATA_FIELDS(V)
 #undef V
   static_assert(sizeof(IsolateData) == IsolateData::kSizeOffset);

@@ -26,10 +26,8 @@ TNode<JSAny> CodeStubAssembler::Call(TNode<Context> context,
                                      ConvertReceiverMode mode,
                                      TNode<JSAny> receiver, TArgs... args) {
   static_assert(is_subtype_v<TCallable, Object>);
-#if !(defined(V8_CC_MSVC) && !defined(__clang__))
   static_assert(!is_subtype_v<TCallable, JSFunction>,
                 "Use CallFunction() when the callable is a JSFunction.");
-#endif  // !cl.exe: see objects/tagged.h
 
   if (IsUndefinedConstant(receiver) || IsNullConstant(receiver)) {
     DCHECK_NE(mode, ConvertReceiverMode::kNotNullOrUndefined);

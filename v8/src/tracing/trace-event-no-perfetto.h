@@ -862,21 +862,11 @@ struct TerminatingFlow {
       TRACE_EVENT_FLAG_NONE)
 
 // Macro to efficiently determine if a given category group is enabled.
-#if defined(V8_CC_MSVC) && !defined(__clang__)
-// pyv8web/MSVC port: cl.exe does not support GNU statement expressions
-// `({ ... })`; an immediately-invoked lambda keeps the same scope and value.
-#define TRACE_EVENT_CATEGORY_ENABLED(category)                          \
-  ([&]() -> bool {                                                      \
-    INTERNAL_TRACE_EVENT_GET_CATEGORY_INFO(category);                   \
-    return INTERNAL_TRACE_EVENT_CATEGORY_GROUP_ENABLED_FOR_RECORDING_MODE(); \
-  }())
-#else
 #define TRACE_EVENT_CATEGORY_ENABLED(category)                        \
   ({                                                                  \
     INTERNAL_TRACE_EVENT_GET_CATEGORY_INFO(category);                 \
     INTERNAL_TRACE_EVENT_CATEGORY_GROUP_ENABLED_FOR_RECORDING_MODE(); \
   })
-#endif
 
 #define TRACE_EVENT_CATEGORY_GROUP_ENABLED(category_group, ret)             \
   do {                                                                      \

@@ -25,22 +25,11 @@ inline constexpr bool IsSafeInteger(int64_t value) {
 }
 
 inline constexpr bool IsSafeInteger(double value) {
-#if defined(V8_CC_MSVC) && !defined(__clang__)
-  // pyv8web/MSVC port: cl.exe's std::isfinite / std::trunc are not constexpr
-  // (C3615 when this is evaluated in a constant expression in C++20 mode).
-  // Hand-rolled equivalent: reject NaN, reject out-of-range, then require an
-  // exact integer round-trip.
-  constexpr double kMaxD = 9007199254740991.0;  // 2^53 - 1
-  if (value != value) return false;             // NaN
-  if (value < -kMaxD || value > kMaxD) return false;
-  return static_cast<double>(static_cast<int64_t>(value)) == value;
-#else
   if (!std::isfinite(value)) return false;
   if (value != std::trunc(value)) return false;
   double max = static_cast<double>(kMaxSafeInteger);
   double min = static_cast<double>(kMinSafeInteger);
   return value >= min && value <= max;
-#endif
 }
 
 class Range {

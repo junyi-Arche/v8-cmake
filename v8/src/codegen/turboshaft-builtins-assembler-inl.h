@@ -1084,10 +1084,8 @@ class BuiltinsReducer : public Next {
   V<JSAny> Call(V<Context> context, V<Callable> callable,
                 ConvertReceiverMode mode, V<JSAny> receiver, V<Args>... args) {
     static_assert(is_subtype_v<Callable, Object>);
-#if !(defined(V8_CC_MSVC) && !defined(__clang__))
     static_assert(!is_subtype_v<Callable, JSFunction>,
                   "Use CallFunction() when the callable is a JSFunction.");
-#endif  // !cl.exe: see objects/tagged.h
 
     Handle<HeapObject> tagged;
     if (__ matcher().MatchHeapConstant(receiver, &tagged) &&

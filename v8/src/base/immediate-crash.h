@@ -178,9 +178,7 @@
 #else
 
 // This is supporting build with MSVC where there is no __builtin_unreachable().
-// pyv8web/MSVC port: without an unreachable hint, functions whose only exit
-// is UNREACHABLE() trigger MSVC error C4716 ("must return a value").
-#define IMMEDIATE_CRASH()        do {                             WRAPPED_TRAP_SEQUENCE_();      __assume(false);             } while (false)
+#define IMMEDIATE_CRASH() WRAPPED_TRAP_SEQUENCE_()
 
 #endif  // defined(__clang__) || defined(COMPILER_GCC)
 

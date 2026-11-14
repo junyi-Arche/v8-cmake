@@ -1103,24 +1103,9 @@ class ScopedVar : public Var<T, Assembler> {
 //       if (...) goto no_change;
 //       ...
 //     }
-#if defined(V8_CC_MSVC) && !defined(__clang__)
-// pyv8web/MSVC port: with cl.exe UNREACHABLE() expands to a do-while
-// *statement* (the GCC/clang branch is the __builtin_unreachable()
-// expression), which cannot appear in the increment clause of a for. Use a
-// [[noreturn]] bool helper instead so the loop keeps the exact shape of the
-// original: leaving the increment empty made the optimiser drop the body,
-// including the label that `goto` jumps into.
-[[noreturn]] inline bool TurboshaftLabelBlockUnreachable() {
-  V8_Fatal(__FILE__, __LINE__, "unreachable code");
-}
-#define LABEL_BLOCK(label)                 \
-  for (; false; TurboshaftLabelBlockUnreachable()) \
-  label:
-#else
 #define LABEL_BLOCK(label)     \
   for (; false; UNREACHABLE()) \
   label:
-#endif
 
 // EmitProjectionReducer ensures that projections are always emitted right after
 // their input operation. To do so, when an operation with multiple outputs is

@@ -511,10 +511,8 @@ class V8_EXPORT_PRIVATE CodeAssembler {
       // TODO(olivf): Provide a safe SbxCast like in C++.
       // Trusted objects can only be cast with TrustedCast. But proceed with
       // caution, there is no safety net!
-#if !(defined(V8_CC_MSVC) && !defined(__clang__))
       static_assert(AllowDowncastToTrusted || (!is_subtype_v<A, TrustedObject>),
                     "Down-casting to trusted objects is verboten.");
-#endif  // !cl.exe: see objects/tagged.h
       static_assert(!std::is_same_v<A, Tagged<MaybeObject>>,
                     "Can't cast to Tagged<MaybeObject>, use explicit "
                     "conversion functions. ");
@@ -525,18 +523,9 @@ class V8_EXPORT_PRIVATE CodeAssembler {
                         std::is_convertible_v<TNode<A>, TNode<Object>>,
                     "Coercion to untagged values cannot be "
                     "checked.");
-#if defined(V8_CC_MSVC) && !defined(__clang__)
-      // pyv8web/MSVC port: cl.exe instantiates is_subtype_v before some V8
-      // types are complete, and objects/tagged.h then answers "convertible"
-      // for the still-incomplete hole sentinels (see the note there), which
-      // would make this hygiene check fire on legitimate casts. It is a
-      // code-cleanliness assertion only, so skip it for cl.exe.
-      static_assert(true, "Unnecessary CAST check disabled for cl.exe");
-#else
       static_assert(
           !FromTyped || !std::is_convertible_v<TNode<PreviousType>, TNode<A>>,
           "Unnecessary CAST: types are convertible.");
-#endif
 #ifdef DEBUG
       if (v8_flags.slow_debug_code) {
         TNode<ExternalReference> function = code_assembler_->ExternalConstant(

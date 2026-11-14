@@ -14,15 +14,6 @@ namespace v8::internal::compiler::turboshaft {
 
 #include "src/compiler/turboshaft/define-assembler-macros.inc"
 
-// pyv8web/MSVC port: the rescheduling stack instantiates
-// Assembler<ReschedulingReducer, GraphVisitor>, and cl.exe rejects
-// ReschedulingReducer as the outermost template-template argument (C3200).
-// This pass is only reachable through the experimental
-// --turboshaft-random-rescheduling / --wasm-random-rescheduling flags (both
-// off by default), so it becomes a no-op under cl.exe while the phase symbol
-// stays defined for the pipeline.
-#if !(defined(V8_CC_MSVC) && !defined(__clang__))
-
 template <class Next>
 class ReschedulingReducer : public Next {
  public:
@@ -382,13 +373,6 @@ void RandomReschedulingPhase::Run(PipelineData* data, Zone* temp_zone) {
                                 input_graph.GetOrCreateCompanion(), temp_zone);
   rescheduler.Run();
 }
-#else
-void RandomReschedulingPhase::Run(PipelineData* data, Zone* temp_zone) {
-  // No-op: see the note at the top of this file.
-  (void)data;
-  (void)temp_zone;
-}
-#endif
 
 #include "src/compiler/turboshaft/undef-assembler-macros.inc"
 

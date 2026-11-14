@@ -399,27 +399,6 @@ bool IndexIsInBounds(int index, int length) {
   BC_LABEL(Name) OPEN_BLOCK INIT(Name __VA_OPT__(, ) __VA_ARGS__);
 #endif  // ENABLE_DISASSEMBLER
 
-#if defined(V8_CC_MSVC) && !defined(__clang__)
-// pyv8web/MSVC port: routing the operands through std::apply over a tuple of
-// integral_constant makes cl.exe hit C1054 ("initializer nested too deeply")
-// on the bytecodes with many operands, and C2228 on the tuple element type.
-// Expand an index sequence instead: same order, much shallower nesting.
-#define INIT(Name, ...)                                                     \
-  constexpr Bytecode current_bc = Bytecode::k##Name;                        \
-  using Operands = BytecodeOperands<current_bc>;                            \
-  __VA_OPT__(                                                               \
-      auto argument_tuple =                                                 \
-          [&]<size_t... I>(std::index_sequence<I...>) {                     \
-            return std::make_tuple(                                         \
-                Operands::template Get<                                     \
-                    static_cast<typename Operands::Operand>(I)>(pc,         \
-                                                               no_gc)...);  \
-          }(std::make_index_sequence<Operands::kCount>{});                  \
-      auto [__VA_ARGS__] = argument_tuple;)                                 \
-  static_assert((IS_VA_EMPTY(__VA_ARGS__)) == (Operands::kCount == 0),      \
-                "Number of arguments to VISIT doesn't match the bytecodes " \
-                "operands count")
-#else
 #define INIT(Name, ...)                                                     \
   constexpr Bytecode current_bc = Bytecode::k##Name;                        \
   using Operands = BytecodeOperands<current_bc>;                            \
@@ -433,7 +412,6 @@ bool IndexIsInBounds(int index, int length) {
   static_assert((IS_VA_EMPTY(__VA_ARGS__)) == (Operands::kCount == 0),      \
                 "Number of arguments to VISIT doesn't match the bytecodes " \
                 "operands count")
-#endif
 
 namespace {
 

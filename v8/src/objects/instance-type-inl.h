@@ -66,8 +66,7 @@ constexpr std::optional<RootIndex> Map::TryGetMapRootIdxFor(InstanceType type) {
     default:
       break;
   }
-  // pyv8web/MSVC port: braced return of std::optional in constexpr.
-  return std::nullopt;
+  return {};
 }
 
 namespace InstanceTypeChecker {
@@ -91,19 +90,15 @@ HEAP_OBJECT_TYPE_LIST(DECL_TYPE)
 // Instance types which are associated with one unique map.
 
 template <class type>
-// pyv8web/MSVC port: cl.exe cannot constant-evaluate an explicitly
-// specialised consteval function template returning std::optional (C2440).
-// Every caller is a constexpr context, so constexpr is equivalent here.
-V8_INLINE constexpr std::optional<RootIndex> UniqueMapOfInstanceTypeCheck() {
-  // pyv8web/MSVC port: braced return is parsed as aggregate init (C2440).
-  return std::nullopt;
+V8_INLINE consteval std::optional<RootIndex> UniqueMapOfInstanceTypeCheck() {
+  return {};
 }
 
 #define INSTANCE_TYPE_MAP(V, rootIndexName, rootAccessorName, class_name) \
   template <>                                                             \
-  V8_INLINE constexpr std::optional<RootIndex>                            \
+  V8_INLINE consteval std::optional<RootIndex>                            \
   UniqueMapOfInstanceTypeCheck<InstanceTypeTraits::class_name>() {        \
-    return RootIndex::k##rootIndexName;                                  \
+    return {RootIndex::k##rootIndexName};                                 \
   }
 UNIQUE_INSTANCE_TYPE_MAP_LIST_GENERATOR(INSTANCE_TYPE_MAP, _)
 #undef INSTANCE_TYPE_MAP
@@ -209,10 +204,10 @@ UniqueMapRangeOfInstanceTypeRange(InstanceType first, InstanceType last) {
   for (size_t i = 0; i < kUniqueMapRangeOfInstanceTypeRangeList.size(); ++i) {
     if (kUniqueMapRangeOfInstanceTypeRangeList[i].first.first == first &&
         kUniqueMapRangeOfInstanceTypeRangeList[i].first.second == last) {
-      return kUniqueMapRangeOfInstanceTypeRangeList[i].second;
+      return {kUniqueMapRangeOfInstanceTypeRangeList[i].second};
     }
   }
-  return std::nullopt;
+  return {};
 }
 
 inline constexpr std::optional<TaggedAddressRange> UniqueMapRangeOfInstanceType(
