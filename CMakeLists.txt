@@ -1,15 +1,44 @@
 cmake_minimum_required(VERSION 3.12)
+# pyv8web: with cl.exe the MASM assembler is found on PATH, but clang-cl lives
+# in the LLVM tree, so CMake's ASM_MASM probe falls back to a bare "ml64" that
+# ninja's CreateProcess cannot resolve. Pin the absolute path (clang-cl only).
+if(WIN32 AND CMAKE_CXX_COMPILER MATCHES "clang-cl")
+  set(CMAKE_ASM_MASM_COMPILER
+      "D:/Program Files/Coding/Microsoft Vistual Studio/VC/Tools/MSVC/14.51.36231/bin/Hostx64/x64/ml64.exe"
+      CACHE FILEPATH "MASM assembler (clang-cl build)" FORCE)
+endif()
 set(CMAKE_USER_MAKE_RULES_OVERRIDE "${CMAKE_CURRENT_SOURCE_DIR}/cmake/MSVC.cmake")
 set(CMAKE_DISABLE_IN_SOURCE_BUILD ON)
 project(V8 LANGUAGES CXX C ASM)
 
 if(MSVC)
   enable_language(ASM_MASM)
+  # pyv8web: ml64 wants the object name attached to the flag (/Fo<obj>); with a
+  # space CMake's default rule ("-Fo <obj>") makes ml64 treat the path as an
+  # extra input and silently produce no object file, which then breaks the
+  # archive step. Only relevant for clang-cl, but harmless otherwise.
+  if(CMAKE_CXX_COMPILER MATCHES "clang-cl")
+    # pyv8web: 不展开 <FLAGS>。CMAKE_MSVC_RUNTIME_LIBRARY（如 debug CRT 诊断
+    # 构建的 /MDd）会被塞进 ASM_MASM 的 FLAGS，而 ml64 不认 /MDd 之类的 C/C++
+    # 选项，会静默不产出 .obj，随后归档报 "no such file"。汇编只需要 DEFINES
+    # 与 INCLUDES。
+    set(CMAKE_ASM_MASM_COMPILE_OBJECT
+        "<CMAKE_ASM_MASM_COMPILER> <DEFINES> <INCLUDES> /c /Fo<OBJECT> <SOURCE>")
+  endif()
   # 16.0 only ships an x64 MASM push_registers implementation.
-  set_property(
-    SOURCE ${PROJECT_BINARY_DIR}/embedded.S
-           v8/src/heap/base/asm/x64/push_registers_masm.asm
-    PROPERTY LANGUAGE ASM_MASM)
+  # pyv8web: with clang-cl the embedded blob writer deliberately emits gas
+  # syntax (V8_COMPILER_IS_MSVC is not defined for clang-cl), so embedded.S is
+  # assembled by clang's integrated assembler -- only push_registers_masm.asm
+  # stays MASM.
+  if(CMAKE_CXX_COMPILER MATCHES "clang-cl")
+    set_property(SOURCE v8/src/heap/base/asm/x64/push_registers_masm.asm
+                 PROPERTY LANGUAGE ASM_MASM)
+  else()
+    set_property(
+      SOURCE ${PROJECT_BINARY_DIR}/embedded.S
+             v8/src/heap/base/asm/x64/push_registers_masm.asm
+      PROPERTY LANGUAGE ASM_MASM)
+  endif()
 
 endif()
 
@@ -124,10 +153,19 @@ include(GenerateBuiltinsList)
 
 check_python_module_exists(PYTHON_HAVE_MARKUPSAFE markupsafe)
 
-if(MSVC)
-  # V8 16.0 macros use __VA_OPT__, which MSVC only supports with the
-  # conforming preprocessor (src/codegen/interface-descriptors.h).
+if(MSVC AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  # V8 16.0 macros use __VA_OPT__, which cl.exe only supports with the
+  # conforming preprocessor (src/codegen/interface-descriptors.h). clang-cl's
+  # preprocessor conforms already.
   add_compile_options(/Zc:preprocessor)
+endif()
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  # V8 applies -Wno-invalid-offsetof itself (BUILD.gn, clang warnings block):
+  # offsetof() on non-standard-layout types is a deliberate V8 pattern
+  # (src/objects/js-array-buffer-inl.h and friends). Restrict it to C/C++ --
+  # ml64 rejects it with A1013 (it reads "/W" as a numeric option).
+  add_compile_options($<$<COMPILE_LANGUAGE:C,CXX>:-Wno-invalid-offsetof>)
 endif()
 
 # V8 16.0 headers (#include/v8config.h) #error when __cplusplus <= 201703L.
@@ -152,7 +190,14 @@ string(CONCAT is-posix $<OR:
   ${is-aix}
 >)
 
-set(is-msvc $<CXX_COMPILER_ID:MSVC>)
+# pyv8web: clang-cl defines _MSC_VER and links against the MSVC runtime, so
+# everything gated on "is-msvc" (notably _HAS_EXCEPTIONS=0, which must match
+# `-fno-exceptions`) has to apply to it as well.
+if(WIN32)
+  set(is-msvc $<OR:$<CXX_COMPILER_ID:MSVC>,$<CXX_COMPILER_ID:Clang>>)
+else()
+  set(is-msvc $<CXX_COMPILER_ID:MSVC>)
+endif()
 
 # FIXME obviously
 set(is-arm 0)
@@ -202,6 +247,15 @@ set(
 
 # pyv8web: no BoringSSL in this build -- use V8's built-in SHA-256 so that
 # <openssl/sha.h> is never needed (src/utils/sha-256.h).
+if(WIN32)
+  # pyv8web: V8 16.0 never derives V8_OS_WIN from _WIN32 in a header -- the
+  # build system is expected to pass it. Without it DefaultEmbeddedTargetOs()
+  # (src/snapshot/embedded/platform-embedded-file-writer-base.cc) falls back to
+  # kGeneric, so mksnapshot emits gas-syntax assembly that MASM cannot
+  # assemble, and V8_OS_WIN64 (used by platform-embedded-file-writer-win.cc) is
+  # never derived either.
+  list(APPEND v8_defines V8_OS_WIN)
+endif()
 list(APPEND v8_defines V8_USE_BUILTIN_SHA256)
 # pyv8web: BUILD.gn sets BUILTIN_BLOCK_POSITION from
 # v8_enable_builtins_block_position (default on) in v8_internal_config, which
@@ -608,7 +662,11 @@ set_property(SOURCE v8/src/diagnostics/unwinding-info-win64.cc
       _WIN32_WINNT=${windows-version}
 )
 
-target_compile_definitions(v8_base_without_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>)
+target_compile_definitions(v8_base_without_compiler PRIVATE ${v8_defines} $<${is-msvc}:_HAS_EXCEPTIONS=0>
+    # pyv8web: platform-embedded-file-writer-base.cc lives in this target and its
+    # DefaultEmbeddedTargetOs() keys off V8_OS_WIN; spell it out here so mksnapshot
+    # picks the Win writer (MASM output) instead of the Generic one (gas syntax).
+    $<$<PLATFORM_ID:Windows>:V8_OS_WIN>)
 target_compile_options(v8_base_without_compiler PRIVATE ${disable-exceptions})
 if(enable-fPIC)
   target_compile_options(v8_base_without_compiler PRIVATE ${enable-fpic})
@@ -776,6 +834,14 @@ target_link_libraries(v8_snapshot
 )
 
 # Note: allow passing in v8_random_seed
+if(WIN32 AND NOT CMAKE_CXX_COMPILER MATCHES "clang-cl")
+  set(PYV8_STRIP_CFI_COMMAND
+      COMMAND ${Python_EXECUTABLE} ${PROJECT_SOURCE_DIR}/cmake/strip_cfi.py
+              ${PROJECT_BINARY_DIR}/embedded.S)
+else()
+  set(PYV8_STRIP_CFI_COMMAND "")
+endif()
+
 add_custom_command(
   COMMAND
     mksnapshot
@@ -793,10 +859,10 @@ add_custom_command(
     # hand-written (JSEntry) builtins, which MASM cannot assemble. Windows
     # unwind data comes from the Win writer's UNWIND_INFO instead, so drop
     # them before ml64 sees the file.
-    COMMAND
-      $<$<PLATFORM_ID:Windows>:${Python_EXECUTABLE}>
-      $<$<PLATFORM_ID:Windows>:${PROJECT_SOURCE_DIR}/cmake/strip_cfi.py>
-      $<$<PLATFORM_ID:Windows>:${PROJECT_BINARY_DIR}/embedded.S>
+    # pyv8web: only the MASM path needs the gas .cfi_* directives stripped;
+    # clang's integrated assembler consumes them directly. add_custom_command
+    # cannot evaluate $<CXX_COMPILER_ID:...>, so decide at configure time.
+    ${PYV8_STRIP_CFI_COMMAND}
   DEPENDS
     mksnapshot
   OUTPUT
@@ -1275,3 +1341,4 @@ target_include_directories(v8-adler32
   PUBLIC
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/v8/third_party/zlib>
 )
+

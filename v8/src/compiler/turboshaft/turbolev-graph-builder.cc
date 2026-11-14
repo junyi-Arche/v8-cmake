@@ -5907,6 +5907,26 @@ class GraphBuildingNodeProcessor {
     __ SetContinuationPreservedEmbedderData(data);
     return maglev::ProcessResult::kContinue;
   }
+#else
+  // V8 16.0.29 declares both Maglev nodes unconditionally (maglev-ir.h) but
+  // only implements their lowering and the matching builtin behind
+  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA, which stays off in this
+  // build (builtins-definitions.h has no matching entry). Accept the nodes and
+  // skip them so the dispatch in Run() still compiles; nothing in this project
+  // uses the continuation-preserved-embedder-data API.
+  maglev::ProcessResult Process(
+      maglev::GetContinuationPreservedEmbedderData* node,
+      const maglev::ProcessingState&) {
+    SetMap(node, __ UndefinedConstant());
+    return maglev::ProcessResult::kContinue;
+  }
+
+  maglev::ProcessResult Process(
+      maglev::SetContinuationPreservedEmbedderData* node,
+      const maglev::ProcessingState&) {
+    node->SetValueLocationConstraints();
+    return maglev::ProcessResult::kContinue;
+  }
 #endif  // V8_ENABLE_CONTINUATION_PRESERVED_EMBEDDER_DATA
 
   maglev::ProcessResult Process(maglev::AssertInt32* node,
